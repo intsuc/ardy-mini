@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=61.0", "cmake>=3.15"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ardy"
+version = "0.2.0"
+description = "ARDY: Autoregressive Diffusion with Hybrid Representation for Interactive Human Motion Generation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+  # Config / model wiring
+  "hydra-core>=1.3",
+  "omegaconf>=2.3",
+  "pydantic>=2.0",
+  # Core numerics
+  "numpy>=1.23,<2",
+  "scipy>=1.10",
+  # Inference stack
+  # NGC containers ship torch as a prerelease (e.g. pytorch:24.07-py3 has
+  # 2.4.0a0+...nv24.07, which sorts BELOW 2.4.0). The floor must include the
+  # a0 tag, otherwise pip replaces the container's torch with a PyPI wheel
+  # and breaks the container's matched torchvision/torch-tensorrt builds.
+  "torch>=2.4.0a0",
+  # NOTE: the vendored ardy/model/llm2vec has only been tested with transformers==5.8.1
+  "transformers==5.8.1",
+  "peft>=0.19",
+  "einops>=0.7",
+  # Capped below 1.26: vector-quantize-pytorch>=1.26 declares torch>=2.4,
+  # which the NGC prerelease torch (2.4.0a0) does NOT satisfy, so pip would
+  # replace the container's torch. 1.25.x only needs torch>=2.0, and we only
+  # use FSQ, whose API is unchanged. Revisit when moving to a newer container.
+  "vector-quantize-pytorch>=1.25,<1.26",
+  # Checkpoint download / loading
+  "huggingface_hub>=1.0",
+  "safetensors>=0.4",
+  # Client for the standalone text-encoder service (scripts/run_text_encoder_server.py)
+  "gradio_client>=2.0",
+  # Misc
+  "tqdm>=4.0",
+  "packaging>=21.0",
+]
+
+[project.urls]
+"Project Page" = "https://research.nvidia.com/labs/sil/projects/ardy/"
+
+[project.optional-dependencies]
+# Interactive viser demo (scripts/run_demo.py) and text-encoder server (scripts/run_text_encoder_server.py)
+demo = [
+  "viser @ git+https://github.com/nv-tlabs/kimodo-viser.git@7c82ad8f8640bad9dff8ded5c5eee908eeb08f11",
+  "gradio>=6.8.0",
+  "trimesh>=4.0",
+  "pandas>=2.0",
+  "pillow>=9.0",
+]
+# TensorRT acceleration (engine export at load time needs onnx).
+# NOTE: pinned exactly — TRT engine caches (engines/*.trt next to checkpoints)
+# only deserialize with the exact TensorRT version that built them.
+trt = [
+  "tensorrt-cu12==10.13.0.35",
+  "onnx>=1.16",
+]
+all = [
+  "ardy[demo,trt]",
+]
+
+[tool.setuptools]
+include-package-data = true
+zip-safe = false
+
+[tool.setuptools.package-data]
+ardy = ["assets/**/*"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+extend-select = ["I001"]  # Enable import sorting
+
+[tool.ruff.lint.isort]
+known-first-party = ["ardy"]
+known-third-party = ["torch", "numpy", "transformers", "tqdm"]
+force-sort-within-sections = false

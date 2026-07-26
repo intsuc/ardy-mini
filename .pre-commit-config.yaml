@@ -1,0 +1,43 @@
+repos:
+  # code formatting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.20
+    hooks:
+      - id: ruff-check
+        name: sort imports with ruff
+        args: [--select, I, --fix]
+      - id: ruff-format
+        name: format with ruff
+
+  # docstring formatting
+  - repo: https://github.com/PyCQA/docformatter
+    rev: v1.7.8
+    hooks:
+      - id: docformatter
+        args: [--in-place, --wrap-summaries=100, --wrap-descriptions=100, --style=sphinx]
+
+  # yaml formatting
+  - repo: https://github.com/google/yamlfmt
+    rev: v0.21.0
+    hooks:
+      - id: yamlfmt
+        args: [-formatter, retain_line_breaks_single=true]
+        exclude: |
+          (?x)^(
+            environment\.yaml$ |
+            \.gitlab-ci\.yml$ |
+            \.k8s/.*\.(ya?ml)$
+          )
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace # Trims trailing whitespace.
+      - id: end-of-file-fixer # Makes sure files end in a newline and only a newline.
+      - id: check-yaml # Attempts to load all yaml files to verify syntax.
+        exclude: |
+          (?x)^(
+            \.gitlab-ci\.yml$ |
+            \.k8s/.*\.(ya?ml)$
+          )
+exclude: "checkpoints/.*"
