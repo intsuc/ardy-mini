@@ -1,4 +1,12 @@
-# ARDY: Autoregressive Diffusion with Hybrid Representation for Interactive Human Motion Generation
+<!-- Modified by intsuc in 2026: added distilled MiniLM text-encoder support. -->
+
+# ARDY Mini: Distilled text conditioning for ARDY
+
+> [!IMPORTANT]
+> This is an unofficial derivative of
+> [nv-tlabs/ardy](https://github.com/nv-tlabs/ardy), modified by intsuc. It is
+> not affiliated with or endorsed by NVIDIA. The original ARDY name, project
+> links, banner, paper, and authorship below identify the upstream work.
 
 <p align="center">
   <a href="https://research.nvidia.com/labs/sil/projects/ardy/"><img src="https://img.shields.io/badge/Project-Page-blue" alt="Project Page"></a>
@@ -8,7 +16,11 @@
 
 ARDY is an autoregressive diffusion model designed for interactive motion generation, supporting online text prompting and flexible long-horizon kinematic constraints (root paths/waypoints, full-body keyframes, and sparse joint positions/rotations) with real-time responsiveness.
 
-This repo provides code, checkpoints, and demos to work with the pre-trained ARDY models introduced in the [SIGGRAPH paper](https://research.nvidia.com/labs/sil/projects/ardy/).
+This repository preserves the upstream code and demos and adds an experimental
+distilled MiniLM conditioning path. ARDY checkpoints are downloaded separately
+from their official providers. See [NOTICE](NOTICE) for the modification scope
+and [third-party model and data notices](THIRD_PARTY_MODELS_AND_DATA.md) before
+downloading external resources or training an artifact.
 
 ## Setup
 > This repo has mainly been tested on Ubuntu Linux 22.04 with RTX 4090, nvidia-driver-575, and Python 3.11.
@@ -39,7 +51,17 @@ pip install -e ".[all]"
 
 ### Set up Hugging Face token for text encoder
 
-The text encoder relies on the gated [meta-llama/Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) model, which requires:
+The text encoder relies on the gated
+[meta-llama/Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct)
+model.
+
+The production/teacher text-encoding path is Built with Meta Llama 3 and is
+subject to the
+[Meta Llama 3 Community License](https://github.com/meta-llama/llama3/blob/main/LICENSE)
+and Acceptable Use Policy. Neither the foundation-model weights nor the
+LLM2Vec adapters are included in this repository.
+
+Using the model requires:
 
 - Your Hugging Face account has been granted access to the model page.
 - You provide a Hugging Face token at runtime.
@@ -64,10 +86,10 @@ ARDY checkpoints are available trained on various skeletons with differing FPS a
 
 | Model | Skeleton | Training Data | FPS | Horizon | Release Date | Hugging Face | License |
 |:-------|:-------------|:------:|:------:|:------:|:------:|:-------------:|:-------------:|
-| **ARDY-Core-RP-20FPS-Horizon40** | Core | [Bones Rigplay 1](https://bones.studio/datasets#rp01) | 20 | 40 | July 10, 2026 | [Link](https://huggingface.co/nvidia/ARDY-Core-RP-20FPS-Horizon40) | [NVIDIA Open Model](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-agreement/) |
-| **ARDY-Core-RP-20FPS-Horizon8** | Core | [Bones Rigplay 1](https://bones.studio/datasets#rp01) | 20 | 8 | July 10, 2026 | [Link](https://huggingface.co/nvidia/ARDY-Core-RP-20FPS-Horizon8) | [NVIDIA Open Model](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-agreement/) |
-| **ARDY-G1-RP-25FPS-Horizon52** | Unitree G1 | [Bones Rigplay 1](https://bones.studio/datasets#rp01) | 25 | 52 | July 10, 2026 | [Link](https://huggingface.co/nvidia/ARDY-G1-RP-25FPS-Horizon52) | [NVIDIA Open Model](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-agreement/) |
-| **ARDY-G1-RP-25FPS-Horizon8** | Unitree G1 | [Bones Rigplay 1](https://bones.studio/datasets#rp01) | 25 | 8 | July 10, 2026 | [Link](https://huggingface.co/nvidia/ARDY-G1-RP-25FPS-Horizon8) | [NVIDIA Open Model](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-agreement/) |
+| **ARDY-Core-RP-20FPS-Horizon40** | Core | [Bones Rigplay 1](https://bones.studio/datasets#rp01) | 20 | 40 | July 10, 2026 | [Link](https://huggingface.co/nvidia/ARDY-Core-RP-20FPS-Horizon40) | [NVIDIA Open Model](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/) |
+| **ARDY-Core-RP-20FPS-Horizon8** | Core | [Bones Rigplay 1](https://bones.studio/datasets#rp01) | 20 | 8 | July 10, 2026 | [Link](https://huggingface.co/nvidia/ARDY-Core-RP-20FPS-Horizon8) | [NVIDIA Open Model](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/) |
+| **ARDY-G1-RP-25FPS-Horizon52** | Unitree G1 | [Bones Rigplay 1](https://bones.studio/datasets#rp01) | 25 | 52 | July 10, 2026 | [Link](https://huggingface.co/nvidia/ARDY-G1-RP-25FPS-Horizon52) | [NVIDIA Open Model](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/) |
+| **ARDY-G1-RP-25FPS-Horizon8** | Unitree G1 | [Bones Rigplay 1](https://bones.studio/datasets#rp01) | 25 | 8 | July 10, 2026 | [Link](https://huggingface.co/nvidia/ARDY-G1-RP-25FPS-Horizon8) | [NVIDIA Open Model](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/) |
 
 
 **Coming soon!** We are working to train a version of ARDY on Rigplay 1 with the [SOMA body model](https://github.com/NVlabs/SOMA-X) skeleton.
@@ -79,6 +101,13 @@ Downloading data is only required for running the kinematically constrained gene
 **Bones SEED motion data**:
 The kinematically constrained generation demo samples constraints from motion sequences in the [Bones SEED](https://huggingface.co/datasets/bones-studio/seed) dataset. The motion data are provided in CSV format for G1. Corresponding text descriptions are retrieved from the metadata CSV during sampling.
 
+The dataset is not included in this repository. Users must independently
+qualify for access and comply with the
+[BONES Motion Capture Dataset License Agreement](https://bones.studio/info/seed-license).
+Training data includes [Motion Data by Bones Studio](https://bones.studio/).
+Use of the underlying dataset is subject to the BONES Motion Capture Dataset
+License Agreement.
+
 Please download the Bones SEED dataset and put them under the `datasets/bones-seed/` directory in the root of the repo. The directory structure should be as follows:
 ```
 datasets/bones-seed/
@@ -86,6 +115,35 @@ datasets/bones-seed/
   metadata/
     seed_metadata_v004.csv
 ```
+
+### Distilled MiniLM text encoder
+
+An experimental, checkpoint-specific text encoder distills the production
+LLM2Vec conditioning path into
+[`sentence-transformers/all-MiniLM-L6-v2`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2).
+It emits the Core40 root/body conditions directly and is intended for
+well-formed English motion prompts.
+
+No pretrained or fine-tuned MiniLM weights, teacher cache, prompt manifest, or
+prompt-level evaluation report is distributed by this source repository.
+After producing an artifact locally with the documented `uv` pipeline, select
+it for local inference with:
+
+```bash
+TEXT_ENCODER_MODE=local \
+TEXT_ENCODER=minilm \
+MINILM_TEXT_ENCODER_PATH=artifacts/minilm-ardy-core40 \
+CHECKPOINTS_DIR=checkpoints \
+uv run python scripts/generate.py "A person walks forward." --model core
+```
+
+An artifact produced by the documented recipe is compatible only with
+`ARDY-Core-RP-20FPS-Horizon40`. See
+[the MiniLM encoder guide](docs/minilm_encoder.md) for the design, complete
+`uv` training/evaluation pipeline, and local result layout. Aggregate
+measurements from the completed run are in
+[the MiniLM experiment report](docs/minilm_results.md) and the
+[machine-readable summary](reports/minilm_core40_summary.json).
 
 ---
 
@@ -284,9 +342,16 @@ If you use this code in your research, please cite:
 
 ## License
 
-This codebase is licensed under [Apache-2.0](LICENSE). Note that model checkpoints and data are licensed separately as indicated on the HuggingFace download pages.
+The source code in this repository is licensed under
+[Apache-2.0](LICENSE), subject to the retained upstream notices and
+[attributions](ATTRIBUTIONS.MD). The Apache-2.0 source license does not grant
+rights to ARDY checkpoints, Meta Llama 3, LLM2Vec model adapters, MiniLM model
+weights, BONES-SEED, locally trained student weights, or generated training and
+evaluation artifacts.
 
-This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use.
+Those resources have separate terms and are not distributed here. Review
+[THIRD_PARTY_MODELS_AND_DATA.md](THIRD_PARTY_MODELS_AND_DATA.md) before use or
+redistribution.
 
 ## Acknowledgments
 

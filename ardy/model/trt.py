@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Modified by intsuc in 2026: added distilled MiniLM text-encoder support.
 
 """TensorRT engine runtime wrappers with PyTorch-compatible interfaces.
 
@@ -101,7 +102,13 @@ class TRTEngine:
             if not tensor.is_contiguous():
                 tensor = tensor.contiguous()
                 inputs[name] = tensor
-            self.context.set_input_shape(name, tuple(tensor.shape))
+            shape_accepted = self.context.set_input_shape(name, tuple(tensor.shape))
+            if shape_accepted is False:
+                raise ValueError(
+                    f"TensorRT engine rejected shape {tuple(tensor.shape)} "
+                    f"for input {name!r}; engine shape is "
+                    f"{self.input_shapes.get(name)!r}."
+                )
             self.context.set_tensor_address(name, tensor.data_ptr())
 
         # Allocate outputs. Use the caller-provided shape when given, otherwise
@@ -173,6 +180,15 @@ class TRTCFGDenoiser(nn.Module):
         # Expose model attribute so denoising_step can access backbone dims
         self.model = denoiser
 
+        text_input_shape = self._engine.input_shapes.get("text_feat")
+        if text_input_shape is None or len(text_input_shape) != 3:
+            raise RuntimeError("TensorRT denoiser engine is missing a rank-3 'text_feat' input.")
+        self._text_feature_dim = int(text_input_shape[-1])
+        if self._text_feature_dim <= 0:
+            raise RuntimeError(
+                f"TensorRT denoiser engine must have a static text feature width; got {text_input_shape}."
+            )
+
     def __getattr__(self, name: str):
         try:
             return super().__getattr__(name)
@@ -217,6 +233,25 @@ class TRTCFGDenoiser(nn.Module):
         T_text = self._num_text_tokens
         device = token_seq_t.device
         mrep = self._motion_rep_dim
+
+        if text_feat.ndim != 3:
+            raise ValueError(f"text_feat must have shape [B, T, D], got {tuple(text_feat.shape)}")
+        if text_feat.shape[-1] != self._text_feature_dim:
+            raise ValueError(
+                f"Text feature width {text_feat.shape[-1]} does not match this "
+                f"TensorRT engine's width {self._text_feature_dim}. Rebuild the "
+                "denoiser engine for the active text encoder."
+            )
+        if text_feat.shape[1] > T_text:
+            raise ValueError(
+                f"Text input has {text_feat.shape[1]} tokens, but this TensorRT engine was built for at most {T_text}."
+            )
+        if text_feat_pad_mask.shape != text_feat.shape[:2]:
+            raise ValueError(
+                "text_feat_pad_mask shape must match text_feat's batch/token "
+                f"axes; got {tuple(text_feat_pad_mask.shape)} versus "
+                f"{tuple(text_feat.shape[:2])}."
+            )
 
         if first_heading_angle is None:
             first_heading_angle = torch.zeros(1, device=device, dtype=torch.float32)

@@ -1,4 +1,10 @@
+# Modified by intsuc in 2026: include distribution license and notice files.
+
 include setup.py
+include LICENSE
+include NOTICE
+include ATTRIBUTIONS.MD
+include THIRD_PARTY_MODELS_AND_DATA.md
 recursive-include ardy/assets *
 recursive-include MotionCorrection/src *.cpp *.h *.inl
 include MotionCorrection/CMakeLists.txt

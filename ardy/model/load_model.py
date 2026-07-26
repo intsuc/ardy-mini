@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Modified by intsuc in 2026: added distilled MiniLM text-encoder support.
 """Load Ardy diffusion models from local checkpoints or Hugging Face."""
 
 from pathlib import Path
@@ -28,7 +29,15 @@ TEXT_ENCODER_PRESETS = {
             "llm_dim": 4096,
             "device": "auto",
         },
-    }
+    },
+    "minilm": {
+        "target": "ardy.model.MiniLMArdyEncoder",
+        "kwargs": {
+            "model_name_or_path": "artifacts/minilm-ardy-core40",
+            "dtype": "bfloat16",
+            "device": "auto",
+        },
+    },
 }
 
 
@@ -54,7 +63,10 @@ def _build_api_text_encoder_conf(text_encoder_url: str) -> dict:
     }
 
 
-def _build_local_text_encoder_conf(text_encoder_fp32: bool = False) -> dict:
+def _build_local_text_encoder_conf(
+    text_encoder_fp32: bool = False,
+    expected_ardy_model: Optional[str] = None,
+) -> dict:
     text_encoder_name = get_env_var("TEXT_ENCODER", DEFAULT_TEXT_ENCODER)
     if text_encoder_name not in TEXT_ENCODER_PRESETS:
         available = ", ".join(sorted(TEXT_ENCODER_PRESETS))
@@ -63,6 +75,12 @@ def _build_local_text_encoder_conf(text_encoder_fp32: bool = False) -> dict:
     preset = TEXT_ENCODER_PRESETS[text_encoder_name]
     # Copy before overriding so the shared preset dict is never mutated.
     kwargs = dict(preset["kwargs"])
+    if text_encoder_name == "minilm":
+        kwargs["model_name_or_path"] = get_env_var(
+            "MINILM_TEXT_ENCODER_PATH",
+            kwargs["model_name_or_path"],
+        )
+        kwargs["expected_ardy_model"] = expected_ardy_model
     if text_encoder_fp32:
         kwargs["dtype"] = "float32"
     return {
@@ -75,6 +93,7 @@ def _select_text_encoder_conf(
     text_encoder_url: str,
     text_encoder_fp32: bool = False,
     mode: str = "auto",
+    expected_ardy_model: Optional[str] = None,
 ) -> tuple:
     """Return ``(conf, probe)``: the selected encoder conf plus the already-instantiated encoder
     when auto-mode probing built one (reused by the caller so the API client is not constructed
@@ -86,7 +105,7 @@ def _select_text_encoder_conf(
     - "auto": try API first, fallback to local if unreachable
     """
     if mode == "local":
-        return _build_local_text_encoder_conf(text_encoder_fp32), None
+        return _build_local_text_encoder_conf(text_encoder_fp32, expected_ardy_model), None
     if mode == "api":
         return _build_api_text_encoder_conf(text_encoder_url), None
 
@@ -97,11 +116,13 @@ def _select_text_encoder_conf(
         text_encoder(["healthcheck"])
         return api_conf, text_encoder
     except Exception as error:
+        local_encoder_name = get_env_var("TEXT_ENCODER", DEFAULT_TEXT_ENCODER)
         print(
-            "Text encoder service is unreachable, falling back to local LLM2Vec "
+            f"Text encoder service is unreachable, falling back to local "
+            f"{local_encoder_name} "
             f"encoder. ({type(error).__name__}: {error})"
         )
-        return _build_local_text_encoder_conf(text_encoder_fp32), None
+        return _build_local_text_encoder_conf(text_encoder_fp32, expected_ardy_model), None
 
 
 def load_text_encoder(
@@ -109,6 +130,7 @@ def load_text_encoder(
     url: Optional[str] = None,
     fp32: bool = False,
     device: Optional[str] = None,
+    expected_ardy_model: Optional[str] = None,
 ):
     """Select and instantiate a text encoder, ready for inference.
 
@@ -122,7 +144,11 @@ def load_text_encoder(
         url: Remote service URL. When None, falls back to the TEXT_ENCODER_URL
             env var.
         fp32: Use float32 instead of the default bfloat16.
-        device: Target device. When None, uses cuda if available else cpu.
+        device: Target device. When None, uses TEXT_ENCODER_DEVICE if set,
+            otherwise cuda if available and cpu as a fallback.
+        expected_ardy_model: Resolved ARDY model name used to reject a
+            checkpoint-specific direct-condition encoder trained for another
+            model.
 
     Returns:
         The instantiated text encoder placed on ``device``.
@@ -138,22 +164,43 @@ def load_text_encoder(
         )
 
     resolved_url = url or get_env_var("TEXT_ENCODER_URL", DEFAULT_TEXT_ENCODER_URL)
+    if device is None:
+        device = get_env_var("TEXT_ENCODER_DEVICE")
+    if device in (None, "auto"):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = str(device)
     print(
         f"Setting up text encoder (mode={mode}); first run may take a while...",
         flush=True,
     )
-    conf, text_encoder = _select_text_encoder_conf(resolved_url, fp32, mode=mode)
+    conf, text_encoder = _select_text_encoder_conf(
+        resolved_url,
+        fp32,
+        mode=mode,
+        expected_ardy_model=expected_ardy_model,
+    )
     if text_encoder is None:
-        # Placement is handled below via .to(); drop any device kwarg the preset
-        # may carry so it doesn't conflict (e.g. accelerate device_map="auto").
+        # Pass the final device into local constructors. Loading with "auto" and
+        # moving afterwards can transiently place a 16 GB LLM2Vec model on CUDA
+        # even when the caller explicitly requested CPU.
         conf = dict(conf)
-        conf.pop("device", None)
+        if "device" in conf:
+            conf["device"] = device
         text_encoder = instantiate_from_dict(conf)
 
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    ensure_metadata = getattr(text_encoder, "ensure_metadata", None)
+    if callable(ensure_metadata):
+        # Forced API mode did not perform auto-mode's healthcheck. Establish
+        # output schema/compatibility before a cache wrapper captures its
+        # namespace.
+        ensure_metadata()
+
     dtype = torch.float32 if fp32 else torch.bfloat16
-    return text_encoder.to(device=device, dtype=dtype)
+    text_encoder = text_encoder.to(device=device, dtype=dtype)
+    compatibility_check = getattr(text_encoder, "assert_compatible", None)
+    if expected_ardy_model is not None and callable(compatibility_check):
+        compatibility_check(expected_ardy_model)
+    return text_encoder
 
 
 def load_model(
@@ -235,7 +282,12 @@ def load_model(
             url=text_encoder_url,
             fp32=text_encoder_fp32,
             device=device,
+            expected_ardy_model=full_name,
         )
+
+    compatibility_check = getattr(text_encoder, "assert_compatible", None)
+    if callable(compatibility_check):
+        compatibility_check(full_name)
 
     runtime_conf = OmegaConf.create({"checkpoint_dir": str(model_path)})
     model_cfg = OmegaConf.to_container(OmegaConf.merge(model_conf, runtime_conf), resolve=True)

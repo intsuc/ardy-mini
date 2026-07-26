@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Modified by intsuc in 2026: added distilled MiniLM text-encoder support.
 
 """Export denoiser and autoencoder decoder as ONNX models, then build TRT engines.
 
@@ -41,13 +42,16 @@ def make_denoiser_dummy_inputs(
     num_tokens=3,
     num_text_tokens=1,
     device="cuda:0",
+    text_feature_dim=None,
 ):
     """Create dummy inputs matching the denoiser wrapper's forward() signature."""
     nfpt = wrapper.num_frames_per_token
     num_frames = num_tokens * nfpt
     dim_token = wrapper.nframe_root_dim + wrapper.latent_embedding_dim
     motion_rep_dim = wrapper.motion_rep.motion_rep_dim
-    llm_dim = wrapper.llm_shape[-1]
+    llm_dim = int(wrapper.llm_shape[-1]) if text_feature_dim is None else int(text_feature_dim)
+    if llm_dim <= 0:
+        raise ValueError(f"text_feature_dim must be positive, got {llm_dim}")
 
     # 1 history token, rest generation, 0 future
     history_frames = nfpt
@@ -174,6 +178,7 @@ def export_denoiser_onnx(
     output_path,
     num_tokens=3,
     num_text_tokens=1,
+    text_feature_dim=None,
     opset=17,
 ):
     """Export the CFG + denoiser wrapper to ONNX.
@@ -182,7 +187,13 @@ def export_denoiser_onnx(
     batch), runs the denoiser, and returns the CFG-combined B=1 output.
     """
     device = next(denoiser.parameters()).device
-    dummy = make_denoiser_dummy_inputs(denoiser, num_tokens, num_text_tokens, device)
+    dummy = make_denoiser_dummy_inputs(
+        denoiser,
+        num_tokens,
+        num_text_tokens,
+        device,
+        text_feature_dim=text_feature_dim,
+    )
 
     # The CFG model takes cfg_weight_text / cfg_weight_cstr as separate tensor
     # inputs, so it traces directly to ONNX with two weight graph inputs.
@@ -361,13 +372,21 @@ def build_trt_engine(
     log.info("TRT engine built in %.1fs: %s", time.time() - t0, engine_path)
 
 
-def engine_path(output_dir, kind, max_tokens, fp16=True):
+def engine_path(
+    output_dir,
+    kind,
+    max_tokens,
+    fp16=True,
+    text_feature_dim=None,
+):
     """Path of a built TRT engine — the single source of truth for engine names.
 
     ``kind`` is ``"denoiser"`` or ``"decoder"``. Token size and precision are
     encoded in the filename so FP16 and FP32 engines (and different token sizes)
-    can coexist in one directory and be loaded deliberately, e.g.
-    ``denoiser_tok64_fp16.trt`` / ``decoder_tok64_fp32.trt``.
+    can coexist in one directory and be loaded deliberately. The released
+    4096-dimensional LLM2Vec denoiser keeps its historical filename. A direct
+    root/body engine includes its non-legacy width and schema in the name so it
+    can never be mistaken for a legacy engine.
 
     NOTE: engine plan files only deserialize with the exact TensorRT version
     that built them, which is why pyproject.toml pins tensorrt-cu12. If that
@@ -375,13 +394,27 @@ def engine_path(output_dir, kind, max_tokens, fp16=True):
     must start embedding the TRT version) or loading will fail.
     """
     precision = "fp16" if fp16 else "fp32"
-    return os.path.join(output_dir, f"{kind}_tok{max_tokens}_{precision}.trt")
+    if kind == "denoiser" and text_feature_dim not in (None, 4096):
+        text_suffix = f"_text{text_feature_dim}_direct"
+    else:
+        text_suffix = ""
+    return os.path.join(
+        output_dir,
+        f"{kind}{text_suffix}_tok{max_tokens}_{precision}.trt",
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Verification
 # ──────────────────────────────────────────────────────────────────────────────
-def verify_denoiser(denoiser, engine_path, num_frames_per_token, num_tokens=3, num_text_tokens=1):
+def verify_denoiser(
+    denoiser,
+    engine_path,
+    num_frames_per_token,
+    num_tokens=3,
+    num_text_tokens=1,
+    text_feature_dim=None,
+):
     """Compare the PyTorch CFG+denoiser against its TRT engine.
 
     ``denoiser`` is ``model.denoiser`` — the separated-CFG wrapper that was exported (it takes the
@@ -391,7 +424,13 @@ def verify_denoiser(denoiser, engine_path, num_frames_per_token, num_tokens=3, n
     from ardy.model.trt import TRTCFGDenoiser
 
     device = next(denoiser.parameters()).device
-    dummy = make_denoiser_dummy_inputs(denoiser, num_tokens, num_text_tokens, device)
+    dummy = make_denoiser_dummy_inputs(
+        denoiser,
+        num_tokens,
+        num_text_tokens,
+        device,
+        text_feature_dim=text_feature_dim,
+    )
     # forward() takes exactly these inputs, in this order (dummy is ordered to
     # match); pass positionally since TRTCFGDenoiser names the motion arg
     # ``token_seq_t`` while the wrapper names it ``x``.
@@ -525,6 +564,16 @@ def main():
         "the same location the interactive demo loads engines from).",
     )
     parser.add_argument("--num_text_tokens", type=int, default=1, help="Num text tokens")
+    parser.add_argument(
+        "--text_feature_dim",
+        type=int,
+        choices=(2048, 4096),
+        default=4096,
+        help=(
+            "Text-condition width traced into the denoiser: 4096 for legacy "
+            "LLM2Vec or 2048 for concatenated direct root/body conditions."
+        ),
+    )
     parser.add_argument("--opset", type=int, default=17, help="ONNX opset version")
     parser.add_argument(
         "--max_tokens",
@@ -575,13 +624,17 @@ def main():
     # and inputs are padded to it at runtime.
     max_tokens = args.max_tokens
 
-    denoiser_onnx = os.path.join(args.output_dir, "denoiser.onnx")
+    denoiser_onnx_name = (
+        "denoiser.onnx" if args.text_feature_dim == 4096 else f"denoiser_text{args.text_feature_dim}_direct.onnx"
+    )
+    denoiser_onnx = os.path.join(args.output_dir, denoiser_onnx_name)
     export_denoiser_onnx(
         model.denoiser,
         model_cfg,
         denoiser_onnx,
         num_tokens=max_tokens,
         num_text_tokens=args.num_text_tokens,
+        text_feature_dim=args.text_feature_dim,
         opset=args.opset,
     )
 
@@ -596,7 +649,13 @@ def main():
     # ── Build TRT engines ──
     # Precision is encoded in the filename so FP16/FP32 engines can coexist.
     fp16 = not args.fp32
-    denoiser_trt = engine_path(args.output_dir, "denoiser", max_tokens, fp16)
+    denoiser_trt = engine_path(
+        args.output_dir,
+        "denoiser",
+        max_tokens,
+        fp16,
+        text_feature_dim=args.text_feature_dim,
+    )
     decoder_trt = engine_path(args.output_dir, "decoder", max_tokens, fp16)
     if not args.skip_trt:
         build_trt_engine(denoiser_onnx, denoiser_trt, max_tokens=max_tokens, fp16=fp16)
@@ -614,6 +673,7 @@ def main():
                     num_frames_per_token,
                     num_tokens=max_tokens,
                     num_text_tokens=args.num_text_tokens,
+                    text_feature_dim=args.text_feature_dim,
                 )
             except Exception:
                 log.warning("Denoiser verification failed.", exc_info=True)

@@ -1,0 +1,19 @@
+ARDY Mini
+Copyright 2026 intsuc
+
+This repository is an unofficial derivative of ARDY:
+https://github.com/nv-tlabs/ardy
+
+The upstream ARDY source at commit
+693f74d13b3d04a0a22ce127ee79c929dd89756b is preserved under Apache-2.0.
+Files changed from that source carry a prominent modification notice.
+
+The derivative adds a distilled MiniLM text-encoder runtime, training and
+evaluation tools, interactive-demo integration, tests, and aggregate
+benchmark documentation. It is not affiliated with or endorsed by NVIDIA.
+
+No pretrained or fine-tuned model weights, ARDY checkpoints, teacher caches,
+prompt manifests, BONES-SEED records, prompt-level evaluation reports, or
+generated motions are distributed in this repository. See
+THIRD_PARTY_MODELS_AND_DATA.md for the separate terms that govern resources
+used by the optional training and evaluation workflow.

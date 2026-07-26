@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "report_kind": "aggregate_only",
+  "distribution": {
+    "contains_model_weights": false,
+    "contains_dataset_records": false,
+    "contains_prompt_text": false,
+    "contains_record_identifiers": false,
+    "contains_absolute_paths": false,
+    "third_party_notices": "../THIRD_PARTY_MODELS_AND_DATA.md"
+  },
+  "dataset_notice": {
+    "attribution": "Training data includes Motion Data by Bones Studio.",
+    "provider": "https://bones.studio/",
+    "license": "https://bones.studio/info/seed-license"
+  },
+  "experiment": {
+    "ardy_source_commit": "693f74d13b3d04a0a22ce127ee79c929dd89756b",
+    "ardy_model": "ARDY-Core-RP-20FPS-Horizon40",
+    "ardy_checkpoint_sha256": "1019d0bf269cf8d1b3e3e9b4a384a58c112672959b071279ddb65814d77660cd",
+    "student_base": "sentence-transformers/all-MiniLM-L6-v2",
+    "student_artifact_fingerprint": "04d94fa2b8e122ac2f8397c65f22adff00d6e8936813b94180360b6599e014b9",
+    "student_artifact_size_bytes": 113689186,
+    "machine": "NVIDIA GB10, aarch64 Linux, unified memory",
+    "runtime": {
+      "python": "3.11.15",
+      "pytorch": "2.13.0+cu130",
+      "transformers": "5.8.1",
+      "encoder_dtype": "bfloat16",
+      "ardy_model_dtype": "float32"
+    }
+  },
+  "training": {
+    "unique_prompts_before_sampling": 50246,
+    "sampled_prompts": 16384,
+    "train_prompts": 13151,
+    "validation_prompts": 1641,
+    "test_prompts": 1592,
+    "content_family_groups": 3768,
+    "teacher_cache_seconds": 1448.49,
+    "student_training_seconds": 215.05,
+    "epochs": 50,
+    "best_validation_root_body_mean_cosine": 0.9529
+  },
+  "condition_fidelity": {
+    "test_examples": 1592,
+    "root": {
+      "cosine_mean": 0.96411,
+      "cosine_p5": 0.89095,
+      "rmse": 1.95419,
+      "nrmse": 0.26401,
+      "mae": 1.40455
+    },
+    "body": {
+      "cosine_mean": 0.95181,
+      "cosine_p5": 0.84966,
+      "rmse": 1.83318,
+      "nrmse": 0.3014,
+      "mae": 1.30885
+    },
+    "combined": {
+      "cosine_mean": 0.95933,
+      "cosine_p5": 0.87277,
+      "rmse": 1.89465,
+      "nrmse": 0.27968,
+      "mae": 1.3567
+    }
+  },
+  "performance": {
+    "full_condition_stack": {
+      "operation": "prompt -> encoder -> Core40 root/body projections",
+      "warm_runs": 100,
+      "original_llm2vec": {
+        "warm_latency_p50_ms": 98.97,
+        "warm_latency_mean_ms": 99.719,
+        "load_time_s": 55.857,
+        "first_encode_ms": 798.682,
+        "cuda_allocated_peak_gib": 15.023,
+        "process_rss_peak_gib": 15.264,
+        "parameter_bytes_gib": 14.848
+      },
+      "minilm_student": {
+        "warm_latency_p50_ms": 1.185,
+        "warm_latency_mean_ms": 1.269,
+        "load_time_s": 1.832,
+        "first_encode_ms": 380.459,
+        "cuda_allocated_peak_gib": 0.937,
+        "process_rss_peak_gib": 2.415,
+        "parameter_bytes_gib": 0.765
+      },
+      "change": {
+        "warm_latency_p50_speedup": 83.53,
+        "warm_latency_mean_speedup": 78.6,
+        "load_time_speedup": 30.49,
+        "first_encode_speedup": 2.1,
+        "cuda_allocated_peak_reduction_percent": 93.76,
+        "process_rss_peak_reduction_percent": 84.18,
+        "parameter_bytes_reduction_percent": 94.85
+      }
+    },
+    "encoder_only": {
+      "operation": "prompt -> encoder",
+      "warm_runs": 100,
+      "original_llm2vec": {
+        "warm_latency_p50_ms": 98.938,
+        "cuda_allocated_peak_gib": 14.172,
+        "process_rss_peak_gib": 15.709,
+        "parameter_bytes_gib": 14.135
+      },
+      "minilm_student": {
+        "warm_latency_p50_ms": 1.24,
+        "cuda_allocated_peak_gib": 0.085,
+        "process_rss_peak_gib": 1.59,
+        "parameter_bytes_gib": 0.053
+      },
+      "change": {
+        "warm_latency_p50_speedup": 79.76,
+        "cuda_allocated_peak_reduction_percent": 99.4,
+        "process_rss_peak_reduction_percent": 89.88,
+        "parameter_bytes_reduction_percent": 99.63
+      }
+    }
+  },
+  "motion_fidelity": {
+    "prompt_count": 64,
+    "seeds_per_prompt": 3,
+    "matched_generation_count": 192,
+    "duration_seconds": 4,
+    "fps": 20,
+    "diffusion_steps": 10,
+    "matched_minilm_vs_llm2vec": {
+      "global_mpjpe_m": 0.1352,
+      "root_ade_m": 0.1087,
+      "root_fde_m": 0.185,
+      "root_aligned_mpjpe_m": 0.0523,
+      "joint_velocity_error_m_per_s": 0.1838,
+      "heading_mae_deg": 7.477,
+      "motion_cosine": 0.98778,
+      "foot_contact_agreement": 0.9491,
+      "foot_contact_macro_f1": 0.94714,
+      "foot_contact_macro_iou": 0.9159
+    },
+    "original_llm2vec_different_seed_diversity": {
+      "global_mpjpe_m": 0.3366,
+      "root_ade_m": 0.2884,
+      "root_fde_m": 0.438,
+      "root_aligned_mpjpe_m": 0.1125,
+      "joint_velocity_error_m_per_s": 0.4735,
+      "heading_mae_deg": 13.734,
+      "motion_cosine": 0.94529,
+      "foot_contact_agreement": 0.83376,
+      "foot_contact_macro_f1": 0.82967,
+      "foot_contact_macro_iou": 0.76633
+    },
+    "replacement_error_over_teacher_diversity": {
+      "global_mpjpe": 0.402,
+      "root_ade": 0.377,
+      "root_fde": 0.422,
+      "root_aligned_mpjpe": 0.465,
+      "joint_velocity_error": 0.388
+    }
+  },
+  "limitations": [
+    "Motion metrics measure same-seed replacement fidelity, not ground-truth text semantics.",
+    "The proprietary Rigplay test split and TMR evaluator were unavailable, so these are not paper-comparable FID or R-precision results.",
+    "The supported deployment domain is well-formed, typo-free English motion prompts.",
+    "CUDA allocator figures exclude CUDA driver and context memory.",
+    "Encoder timing excludes diffusion, motion decoding, post-processing, and rendering."
+  ]
+}

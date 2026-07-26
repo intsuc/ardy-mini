@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Modified by intsuc in 2026: added distilled MiniLM text-encoder support.
 
 """Disk-backed cache for text-prompt embeddings.
 
@@ -46,22 +47,21 @@ class EmbeddingCache:
         self,
         cache_dir: str = DEFAULT_CACHE_DIR,
         max_mem_entries: int = DEFAULT_MAX_MEM_ENTRIES,
+        namespace: str = "legacy",
     ) -> None:
         self.cache_dir = cache_dir
         self.max_mem_entries = max_mem_entries
+        self.namespace = namespace
         self._lock = threading.Lock()
         self._mem_cache: "OrderedDict[str, np.ndarray]" = OrderedDict()
         self._dir_ready = False  # cache_dir created lazily, on first disk write
 
-    @staticmethod
-    def _make_key(text: str) -> str:
-        # Keyed on the raw prompt text only. The text encoder is shared
-        # across every loaded model, and entries are always stored as
-        # float32 regardless of the encoder's current precision — serving a
-        # float32-stored embedding under either the bf16 or fp32 dropdown
-        # setting is acceptable for this demo, so the key doesn't need to
-        # encode device/dtype.
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    def _make_key(self, text: str) -> str:
+        # Include the encoder/artifact namespace so legacy 4096-dimensional
+        # LLM2Vec entries can never be served to a 2048-dimensional distilled
+        # encoder (or vice versa).
+        payload = f"{self.namespace}\0{text}".encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
 
     def _entry_path(self, key: str) -> str:
         return os.path.join(self.cache_dir, f"{key}.npy")
@@ -213,7 +213,23 @@ class CachedTextEncoder:
         max_mem_entries: int = DEFAULT_MAX_MEM_ENTRIES,
     ) -> None:
         self.encoder = encoder
-        self.cache = EmbeddingCache(cache_dir=cache_dir, max_mem_entries=max_mem_entries)
+        ensure_metadata = getattr(encoder, "ensure_metadata", None)
+        if callable(ensure_metadata):
+            # Remote encoders learn their output schema and stable server
+            # namespace from a probe response. Do this before constructing the
+            # disk cache so 2048 direct conditions can never land under an
+            # unprobed/legacy key.
+            ensure_metadata()
+        namespace = getattr(
+            encoder,
+            "cache_namespace",
+            f"{type(encoder).__module__}.{type(encoder).__qualname__}",
+        )
+        self.cache = EmbeddingCache(
+            cache_dir=cache_dir,
+            max_mem_entries=max_mem_entries,
+            namespace=namespace,
+        )
         self._device, self._dtype = _probe_device_dtype(encoder)
 
     def __call__(self, texts):

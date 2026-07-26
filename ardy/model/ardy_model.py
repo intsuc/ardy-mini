@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Modified by intsuc in 2026: added distilled MiniLM text-encoder support.
 
 import logging
 from typing import Any, List, Optional, Tuple, Union
@@ -175,6 +176,7 @@ class Ardy(nn.Module):
         num_frames = num_tokens * nfpt
         dim_token = model.nframe_root_dim + model.latent_embedding_dim
         motion_rep_dim = model.motion_rep.motion_rep_dim
+        text_feature_dim = self.resolve_text_feature_dim()
 
         with torch.no_grad():
             for i in range(num_iterations):
@@ -218,7 +220,7 @@ class Ardy(nn.Module):
                         dim=1,
                     ),
                     future_token_mask=torch.zeros(1, num_tokens, dtype=torch.bool, device=device),
-                    text_feat=torch.randn(1, num_text_tokens, model.llm_shape[-1], device=device),
+                    text_feat=torch.randn(1, num_text_tokens, text_feature_dim, device=device),
                     text_feat_pad_mask=torch.ones(1, num_text_tokens, dtype=torch.bool, device=device),
                     timesteps=torch.tensor([0], device=device),
                     first_heading_angle=torch.zeros(1, device=device, dtype=torch.float32),
@@ -227,6 +229,55 @@ class Ardy(nn.Module):
                 )
                 log.info("Warmup iteration %d/%d complete.", i + 1, num_iterations)
         log.info("Warmup complete.")
+
+    def resolve_text_feature_dim(self) -> int:
+        """Return and validate the attached encoder's denoiser input width.
+
+        Released ARDY checkpoints accept their legacy LLM2Vec width and, for
+        two-stage denoisers, the concatenated root/body direct-condition width.
+        Keeping this validation next to the model prevents compilation/export
+        warmups from silently tracing the legacy branch for a 2048-dimensional
+        distilled encoder.
+        """
+
+        denoiser = self.denoiser.model
+        legacy_dim = int(denoiser.llm_shape[-1])
+        encoder = self.text_encoder
+        if encoder is None or not hasattr(encoder, "output_dim"):
+            return legacy_dim
+
+        output_dim = encoder.output_dim
+        if output_dim is None:
+            raise ValueError(
+                "The attached text encoder has not established its output_dim. "
+                "Probe the encoder metadata before compiling or exporting ARDY."
+            )
+        try:
+            output_dim = int(output_dim)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Invalid text encoder output_dim {output_dim!r}") from error
+
+        supported_dims = {legacy_dim}
+        root_model = getattr(denoiser, "root_model", None)
+        body_model = getattr(denoiser, "body_model", None)
+        if root_model is not None and body_model is not None:
+            root_projection = root_model.embed_text
+            body_projection = body_model.embed_text
+            direct_dim = 2 * int(root_projection.out_features)
+            if (
+                getattr(root_projection, "projected_text_index", None) == 0
+                and getattr(body_projection, "projected_text_index", None) == 1
+                and int(body_projection.out_features) * 2 == direct_dim
+            ):
+                supported_dims.add(direct_dim)
+
+        if output_dim not in supported_dims:
+            supported = ", ".join(str(value) for value in sorted(supported_dims))
+            raise ValueError(
+                f"Text encoder output_dim {output_dim} is incompatible with this "
+                f"ARDY denoiser; expected one of: {supported}."
+            )
+        return output_dim
 
     def denoising_step(
         self,

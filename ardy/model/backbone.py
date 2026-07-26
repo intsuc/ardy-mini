@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Modified by intsuc in 2026: added distilled MiniLM text-encoder support.
 
 import copy
 import logging
@@ -229,6 +230,47 @@ class TransformerEncoderBlockConfig:
     # auto latent model
     add_input_proj: bool = True
     positional_encoding_mode: str = "default"
+    # Root/body half to select when a distilled encoder supplies one
+    # concatenated [root_1024, body_1024] condition token.
+    projected_text_index: Optional[int] = None
+
+
+class DualConditionTextProjection(nn.Linear):
+    """Legacy Linear plus a direct, bias-compatible dual-condition path.
+
+    Checkpoint keys remain ``weight`` and ``bias`` exactly as for ``nn.Linear``.
+    A legacy ``in_features`` input uses the original projection. A
+    ``2 * out_features`` input is treated as concatenated bias-free root/body
+    conditions; this module selects its configured half and adds the original
+    checkpoint bias. Consequently, zeroing the direct input for CFG reproduces
+    the legacy unconditional projection bias.
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        projected_text_index: Optional[int],
+    ) -> None:
+        super().__init__(in_features, out_features)
+        if projected_text_index not in (None, 0, 1):
+            raise ValueError("projected_text_index must be None, 0, or 1")
+        self.projected_text_index = projected_text_index
+
+    def forward(self, input: Tensor) -> Tensor:
+        if input.shape[-1] == self.in_features:
+            return F.linear(input, self.weight, self.bias)
+
+        direct_dim = 2 * self.out_features
+        if self.projected_text_index is not None and input.shape[-1] == direct_dim:
+            start = self.projected_text_index * self.out_features
+            selected = input[..., start : start + self.out_features]
+            return selected + self.bias
+
+        raise ValueError(
+            f"Unsupported text condition dimension {input.shape[-1]}; expected legacy "
+            f"{self.in_features} or direct dual-condition {direct_dim}."
+        )
 
 
 class TransformerEncoderBlock(nn.Module):
@@ -236,7 +278,11 @@ class TransformerEncoderBlock(nn.Module):
     def __init__(self, conf):
         self.nbjoints = self.skeleton.nbjoints
         llm_dim = self.llm_shape[-1]
-        self.embed_text = nn.Linear(llm_dim, self.latent_dim)
+        self.embed_text = DualConditionTextProjection(
+            llm_dim,
+            self.latent_dim,
+            projected_text_index=self.projected_text_index,
+        )
 
         # maximum number of tokens
         self.num_text_tokens = self.llm_shape[0]

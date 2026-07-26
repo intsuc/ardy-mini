@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Modified by intsuc in 2026: added distilled MiniLM text-encoder support.
 """LLM2Vec encoder wrapper for ARDY text conditioning."""
 
+import hashlib
+import json
 import os
 
 import numpy as np
@@ -30,6 +33,20 @@ class LLM2VecEncoder:
             base_model_name_or_path = os.path.join(os.environ["TEXT_ENCODERS_DIR"], base_model_name_or_path)
             peft_model_name_or_path = os.path.join(os.environ["TEXT_ENCODERS_DIR"], peft_model_name_or_path)
 
+        namespace_payload = json.dumps(
+            {
+                "base_model": base_model_name_or_path,
+                "peft_model": peft_model_name_or_path,
+                "dtype": dtype,
+                "llm_dim": llm_dim,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+        namespace_digest = hashlib.sha256(namespace_payload).hexdigest()
+        self.output_dim = int(llm_dim)
+        self.compatible_ardy_models = None
+        self.cache_namespace = f"ardy-llm2vec-v1:{namespace_digest}:{llm_dim}"
+
         self.model = LLM2Vec.from_pretrained(
             base_model_name_or_path=base_model_name_or_path,
             peft_model_name_or_path=peft_model_name_or_path,
@@ -38,7 +55,7 @@ class LLM2VecEncoder:
         )
 
         env_device = os.environ.get("TEXT_ENCODER_DEVICE")
-        if env_device:
+        if env_device and device in (None, "auto"):
             device = env_device
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"

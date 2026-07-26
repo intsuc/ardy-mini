@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Modified by intsuc in 2026: added distilled MiniLM text-encoder support.
 
 """Part of InteractiveTimelineDemo (split for readability)."""
 
@@ -233,7 +234,14 @@ class ModelLoadingMixin:
                     from export_onnx import engine_path
 
                     fp16 = "fp32" not in compile_mode
-                    denoiser_trt_path = engine_path(engines_dir, "denoiser", max_tok, fp16)
+                    text_feature_dim = model.resolve_text_feature_dim()
+                    denoiser_trt_path = engine_path(
+                        engines_dir,
+                        "denoiser",
+                        max_tok,
+                        fp16,
+                        text_feature_dim=text_feature_dim,
+                    )
                     decoder_trt_path = engine_path(engines_dir, "decoder", max_tok, fp16)
 
                     # Export and build TRT engines if they don't exist yet
@@ -245,11 +253,22 @@ class ModelLoadingMixin:
                         )
 
                         os.makedirs(engines_dir, exist_ok=True)
-                        denoiser_onnx = os.path.join(engines_dir, "denoiser.onnx")
+                        denoiser_onnx_name = (
+                            "denoiser.onnx"
+                            if text_feature_dim == 4096
+                            else f"denoiser_text{text_feature_dim}_direct.onnx"
+                        )
+                        denoiser_onnx = os.path.join(engines_dir, denoiser_onnx_name)
                         decoder_onnx = os.path.join(engines_dir, "decoder.onnx")
 
                         _progress("Exporting model to TensorRT (ONNX export)...")
-                        export_denoiser_onnx(model.denoiser, model_cfg, denoiser_onnx, num_tokens=max_tok)
+                        export_denoiser_onnx(
+                            model.denoiser,
+                            model_cfg,
+                            denoiser_onnx,
+                            num_tokens=max_tok,
+                            text_feature_dim=text_feature_dim,
+                        )
                         export_decoder_onnx(model.autoencoder, decoder_onnx, num_tokens=max_tok)
 
                         _progress(f"Building TensorRT engines ({'fp16' if fp16 else 'fp32'}, max tokens {max_tok})...")

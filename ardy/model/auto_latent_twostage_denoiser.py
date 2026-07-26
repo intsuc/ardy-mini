@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Modified by intsuc in 2026: added distilled MiniLM text-encoder support.
 
 import contextlib
 from typing import Optional
@@ -115,6 +116,7 @@ class AutoLatentTwostageDenoiser(nn.Module):
             add_input_proj=False,
             input_dim=-1,  # for compatibility
             output_dim=root_output_dim,
+            projected_text_index=0,
             skeleton=self.motion_rep.skeleton,
             **kwargs,
         )
@@ -124,6 +126,7 @@ class AutoLatentTwostageDenoiser(nn.Module):
             add_input_proj=False,
             input_dim=-1,  # for compatibility
             output_dim=body_output_dim,
+            projected_text_index=1,
             skeleton=self.motion_rep.skeleton,
             **kwargs,
         )

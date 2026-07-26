@@ -1,3 +1,5 @@
+# Modified by intsuc in 2026: added distilled MiniLM text-encoder support.
+
 # Claude Code
 .claude/
 CLAUDE.md
@@ -115,6 +117,8 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
 .venv
 venv/
 ENV/
@@ -154,6 +158,18 @@ outputs
 /batch*.sh
 checkpoints
 checkpoints/
+/artifacts/
+.huggingface/
+.hf_home/
+hf_token
+huggingface_token
+token.txt
+credentials.json
+teacher_access_probe/
+*.pem
+*.key
+*.p12
+*.pfx
 nohup.out
 
 *.swp

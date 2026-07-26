@@ -1,5 +1,7 @@
+# Modified by intsuc in 2026: added MiniLM support and distribution notices.
+
 [build-system]
-requires = ["setuptools>=61.0", "cmake>=3.15"]
+requires = ["setuptools>=77.0", "cmake>=3.15"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +10,13 @@ version = "0.2.0"
 description = "ARDY: Autoregressive Diffusion with Hybrid Representation for Interactive Human Motion Generation"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
+license-files = [
+  "LICENSE",
+  "NOTICE",
+  "ATTRIBUTIONS.MD",
+  "THIRD_PARTY_MODELS_AND_DATA.md",
+]
 dependencies = [
   # Config / model wiring
   "hydra-core>=1.3",

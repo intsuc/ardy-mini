@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Modified by intsuc in 2026: added distilled MiniLM text-encoder support.
 
 import argparse
 import os
@@ -9,6 +10,10 @@ import numpy as np
 from get_gradio_theme import get_gradio_theme
 
 from ardy.model.load_model import load_text_encoder
+from ardy.model.text_encoder_api import (
+    build_text_encoder_metadata,
+    embedding_to_numpy,
+)
 
 os.environ.setdefault("HF_ENABLE_PARALLEL_LOADING", "YES")
 
@@ -22,12 +27,15 @@ class DemoWrapper:
     def __init__(self, text_encoder, tmp_folder):
         self.text_encoder = text_encoder
         self.tmp_folder = tmp_folder
+        self.metadata = build_text_encoder_metadata(text_encoder)
 
-    def __call__(self, text, filename, progress=gr.Progress()):
+    def __call__(self, text, filename, progress=None):
         # Compute text embedding
         tensor, length = self.text_encoder(text)
         embedding = tensor[:length]
-        embedding = embedding.cpu().numpy()
+        # NumPy has no bfloat16 dtype. The local MiniLM encoder normally runs
+        # in BF16, so use the same float32 wire/storage format as LLM2Vec.
+        embedding = embedding_to_numpy(embedding)
 
         # Save text embedding
         path = os.path.join(self.tmp_folder, filename)
@@ -36,7 +44,7 @@ class DemoWrapper:
         output_title = gr.Markdown(visible=True)
         output_text = gr.Markdown(visible=True, value=f"Text: {text}")
         download = gr.DownloadButton(visible=True, value=path)
-        return download, output_title, output_text
+        return download, output_title, output_text, self.metadata
 
 
 def download_file():
@@ -83,7 +91,7 @@ def main():
     demo_wrapper_fn = DemoWrapper(text_encoder, args.tmp_folder)
 
     with gr.Blocks(title="Text encoder", css=css, theme=theme) as demo:
-        gr.Markdown("# Text encoder: LLM2Vec")
+        gr.Markdown("# ARDY text encoder")
         gr.Markdown("## Description")
         gr.Markdown("Get a embeddings from a text.")
 
@@ -106,6 +114,7 @@ def main():
 
         output_title = gr.Markdown("## Outputs", visible=False)
         output_text = gr.Markdown("", visible=False)
+        encoder_metadata = gr.JSON(visible=False)
         with gr.Row(scale=3):
             with gr.Column(scale=1):
                 download = gr.DownloadButton("Download", variant="primary", visible=False)
@@ -122,9 +131,10 @@ def main():
                 gr.DownloadButton(visible=False),
                 gr.Markdown(visible=False),
                 gr.Markdown(visible=False),
+                gr.JSON(visible=False),
             ]
 
-        outputs = [download, output_title, output_text]
+        outputs = [download, output_title, output_text, encoder_metadata]
 
         gr.on(
             triggers=[text.submit, btn.click],
