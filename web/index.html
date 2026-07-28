@@ -1,0 +1,324 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
+SPDX-License-Identifier: Apache-2.0
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Generate Core27 human motion locally in your browser with ARDY Mini and WebGPU."
+    />
+    <meta name="theme-color" content="#091214" />
+    <title>ARDY Mini · Browser Motion Studio</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#generator-panel">Skip to generator</a>
+    <div id="app">
+      <header class="app-header">
+        <a class="brand" href="./" aria-label="ARDY Mini home">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" role="img">
+              <path d="M6 24 14.7 6h3.1L26 24h-5.1l-1.5-3.8h-7.2L10.7 24H6Zm7.8-8h4l-2-5.2-2 5.2Z" />
+            </svg>
+          </span>
+          <span>
+            <strong>ARDY Mini</strong>
+            <small>Browser Motion Studio</small>
+          </span>
+        </a>
+
+        <div class="header-badges" aria-label="Runtime capabilities">
+          <span class="capability-badge" id="privacy-badge" title="Prompts and generated motion stay on this device">
+            <span class="status-dot status-dot--secure" aria-hidden="true"></span>
+            On-device
+          </span>
+          <span class="capability-badge" id="gpu-badge">
+            <span class="status-dot" id="gpu-dot" aria-hidden="true"></span>
+            <span id="gpu-label">Checking WebGPU</span>
+          </span>
+          <span class="capability-badge" id="isolation-badge" title="Cross-origin isolation enables multi-threaded WebAssembly">
+            <span class="status-dot" id="isolation-dot" aria-hidden="true"></span>
+            <span id="isolation-label">Checking WASM threads</span>
+          </span>
+        </div>
+      </header>
+
+      <main class="studio">
+        <aside class="control-panel" id="generator-panel" aria-label="Motion generator">
+          <section class="intro-block">
+            <p class="eyebrow">CORE40 · 20 FPS</p>
+            <h1>Describe a motion.<br />Watch it take shape.</h1>
+            <p>
+              Prompt-to-motion generation runs entirely in this tab. Best with clear,
+              typo-free English.
+            </p>
+          </section>
+
+          <form id="generation-form" novalidate>
+            <div class="field-group">
+              <div class="field-heading">
+                <label for="prompt">Motion prompt</label>
+                <span id="prompt-count" aria-hidden="true">0 / 280</span>
+              </div>
+              <textarea
+                id="prompt"
+                name="prompt"
+                rows="4"
+                maxlength="280"
+                spellcheck="true"
+                autocomplete="off"
+                placeholder="A person walks forward, then waves with their right hand."
+                aria-describedby="prompt-help prompt-error"
+                required
+              ></textarea>
+              <p class="field-help" id="prompt-help">Use one concise action in English.</p>
+              <p class="field-error" id="prompt-error" aria-live="polite"></p>
+              <div class="preset-row" aria-label="Example prompts">
+                <button type="button" class="preset-chip" data-prompt="A person walks forward confidently.">
+                  Walk
+                </button>
+                <button type="button" class="preset-chip" data-prompt="A person performs a joyful dance.">
+                  Dance
+                </button>
+                <button type="button" class="preset-chip" data-prompt="A person crouches down and stands back up.">
+                  Crouch
+                </button>
+              </div>
+            </div>
+
+            <div class="parameter-grid">
+              <div class="field-group compact-field duration-field">
+                <div class="field-heading">
+                  <label for="duration">Duration</label>
+                  <output id="duration-output" for="duration">4 seconds</output>
+                </div>
+                <input id="duration" name="duration" type="range" min="2" max="10" step="2" value="4" />
+                <div class="range-labels" aria-hidden="true"><span>2s</span><span>10s</span></div>
+              </div>
+
+              <div class="field-group compact-field">
+                <label for="seed">Seed</label>
+                <div class="seed-control">
+                  <input
+                    id="seed"
+                    name="seed"
+                    type="number"
+                    min="0"
+                    max="4294967295"
+                    step="1"
+                    inputmode="numeric"
+                    value="2"
+                    aria-describedby="seed-error"
+                  />
+                  <button id="randomize-seed" type="button" class="icon-button" aria-label="Choose a random seed" title="Random seed">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5" />
+                    </svg>
+                  </button>
+                </div>
+                <p class="field-error" id="seed-error" aria-live="polite"></p>
+              </div>
+            </div>
+
+            <details class="advanced-settings">
+              <summary>Runtime settings</summary>
+              <div class="advanced-content">
+                <div class="field-group compact-field">
+                  <label for="backend">Inference backend</label>
+                  <select id="backend" name="backend">
+                    <option value="auto">Auto (recommended)</option>
+                    <option value="webgpu">WebGPU</option>
+                    <option value="wasm">WebAssembly</option>
+                  </select>
+                  <p class="field-help" id="backend-help">
+                    Auto uses WebGPU when available and falls back to WebAssembly.
+                  </p>
+                </div>
+              </div>
+            </details>
+
+            <div class="model-card" id="model-card">
+              <div class="model-card__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z" />
+                  <path d="m4.5 7.8 7.5 4.3 7.5-4.3M12 12.1V21" />
+                </svg>
+              </div>
+              <div class="model-card__body">
+                <strong id="model-title">Model pack required</strong>
+                <span id="model-detail">Import your locally exported Core40 browser pack.</span>
+                <div class="model-progress" id="model-progress" hidden>
+                  <div class="progress-track" aria-hidden="true">
+                    <span id="model-progress-fill"></span>
+                  </div>
+                  <span id="model-progress-label"></span>
+                </div>
+              </div>
+              <span class="model-state" id="model-state" data-state="missing" role="status" aria-live="polite">
+                Not loaded
+              </span>
+            </div>
+
+            <div class="model-actions">
+              <button id="import-model" class="secondary-button" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 20h14" />
+                </svg>
+                Import model pack
+              </button>
+              <button id="remove-model" class="text-button" type="button" hidden>Remove cached pack</button>
+              <input
+                id="model-file-input"
+                type="file"
+                multiple
+                hidden
+                aria-hidden="true"
+              />
+            </div>
+
+            <button id="generate" class="generate-button" type="submit" disabled>
+              <span class="button-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="m13 2-1 7h7l-9 13 1-8H5l8-12Z" />
+                </svg>
+              </span>
+              <span class="generate-label">Generate motion</span>
+              <span class="button-shortcut" aria-hidden="true">⌘ ↵</span>
+            </button>
+
+            <button id="cancel-generation" class="cancel-button" type="button" hidden>Cancel generation</button>
+
+            <div class="generation-progress" id="generation-progress" role="status" aria-live="polite" hidden>
+              <div class="generation-progress__heading">
+                <span id="generation-stage">Preparing model</span>
+                <span id="generation-percent">0%</span>
+              </div>
+              <div
+                class="progress-track progress-track--large"
+                role="progressbar"
+                aria-label="Generation progress"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow="0"
+                id="generation-progressbar"
+              >
+                <span id="generation-progress-fill"></span>
+              </div>
+              <p id="generation-note">The first run may take longer while GPU pipelines compile.</p>
+            </div>
+
+            <div class="error-banner" id="error-banner" role="alert" hidden>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 8v5m0 3.5v.5M10.3 4.5 3.2 17a2 2 0 0 0 1.7 3h14.2a2 2 0 0 0 1.7-3L13.7 4.5a2 2 0 0 0-3.4 0Z" />
+              </svg>
+              <div>
+                <strong id="error-title">Generation failed</strong>
+                <p id="error-message"></p>
+              </div>
+              <button id="dismiss-error" class="icon-button" type="button" aria-label="Dismiss error">×</button>
+            </div>
+          </form>
+
+          <footer class="panel-footer">
+            No prompt or motion data leaves your device.
+            <a
+              href="./notices/THIRD_PARTY_MODELS_AND_DATA.md"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Model &amp; software notices
+            </a>
+          </footer>
+        </aside>
+
+        <section class="viewport-panel" aria-label="3D motion preview">
+          <div class="viewport" id="viewport">
+            <canvas id="motion-canvas" aria-label="Interactive 3D skeleton preview" tabindex="0">
+              Interactive Core27 skeleton preview.
+            </canvas>
+
+            <div class="viewport-topbar">
+              <span class="viewport-badge" id="motion-badge">No motion</span>
+              <span class="viewport-metric" id="runtime-metric" hidden>
+                Generated in <strong id="runtime-value">—</strong>
+              </span>
+            </div>
+
+            <div class="empty-state" id="empty-state">
+              <div class="empty-state__figure" aria-hidden="true">
+                <span class="figure-head"></span>
+                <span class="figure-spine"></span>
+                <span class="figure-arm figure-arm--left"></span>
+                <span class="figure-arm figure-arm--right"></span>
+                <span class="figure-leg figure-leg--left"></span>
+                <span class="figure-leg figure-leg--right"></span>
+                <span class="figure-orbit"></span>
+              </div>
+              <p>Your generated motion will appear here.</p>
+              <span>Import a model pack, then describe an action.</span>
+            </div>
+
+            <div class="loading-overlay" id="loading-overlay" hidden>
+              <div class="loading-orbit" aria-hidden="true"><span></span></div>
+              <strong id="loading-title">Generating motion</strong>
+              <span id="loading-detail">Encoding your prompt…</span>
+            </div>
+
+            <div class="camera-hint" id="camera-hint">
+              Drag to orbit · Scroll to zoom
+            </div>
+          </div>
+
+          <div class="playback-bar" id="playback-bar" aria-label="Playback controls">
+            <button id="play-pause" class="play-button" type="button" aria-label="Play motion" disabled>
+              <svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z" /></svg>
+              <svg class="pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14" /></svg>
+            </button>
+
+            <span class="timecode" id="current-time">00:00.00</span>
+            <input
+              id="timeline"
+              class="timeline-slider"
+              type="range"
+              min="0"
+              max="1"
+              step="1"
+              value="0"
+              aria-label="Motion timeline"
+              disabled
+            />
+            <span class="timecode timecode--muted" id="total-time">00:00.00</span>
+
+            <div class="playback-divider" aria-hidden="true"></div>
+
+            <label class="speed-control">
+              <span class="sr-only">Playback speed</span>
+              <select id="playback-speed" disabled>
+                <option value="0.5">0.5×</option>
+                <option value="1" selected>1×</option>
+                <option value="2">2×</option>
+              </select>
+            </label>
+
+            <button id="loop-toggle" class="toolbar-button is-active" type="button" aria-pressed="true" aria-label="Loop playback" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m17 2 3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3m13-3v2a4 4 0 0 1-4 4H4" />
+              </svg>
+            </button>
+
+            <button id="reset-camera" class="toolbar-button" type="button" aria-label="Reset camera">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.6M4 4v4.6h4.6" />
+              </svg>
+            </button>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

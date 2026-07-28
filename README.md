@@ -45,6 +45,8 @@ pip install -e ".[all]"
   - `pip install -e .` — core model inference only
   - `pip install -e ".[demo]"` — adds the interactive demo (viser, gradio)
   - `pip install -e ".[trt]"` — adds TensorRT acceleration
+  - `uv sync --extra browser` — adds ONNX export and verification tools for
+    the static browser demo
 - **TensorRT requirements:** the `[trt]` extra requires an NVIDIA driver >= 525 (CUDA 12-capable — the CUDA runtime itself is bundled via pip) and access to `pypi.nvidia.com` during install. On setups that don't meet these requirements, install `.[demo]` instead and select a non-TensorRT acceleration mode in the demo.
 
 </details>
@@ -144,6 +146,34 @@ An artifact produced by the documented recipe is compatible only with
 measurements from the completed run are in
 [the MiniLM experiment report](docs/minilm_results.md) and the
 [machine-readable summary](reports/minilm_core40_summary.json).
+
+### Fully in-browser MiniLM demo
+
+The Core40 MiniLM path can also run end to end in a browser. A dedicated Web
+Worker uses ONNX Runtime Web with WebGPU first and WebAssembly as a fallback;
+tokenization, text conditioning, diffusion, autoregressive recentering, motion
+decoding, forward kinematics, and three.js playback stay on the user's device.
+
+Export a local, hash-verified model pack and start the static app:
+
+```bash
+uv sync --extra browser
+uv run --extra browser python scripts/export_browser.py \
+  --checkpoints-dir checkpoints \
+  --minilm-artifact artifacts/minilm-ardy-core40 \
+  --output-dir artifacts/browser/core40
+
+cd web
+npm ci
+npm run dev
+```
+
+Choose `artifacts/browser/core40` with the demo's **Import model pack** button.
+No model weights are committed or copied into the web build. Browser v1 is
+Core40 text-only prompt-to-motion generation for 2–10 second clips; the Python
+interactive demo remains the option for constraints and live control. See the
+[browser demo guide](docs/browser_demo.md) for architecture, browser/hosting
+requirements, validation results, and distribution cautions.
 
 ---
 

@@ -11,9 +11,11 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 FORBIDDEN_TRACKED_PREFIXES = (
     "artifacts/",
+    "browser-models/",
     "checkpoints/",
     "datasets/",
     "outputs/",
+    "web/public/models/",
 )
 MAX_REGULAR_GIT_FILE_BYTES = 50 * 1024 * 1024
 MODIFICATION_NOTICE = "Modified by intsuc in 2026"
@@ -86,7 +88,13 @@ class PublicDistributionTests(unittest.TestCase):
         self.assertEqual(missing, [])
 
     def test_distribution_notices_are_present(self) -> None:
-        for path in ("LICENSE", "ATTRIBUTIONS.MD", "NOTICE", "THIRD_PARTY_MODELS_AND_DATA.md"):
+        for path in (
+            "LICENSE",
+            "ATTRIBUTIONS.MD",
+            "NOTICE",
+            "THIRD_PARTY_MODELS_AND_DATA.md",
+            "web/ONNXRUNTIME_LICENSE.txt",
+        ):
             with self.subTest(path=path):
                 self.assertTrue((REPOSITORY_ROOT / path).is_file())
 

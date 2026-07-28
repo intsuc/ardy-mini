@@ -9,8 +9,9 @@ The upstream ARDY source at commit
 Files changed from that source carry a prominent modification notice.
 
 The derivative adds a distilled MiniLM text-encoder runtime, training and
-evaluation tools, interactive-demo integration, tests, and aggregate
-benchmark documentation. It is not affiliated with or endorsed by NVIDIA.
+evaluation tools, interactive-demo integration, a local-only browser export
+and WebGPU/WebAssembly demo, tests, and aggregate benchmark documentation. It
+is not affiliated with or endorsed by NVIDIA.
 
 No pretrained or fine-tuned model weights, ARDY checkpoints, teacher caches,
 prompt manifests, BONES-SEED records, prompt-level evaluation reports, or

@@ -69,8 +69,18 @@ trt = [
   "tensorrt-cu12==10.13.0.35",
   "onnx>=1.16",
 ]
+browser = [
+  # ONNX 1.19 uses ml-dtypes APIs unavailable in the NumPy<2-compatible
+  # aarch64 wheel selected by this project.
+  "onnx>=1.18,<1.19",
+  "onnxconverter-common>=1.14,<2",
+  # Match the browser runtime used for pack validation where its Python wheel
+  # is available; ORT 1.27 dropped Python 3.10.
+  "onnxruntime>=1.22,<1.27; python_version < '3.11'",
+  "onnxruntime==1.27.0; python_version >= '3.11'",
+]
 all = [
-  "ardy[demo,trt]",
+  "ardy[browser,demo,trt]",
 ]
 
 [tool.setuptools]

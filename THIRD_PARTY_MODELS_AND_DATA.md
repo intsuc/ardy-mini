@@ -67,6 +67,25 @@ The local `artifacts/`, `datasets/`, `checkpoints/`, and `outputs/` directories
 are ignored by Git to keep restricted inputs and generated outputs outside the
 source distribution.
 
+## Browser runtime dependencies
+
+The optional browser demo uses
+[ONNX Runtime Web](https://github.com/microsoft/onnxruntime) under the MIT
+license,
+[Hugging Face Tokenizers.js](https://github.com/huggingface/tokenizers.js)
+under Apache-2.0, and [three.js](https://github.com/mrdoob/three.js) under the
+MIT license. Development and testing use Vite and Vitest under the MIT license
+and TypeScript and Playwright under Apache-2.0. The exact versions are pinned in
+`web/package-lock.json`. The production build copies source, ONNX Runtime Web,
+Tokenizers.js, and three.js notices into `web/dist/notices/`; Vite also emits
+the bundled dependency notices in `web/dist/third-party-licenses.md`.
+
+The browser exporter creates a model pack from separately obtained ARDY and
+MiniLM artifacts. That generated pack remains outside Git and does not acquire
+the source repository's Apache-2.0 license. Anyone distributing a pack must
+review the ARDY checkpoint, MiniLM artifact, training-data, and teacher-model
+terms and supply the required model notices independently.
+
 ## Unitree assets
 
 The upstream repository includes Unitree-derived G1 assets. The retained BSD

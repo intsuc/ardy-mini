@@ -159,6 +159,15 @@ outputs
 checkpoints
 checkpoints/
 /artifacts/
+/browser-models/
+/web/coverage/
+/web/dist/
+/web/node_modules/
+/web/playwright-report/
+/web/public/ort/
+/web/public/notices/
+/web/public/models/
+/web/test-results/
 .huggingface/
 .hf_home/
 hf_token
