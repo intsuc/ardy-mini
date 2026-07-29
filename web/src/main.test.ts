@@ -4,9 +4,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  canAttemptGeneration,
   canonicalizePackFiles,
   formatBytes,
   formatTime,
+  shouldAutoplayMotion,
   validateGenerationForm,
 } from "./main";
 
@@ -35,6 +37,12 @@ describe("generation form validation", () => {
     expect(validateGenerationForm("人物が歩く。", "4", "2").promptError).toMatch(/English/);
     expect(validateGenerationForm("A person walks.", "3", "2").promptError).toMatch(/2 to 10/);
     expect(validateGenerationForm("A person walks.", "4", "-1").seedError).toMatch(/whole-number/);
+  });
+
+  it("keeps non-empty invalid input submittable so inline validation is reachable", () => {
+    expect(canAttemptGeneration("人物が歩く。", true, true, false, false)).toBe(true);
+    expect(canAttemptGeneration("   ", true, true, false, false)).toBe(false);
+    expect(canAttemptGeneration("A person walks.", true, false, false, false)).toBe(false);
   });
 });
 
@@ -70,5 +78,10 @@ describe("display formatting", () => {
     expect(formatTime(65)).toBe("01:05.00");
     expect(formatBytes(1024 ** 3)).toBe("1.0 GiB");
     expect(formatBytes(0)).toBe("0 B");
+  });
+
+  it("does not autoplay generated motion when reduced motion is requested", () => {
+    expect(shouldAutoplayMotion(false)).toBe(true);
+    expect(shouldAutoplayMotion(true)).toBe(false);
   });
 });

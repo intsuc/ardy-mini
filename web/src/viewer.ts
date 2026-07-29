@@ -196,7 +196,26 @@ export class SkeletonViewer {
   private lastAnimationTime: number | null = null;
   private lastReportedFrame = -1;
   private animationFrame = 0;
+  private resizeFrame = 0;
+  private needsRender = true;
+  private pageVisible = !document.hidden;
   private listener: PlaybackListener | null = null;
+
+  private readonly invalidate = (): void => {
+    this.needsRender = true;
+    this.scheduleFrame();
+  };
+
+  private readonly handleVisibilityChange = (): void => {
+    this.pageVisible = !document.hidden;
+    this.lastAnimationTime = null;
+    if (this.pageVisible) {
+      this.invalidate();
+    } else {
+      cancelAnimationFrame(this.animationFrame);
+      this.animationFrame = 0;
+    }
+  };
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -227,6 +246,7 @@ export class SkeletonViewer {
     this.controls.maxDistance = 12;
     this.controls.maxPolarAngle = Math.PI * 0.49;
     this.controls.update();
+    this.controls.addEventListener("change", this.invalidate);
 
     const hemisphere = new THREE.HemisphereLight("#d9f8ff", "#173026", 2.1);
     this.scene.add(hemisphere);
@@ -300,10 +320,17 @@ export class SkeletonViewer {
     this.bones.visible = false;
     this.trajectory.visible = false;
 
-    this.resizeObserver = new ResizeObserver(() => this.resize());
+    this.resizeObserver = new ResizeObserver(() => {
+      if (this.resizeFrame) return;
+      this.resizeFrame = requestAnimationFrame(() => {
+        this.resizeFrame = 0;
+        this.resize();
+      });
+    });
     this.resizeObserver.observe(canvas.parentElement ?? canvas);
+    document.addEventListener("visibilitychange", this.handleVisibilityChange);
     this.resize();
-    this.animationFrame = requestAnimationFrame(this.animate);
+    this.scheduleFrame();
   }
 
   set onPlaybackChange(listener: PlaybackListener | null) {
@@ -322,6 +349,7 @@ export class SkeletonViewer {
     this.buildTrajectory(clip);
     this.updatePose(0);
     this.resetCamera();
+    this.invalidate();
     this.emitPlaybackState(true);
   }
 
@@ -333,6 +361,7 @@ export class SkeletonViewer {
     this.joints.visible = false;
     this.bones.visible = false;
     this.trajectory.visible = false;
+    this.invalidate();
     this.emitPlaybackState(true);
   }
 
@@ -343,6 +372,7 @@ export class SkeletonViewer {
     }
     this.playing = playing;
     this.lastAnimationTime = null;
+    this.invalidate();
     this.emitPlaybackState(true);
   }
 
@@ -361,11 +391,36 @@ export class SkeletonViewer {
     this.emitPlaybackState(true);
   }
 
+  setReducedMotion(reduced: boolean): void {
+    this.controls.enableDamping = !reduced;
+    if (reduced) this.lastAnimationTime = null;
+    this.controls.update();
+    this.invalidate();
+  }
+
+  orbit(horizontalSteps: number, verticalSteps: number): void {
+    const increment = Math.PI / 24;
+    if (horizontalSteps) this.controls.rotateLeft(horizontalSteps * increment);
+    if (verticalSteps) this.controls.rotateUp(verticalSteps * increment);
+    this.invalidate();
+  }
+
+  zoom(direction: "in" | "out"): void {
+    const scale = 0.85;
+    if (direction === "in") {
+      this.controls.dollyIn(scale);
+    } else {
+      this.controls.dollyOut(scale);
+    }
+    this.invalidate();
+  }
+
   seek(frame: number): void {
     if (!this.clip) return;
     this.frameCursor = THREE.MathUtils.clamp(frame, 0, this.clip.frameCount - 1);
     this.lastAnimationTime = null;
     this.updatePose(this.frameCursor);
+    this.invalidate();
     this.emitPlaybackState(true);
   }
 
@@ -374,6 +429,7 @@ export class SkeletonViewer {
       this.camera.position.set(3.1, 2.15, 3.4);
       this.controls.target.set(0, 0.85, 0);
       this.controls.update();
+      this.invalidate();
       return;
     }
 
@@ -397,6 +453,7 @@ export class SkeletonViewer {
     this.camera.far = Math.max(100, distance * 20);
     this.camera.updateProjectionMatrix();
     this.controls.update();
+    this.invalidate();
   }
 
   getPlaybackState(): PlaybackState {
@@ -411,7 +468,10 @@ export class SkeletonViewer {
 
   dispose(): void {
     cancelAnimationFrame(this.animationFrame);
+    cancelAnimationFrame(this.resizeFrame);
     this.resizeObserver.disconnect();
+    document.removeEventListener("visibilitychange", this.handleVisibilityChange);
+    this.controls.removeEventListener("change", this.invalidate);
     this.controls.dispose();
     this.joints.geometry.dispose();
     (this.joints.material as THREE.Material).dispose();
@@ -423,6 +483,10 @@ export class SkeletonViewer {
   }
 
   private readonly animate = (time: number): void => {
+    this.animationFrame = 0;
+    if (!this.pageVisible) return;
+
+    let poseChanged = false;
     if (this.playing && this.clip) {
       if (this.lastAnimationTime !== null) {
         const elapsedSeconds = Math.min((time - this.lastAnimationTime) / 1000, 0.25);
@@ -437,6 +501,7 @@ export class SkeletonViewer {
         this.frameCursor = next.frame;
         if (next.ended && !this.loop) this.playing = false;
         this.updatePose(this.frameCursor);
+        poseChanged = true;
         this.emitPlaybackState(next.ended);
       }
       this.lastAnimationTime = time;
@@ -444,10 +509,19 @@ export class SkeletonViewer {
       this.lastAnimationTime = null;
     }
 
-    this.controls.update();
-    this.renderer.render(this.scene, this.camera);
-    this.animationFrame = requestAnimationFrame(this.animate);
+    const controlsChanged = this.controls.update();
+    if (this.needsRender || poseChanged || controlsChanged) {
+      this.renderer.render(this.scene, this.camera);
+      this.needsRender = false;
+    }
+    if (this.playing || controlsChanged) this.scheduleFrame();
   };
+
+  private scheduleFrame(): void {
+    if (!this.animationFrame && this.pageVisible) {
+      this.animationFrame = requestAnimationFrame(this.animate);
+    }
+  }
 
   private resize(): void {
     const parent = this.canvas.parentElement;
@@ -457,6 +531,7 @@ export class SkeletonViewer {
     this.renderer.setSize(width, height, false);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
+    this.invalidate();
   }
 
   private updatePose(frameCursor: number): void {

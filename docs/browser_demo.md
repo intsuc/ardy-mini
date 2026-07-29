@@ -80,10 +80,17 @@ npm ci
 npm run dev
 ```
 
-Open the printed localhost URL, choose **Import model pack**, and select
+Open the printed localhost URL, choose **Choose model-pack folder**, and select
 `artifacts/browser/core40`. The app verifies every declared file before
 creating an inference session. If browser storage has enough capacity, the
 validated pack is copied to the origin-private file system for later visits.
+
+The preview supports drag/swipe orbit, wheel/pinch zoom, and focused keyboard
+controls: Space plays or pauses, Left/Right Arrow seeks, Shift+Arrow orbits,
+Plus/Minus zooms, and Home resets the camera. The Generate shortcut is
+Command+Enter on Apple platforms and Control+Enter elsewhere. With
+`prefers-reduced-motion: reduce`, a generated clip opens paused at its first
+frame with looping disabled; the user can still play it manually.
 
 Chrome or Edge with WebGPU is strongly recommended. WebGPU requires HTTPS or
 localhost. The WebAssembly fallback works without a supported GPU but is a
@@ -136,6 +143,9 @@ ARDY_BROWSER_MODEL_PACK=../artifacts/browser/core40 \
 ARDY_BROWSER_BACKEND=webgpu \
 npm run test:e2e -- e2e/real-model.spec.ts
 ```
+
+Add `ARDY_BROWSER_REDUCED_MOTION=1` to either real-pack command to verify that
+the generated clip stays paused at frame zero with looping disabled.
 
 ### Measurements from this environment
 

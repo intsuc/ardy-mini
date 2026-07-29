@@ -168,7 +168,9 @@ npm ci
 npm run dev
 ```
 
-Choose `artifacts/browser/core40` with the demo's **Import model pack** button.
+Choose `artifacts/browser/core40` with the demo's **Choose model-pack folder**
+button. The first-run setup names the expected folder and approximate 798 MiB
+pack size; after loading, the header reports the backend actually in use.
 No model weights are committed or copied into the web build. Browser v1 is
 Core40 text-only prompt-to-motion generation for 2–10 second clips; the Python
 interactive demo remains the option for constraints and live control. See the

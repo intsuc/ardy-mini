@@ -7,6 +7,7 @@ import { expect, test } from "@playwright/test";
 
 const configuredPack = process.env.ARDY_BROWSER_MODEL_PACK;
 const configuredBackend = process.env.ARDY_BROWSER_BACKEND ?? "wasm";
+const reducedMotion = process.env.ARDY_BROWSER_REDUCED_MOTION === "1";
 const webGpuLaunchArgs =
   configuredBackend === "webgpu"
     ? [
@@ -50,6 +51,7 @@ test.describe("real browser model-pack", () => {
         consoleMessages.push(`${message.type()}: ${message.text()}`);
       }
     });
+    if (reducedMotion) await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto("/");
     await page.waitForFunction(() => document.querySelector("#backend") !== null);
     const environment = await page.evaluate(async () => {
@@ -105,10 +107,24 @@ test.describe("real browser model-pack", () => {
       await expect(page.locator("#model-detail")).toContainText("WebGPU");
     }
 
-    await page.getByLabel("Motion prompt").fill(
-      "A person walks forward confidently.",
-    );
-    await page.getByRole("spinbutton", { name: "Seed" }).fill("2");
+    const prompt = page.getByLabel("Motion prompt");
+    await prompt.fill("人物が歩く。");
+    await expect(page.getByRole("button", { name: "Generate motion" })).toBeEnabled();
+    await page.getByRole("button", { name: "Generate motion" }).click();
+    await expect(page.locator("#prompt-error")).toContainText("typo-free English");
+    await expect(prompt).toBeFocused();
+
+    await prompt.fill("A person walks forward confidently.");
+    const runtimeSettings = page.locator("#runtime-settings");
+    const seed = page.getByRole("spinbutton", { name: "Seed" });
+    await page.getByText("Runtime settings").click();
+    await seed.fill("-1");
+    await page.getByText("Runtime settings").click();
+    await page.getByRole("button", { name: "Generate motion" }).click();
+    await expect(runtimeSettings).toHaveAttribute("open", "");
+    await expect(page.locator("#seed-error")).toContainText("whole-number seed");
+    await expect(seed).toBeFocused();
+    await seed.fill("2");
     await page.locator("#duration").evaluate((element) => {
       const input = element as HTMLInputElement;
       input.value = "2";
@@ -125,6 +141,13 @@ test.describe("real browser model-pack", () => {
     await expect(page.locator("#motion-badge")).toContainText(
       "40 frames · 20 FPS · seed 2",
     );
+    if (reducedMotion) {
+      await expect(page.locator("#play-pause")).toHaveAttribute("aria-label", "Play motion");
+      await expect(page.locator("#loop-toggle")).toHaveAttribute("aria-pressed", "false");
+      await expect(page.locator("#timeline")).toHaveValue("0");
+    } else {
+      await expect(page.locator("#play-pause")).toHaveAttribute("aria-label", "Pause motion");
+    }
     await expect(page.locator("#error-banner")).toBeHidden();
 
     const ui = await page.evaluate(() => ({
@@ -137,6 +160,7 @@ test.describe("real browser model-pack", () => {
         JSON.stringify(
           {
             configuredBackend,
+            reducedMotion,
             launchArgs: webGpuLaunchArgs,
             loadWallMs,
             generationWallMs,
