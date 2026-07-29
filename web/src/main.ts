@@ -41,10 +41,20 @@ import {
 } from "./viewer";
 import { PROMPT_EXAMPLE_EVENT } from "./prompt-examples";
 import {
-  LOOP_CONTROL_CHANGE_EVENT,
-  LOOP_CONTROL_STATE_EVENT,
-  type LoopControlState,
-} from "./ui-events";
+  continuousGenerationControl,
+  durationControl,
+  loopControl,
+  previewSettingsControl,
+  removeSavedModelAction,
+  showContactsControl,
+  showOrientationsControl,
+  showSkeletonControl,
+  showTrajectoryControl,
+  showVrmControl,
+  targetBufferControl,
+  timelineControl,
+  type PressedControlState,
+} from "./ui-control-store";
 
 const UINT32_MAX = 0xffff_ffff;
 const ALLOWED_DURATIONS = new Set([2, 4, 6, 8, 10]);
@@ -777,7 +787,6 @@ export function bootstrap(): () => void {
   const prompt = requiredElement<HTMLTextAreaElement>("prompt");
   const promptCount = requiredElement<HTMLElement>("prompt-count");
   const promptError = requiredElement<HTMLElement>("prompt-error");
-  const duration = requiredElement<HTMLInputElement>("duration");
   const durationOutput = requiredElement<HTMLOutputElement>("duration-output");
   const seed = requiredElement<HTMLInputElement>("seed");
   const seedError = requiredElement<HTMLElement>("seed-error");
@@ -819,9 +828,8 @@ export function bootstrap(): () => void {
   const applyPrompt = requiredElement<HTMLButtonElement>("apply-prompt");
   const cancelGeneration =
     requiredElement<HTMLButtonElement>("cancel-generation");
-  const streamGeneration =
-    requiredElement<HTMLInputElement>("stream-generation");
-  const targetBuffer = requiredElement<HTMLInputElement>("target-buffer");
+  const targetBufferOutput =
+    requiredElement<HTMLOutputElement>("target-buffer-output");
   const generationProgressElement =
     requiredElement<HTMLElement>("generation-progress");
   const generationStage = requiredElement<HTMLElement>("generation-stage");
@@ -844,12 +852,10 @@ export function bootstrap(): () => void {
   const runtimeMetric = requiredElement<HTMLElement>("runtime-metric");
   const runtimeValue = requiredElement<HTMLElement>("runtime-value");
   const playPause = requiredElement<HTMLButtonElement>("play-pause");
-  const timeline = requiredElement<HTMLInputElement>("timeline");
   const currentTime = requiredElement<HTMLElement>("current-time");
   const totalTime = requiredElement<HTMLElement>("total-time");
   const playbackSpeed =
     requiredElement<HTMLSelectElement>("playback-speed");
-  const loopToggle = requiredElement<HTMLButtonElement>("loop-toggle");
   const resetCamera = requiredElement<HTMLButtonElement>("reset-camera");
   const gpuDot = requiredElement<HTMLElement>("gpu-dot");
   const gpuLabel = requiredElement<HTMLElement>("gpu-label");
@@ -863,14 +869,6 @@ export function bootstrap(): () => void {
   const modelRuntimeDetail =
     requiredElement<HTMLElement>("model-runtime-detail");
 
-  const showSkeleton = requiredElement<HTMLInputElement>("show-skeleton");
-  const showContacts = requiredElement<HTMLInputElement>("show-contacts");
-  const showOrientations =
-    requiredElement<HTMLInputElement>("show-orientations");
-  const showTrajectory =
-    requiredElement<HTMLInputElement>("show-trajectory");
-  const previewSettings =
-    requiredElement<HTMLDetailsElement>("preview-settings");
   const vrmCard = requiredElement<HTMLElement>("vrm-card");
   const vrmName = requiredElement<HTMLElement>("vrm-name");
   const vrmDetail = requiredElement<HTMLElement>("vrm-detail");
@@ -879,7 +877,6 @@ export function bootstrap(): () => void {
   const importVrmLabel = requiredElement<HTMLElement>("import-vrm-label");
   const vrmFileInput = requiredElement<HTMLInputElement>("vrm-file-input");
   const removeVrm = requiredElement<HTMLButtonElement>("remove-vrm");
-  const showVrm = requiredElement<HTMLInputElement>("show-vrm");
   const vrmErrorBanner =
     requiredElement<HTMLElement>("vrm-error-banner");
   const vrmErrorMessage =
@@ -965,26 +962,8 @@ export function bootstrap(): () => void {
     });
   }
 
-  function updateLoopControl(next: LoopControlState): void {
-    const detail: LoopControlState = {};
-    if (
-      next.pressed !== undefined &&
-      loopToggle.getAttribute("aria-pressed") !== String(next.pressed)
-    ) {
-      detail.pressed = next.pressed;
-    }
-    if (
-      next.disabled !== undefined &&
-      loopToggle.disabled !== next.disabled
-    ) {
-      detail.disabled = next.disabled;
-    }
-    if (detail.pressed === undefined && detail.disabled === undefined) return;
-    document.dispatchEvent(
-      new CustomEvent<LoopControlState>(LOOP_CONTROL_STATE_EVENT, {
-        detail,
-      }),
-    );
+  function updateLoopControl(next: Partial<PressedControlState>): void {
+    loopControl.setState(next);
   }
 
   function setProgress(
@@ -1036,6 +1015,17 @@ export function bootstrap(): () => void {
     maximum: number,
   ): number {
     return Math.round(finiteInput(input, fallback, minimum, maximum));
+  }
+
+  function integerValue(
+    value: number,
+    fallback: number,
+    minimum: number,
+    maximum: number,
+  ): number {
+    return Number.isFinite(value)
+      ? Math.round(Math.max(minimum, Math.min(maximum, value)))
+      : fallback;
   }
 
   function setModelStatus(
@@ -1129,7 +1119,7 @@ export function bootstrap(): () => void {
       : "Optional";
     importVrmLabel.textContent = info ? "Replace VRM" : "Load VRM";
     removeVrm.disabled = !info;
-    showVrm.disabled = !info;
+    showVrmControl.setState({ disabled: !info });
   }
 
   function setVrmLoading(loading: boolean): void {
@@ -1148,7 +1138,9 @@ export function bootstrap(): () => void {
         : "Optional";
     importVrm.disabled = loading || viewer === null;
     removeVrm.disabled = loading || currentVrmInfo === null;
-    showVrm.disabled = loading || currentVrmInfo === null;
+    showVrmControl.setState({
+      disabled: loading || currentVrmInfo === null,
+    });
     importVrmLabel.textContent = loading
       ? "Loading VRM…"
       : currentVrmInfo
@@ -1161,7 +1153,7 @@ export function bootstrap(): () => void {
       document.activeElement instanceof HTMLElement
         ? document.activeElement
         : importVrm;
-    previewSettings.open = true;
+    previewSettingsControl.setState({ open: true });
     vrmErrorMessage.textContent = message;
     vrmErrorBanner.hidden = false;
     vrmErrorBanner.focus();
@@ -1179,7 +1171,7 @@ export function bootstrap(): () => void {
     if (prompt.dataset.validated === "true") {
       const validation = validateGenerationForm(
         prompt.value,
-        duration.value,
+        String(durationControl.getSnapshot().value),
         seed.value,
       );
       promptError.textContent = validation.promptError ?? "";
@@ -1189,17 +1181,17 @@ export function bootstrap(): () => void {
   }
 
   function updateDuration(): void {
-    durationOutput.value = `${duration.value} seconds`;
-    duration.setAttribute("aria-valuetext", `${duration.value} seconds`);
-    const progress = ((Number(duration.value) - 2) / 8) * 100;
-    duration.style.setProperty("--range-progress", `${progress}%`);
+    const value = durationControl.getSnapshot().value;
+    const valueText = `${value} seconds`;
+    durationOutput.value = valueText;
+    durationControl.setState({ ariaValueText: valueText });
   }
 
   function updateSeed(): void {
     if (seed.dataset.validated === "true") {
       const validation = validateGenerationForm(
         prompt.value,
-        duration.value,
+        String(durationControl.getSnapshot().value),
         seed.value,
       );
       seedError.textContent = validation.seedError ?? "";
@@ -1208,14 +1200,10 @@ export function bootstrap(): () => void {
   }
 
   function updateTargetBuffer(): void {
-    const output = targetBuffer
-      .closest('[data-slot="field"]')
-      ?.querySelector<HTMLOutputElement>("output");
-    if (output) output.value = `${targetBuffer.value} frames`;
-    const min = Number(targetBuffer.min);
-    const max = Number(targetBuffer.max);
-    const progress = ((Number(targetBuffer.value) - min) / (max - min)) * 100;
-    targetBuffer.style.setProperty("--range-progress", `${progress}%`);
+    const value = targetBufferControl.getSnapshot().value;
+    const valueText = `${value} frames`;
+    targetBufferOutput.value = valueText;
+    targetBufferControl.setState({ ariaValueText: valueText });
   }
 
   function updateGenerateAvailability(): void {
@@ -1242,9 +1230,11 @@ export function bootstrap(): () => void {
       (currentMotion !== null && currentContinuation === null);
     restartGeneration.disabled = !modelReady || generationBusy;
     restartFromNow.disabled = !continuationAvailable;
-    streamGeneration.disabled =
-      generationBusy ||
-      (currentMotion !== null && currentContinuation === null);
+    continuousGenerationControl.setState({
+      disabled:
+        generationBusy ||
+        (currentMotion !== null && currentContinuation === null),
+    });
     importModel.disabled = modelLoading || modelCaching;
     removeModel.disabled = modelLoading || modelCaching;
 
@@ -1281,7 +1271,7 @@ export function bootstrap(): () => void {
   function markCurrentMotionPlaybackOnly(): void {
     currentContinuation = null;
     if (currentMotion) {
-      streamGeneration.checked = false;
+      continuousGenerationControl.setState({ checked: false });
       motionBadge.removeAttribute("data-state");
       motionBadge.textContent =
         `${currentMotion.frameCount} frames · ${currentMotion.fps} FPS · playback only`;
@@ -1337,12 +1327,12 @@ export function bootstrap(): () => void {
   function outputVisibilityFromControls(): ViewerOutputVisibility {
     return {
       ...editorState.outputVisibility,
-      skeleton: showSkeleton.checked,
+      skeleton: showSkeletonControl.getSnapshot().checked,
       mesh: false,
       reference: false,
-      contacts: showContacts.checked,
-      orientationAxes: showOrientations.checked,
-      trajectory: showTrajectory.checked,
+      contacts: showContactsControl.getSnapshot().checked,
+      orientationAxes: showOrientationsControl.getSnapshot().checked,
+      trajectory: showTrajectoryControl.getSnapshot().checked,
       constraints: false,
       initialTransform: false,
       waypoints: false,
@@ -1357,9 +1347,6 @@ export function bootstrap(): () => void {
 
   function updatePlayback(state: PlaybackState): void {
     const maxFrame = Math.max(0, state.frameCount - 1);
-    timeline.max = String(maxFrame);
-    timeline.value = String(Math.min(maxFrame, state.frame));
-    timeline.disabled = state.frameCount === 0;
     playPause.disabled = state.frameCount < 2;
     playbackSpeed.disabled = state.frameCount === 0;
     updateLoopControl({ disabled: state.frameCount < 2 });
@@ -1368,13 +1355,16 @@ export function bootstrap(): () => void {
       "aria-label",
       state.playing ? "Pause motion" : "Play motion",
     );
-    const progress = maxFrame > 0 ? (state.frame / maxFrame) * 100 : 0;
-    timeline.style.setProperty("--range-progress", `${progress}%`);
     const elapsed = formatTime(state.frame / state.fps);
     const total = formatTime(maxFrame / state.fps);
     currentTime.textContent = elapsed;
     totalTime.textContent = total;
-    timeline.setAttribute("aria-valuetext", `${elapsed} of ${total}`);
+    timelineControl.setState({
+      max: Math.max(1, maxFrame),
+      value: Math.min(maxFrame, state.frame),
+      disabled: state.frameCount === 0,
+      ariaValueText: `${elapsed} of ${total}`,
+    });
     maybeAutoReplan(state);
   }
 
@@ -1626,7 +1616,9 @@ export function bootstrap(): () => void {
     setEditor(editorState);
     syncOutputVisibility();
     if (resetPresentation) {
-      const loop = !streamGeneration.checked && !reducedMotion.matches;
+      const loop =
+        !continuousGenerationControl.getSnapshot().checked &&
+        !reducedMotion.matches;
       viewer.setLoop(loop);
       updateLoopControl({ pressed: loop });
     }
@@ -1733,7 +1725,7 @@ export function bootstrap(): () => void {
   function validateFormForGeneration(): FormValues | null {
     const validation = validateGenerationForm(
       prompt.value,
-      duration.value,
+      String(durationControl.getSnapshot().value),
       seed.value,
     );
     promptError.textContent = validation.promptError ?? "";
@@ -1879,7 +1871,7 @@ export function bootstrap(): () => void {
 
   function maybeAutoReplan(state: PlaybackState): void {
     if (
-      !streamGeneration.checked ||
+      !continuousGenerationControl.getSnapshot().checked ||
       !modelReady ||
       activeGeneration ||
       !currentMotion ||
@@ -1892,10 +1884,15 @@ export function bootstrap(): () => void {
     const remaining = state.frameCount - state.frame - 1;
     const threshold = Math.min(
       DEFAULT_REPLAN_THRESHOLD_FRAMES,
-      Math.max(1, Number(targetBuffer.value)),
+      Math.max(1, targetBufferControl.getSnapshot().value),
     );
     if (remaining > threshold) return;
-    const desired = integerInput(targetBuffer, 80, 1, 1000);
+    const desired = integerValue(
+      targetBufferControl.getSnapshot().value,
+      80,
+      1,
+      1000,
+    );
     const needed = Math.max(
       modelInfo?.generationFrames ?? 40,
       desired - remaining,
@@ -2072,9 +2069,9 @@ export function bootstrap(): () => void {
   });
 
   prompt.addEventListener("input", updatePrompt);
-  duration.addEventListener("input", updateDuration);
   seed.addEventListener("input", updateSeed);
-  targetBuffer.addEventListener("input", updateTargetBuffer);
+  durationControl.onCommit(updateDuration, lifecycle.signal);
+  targetBufferControl.onCommit(updateTargetBuffer, lifecycle.signal);
 
   document.addEventListener(PROMPT_EXAMPLE_EVENT, (event) => {
     if (!(event instanceof CustomEvent) || typeof event.detail !== "string") {
@@ -2141,14 +2138,7 @@ export function bootstrap(): () => void {
     );
   });
 
-  removeModel.addEventListener("click", async () => {
-    if (
-      !window.confirm(
-        "Unload the model and remove its saved browser copy? Generated motion will remain visible.",
-      )
-    ) {
-      return;
-    }
+  removeSavedModelAction.onTrigger(async () => {
     try {
       await removeCachedModelPack();
       cachedPack = false;
@@ -2173,7 +2163,7 @@ export function bootstrap(): () => void {
         error instanceof Error ? error.message : String(error),
       );
     }
-  });
+  }, lifecycle.signal);
 
   cancelGeneration.addEventListener("click", () => {
     if (!activeGeneration) return;
@@ -2195,7 +2185,12 @@ export function bootstrap(): () => void {
     const frame = viewer?.getPlaybackState().frame ?? 0;
     startGeneration("branch", {
       branchFrame: frame,
-      durationFrames: integerInput(targetBuffer, 80, 1, 1000),
+      durationFrames: integerValue(
+        targetBufferControl.getSnapshot().value,
+        80,
+        1,
+        1000,
+      ),
     });
   });
   applyPrompt.addEventListener("click", () => {
@@ -2211,21 +2206,23 @@ export function bootstrap(): () => void {
     );
     startGeneration("branch", {
       branchFrame,
-      durationFrames: integerInput(targetBuffer, 80, 1, 1000),
+      durationFrames: integerValue(
+        targetBufferControl.getSnapshot().value,
+        80,
+        1,
+        1000,
+      ),
       background: Boolean(playback?.playing),
     });
   });
 
-  const outputControls: Array<
-    [HTMLInputElement, keyof ViewerOutputVisibility]
-  > = [
-    [showSkeleton, "skeleton"],
-    [showContacts, "contacts"],
-    [showOrientations, "orientationAxes"],
-    [showTrajectory, "trajectory"],
-  ];
-  for (const [control] of outputControls) {
-    control.addEventListener("change", syncOutputVisibility);
+  for (const control of [
+    showSkeletonControl,
+    showContactsControl,
+    showOrientationsControl,
+    showTrajectoryControl,
+  ]) {
+    control.onCommit(syncOutputVisibility, lifecycle.signal);
   }
   importVrm.addEventListener("click", () => vrmFileInput.click());
   vrmFileInput.addEventListener("change", () => {
@@ -2242,7 +2239,7 @@ export function bootstrap(): () => void {
         }
         const info = await viewer.loadVrm(file);
         if (request !== activeVrmLoad) return;
-        showVrm.checked = true;
+        showVrmControl.setState({ checked: true });
         viewer.setVrmVisible(true);
         setVrmStatus(info);
         announce(`Loaded VRM avatar ${info.name}.`);
@@ -2259,46 +2256,35 @@ export function bootstrap(): () => void {
   removeVrm.addEventListener("click", () => {
     activeVrmLoad += 1;
     viewer?.clearVrm();
-    showVrm.checked = true;
+    showVrmControl.setState({ checked: true });
     clearVrmError();
     setVrmStatus(null);
     setVrmLoading(false);
     announce("Removed the VRM avatar.");
   });
-  showVrm.addEventListener("change", () => {
-    viewer?.setVrmVisible(showVrm.checked);
-    announce(showVrm.checked ? "VRM avatar shown." : "VRM avatar hidden.");
-  });
+  showVrmControl.onCommit((checked) => {
+    viewer?.setVrmVisible(checked);
+    announce(checked ? "VRM avatar shown." : "VRM avatar hidden.");
+  }, lifecycle.signal);
 
   dismissError.addEventListener("click", () => clearError(true));
   dismissModelError.addEventListener("click", () => clearModelError(true));
   dismissVrmError.addEventListener("click", () => clearVrmError(true));
   playPause.addEventListener("click", () => viewer?.togglePlaying());
-  timeline.addEventListener("input", () =>
-    viewer?.seek(Number(timeline.value)),
-  );
+  timelineControl.onCommit((value) => viewer?.seek(value), lifecycle.signal);
   playbackSpeed.addEventListener("change", () =>
     viewer?.setSpeed(Number(playbackSpeed.value)),
   );
-  document.addEventListener(
-    LOOP_CONTROL_CHANGE_EVENT,
-    (event) => {
-      if (!(event instanceof CustomEvent) || typeof event.detail !== "boolean") {
-        return;
-      }
-      viewer?.setLoop(event.detail);
-    },
-    { signal: lifecycle.signal },
-  );
+  loopControl.onCommit((pressed) => viewer?.setLoop(pressed), lifecycle.signal);
   resetCamera.addEventListener("click", () => viewer?.resetCamera());
-  streamGeneration.addEventListener("change", () => {
-    if (streamGeneration.checked) {
+  continuousGenerationControl.onCommit((checked) => {
+    if (checked) {
       viewer?.setLoop(false);
       updateLoopControl({ pressed: false });
       const state = viewer?.getPlaybackState();
       if (state) maybeAutoReplan(state);
     }
-  });
+  }, lifecycle.signal);
 
   const handleReducedMotionChange = (event: MediaQueryListEvent): void => {
     viewer?.setReducedMotion(event.matches);

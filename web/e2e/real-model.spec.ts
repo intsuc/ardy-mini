@@ -5,6 +5,12 @@ import path from "node:path";
 
 import { expect, test, type Page } from "@playwright/test";
 
+import {
+  openPreviewSettings,
+  setCheckedState,
+  setSliderValue,
+} from "./control-helpers";
+
 const configuredPack = process.env.ARDY_BROWSER_MODEL_PACK;
 const configuredBackend = process.env.ARDY_BROWSER_BACKEND ?? "wasm";
 const reducedMotion = process.env.ARDY_BROWSER_REDUCED_MOTION === "1";
@@ -20,18 +26,6 @@ const webGpuLaunchArgs =
     : [];
 
 test.use({ launchOptions: { args: webGpuLaunchArgs } });
-
-async function setRange(
-  page: Page,
-  selector: string,
-  value: number,
-): Promise<void> {
-  await page.locator(selector).evaluate((element, nextValue) => {
-    const input = element as HTMLInputElement;
-    input.value = String(nextValue);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  }, value);
-}
 
 async function runGeneration(
   page: Page,
@@ -218,8 +212,8 @@ test.describe("real browser model-pack", () => {
     await seed.fill("2");
     await expect(page.locator("#seed-error")).toBeEmpty();
 
-    await setRange(page, "#duration", 2);
-    await page.locator("#stream-generation").uncheck();
+    await setSliderValue(page, "#duration", 2);
+    await setCheckedState(page, "#stream-generation", false);
     await page.evaluate(() => {
       const stage = document.querySelector("#generation-stage");
       const badge = document.querySelector("#motion-badge");
@@ -298,16 +292,9 @@ test.describe("real browser model-pack", () => {
     );
     await expect(page.locator("#generation-progress")).toBeVisible();
     await expect(page.locator("#runtime-metric")).toBeVisible();
-    const previewSettings = page.locator("#preview-settings");
-    if (
-      !(await previewSettings.evaluate((element) =>
-        (element as HTMLDetailsElement).hasAttribute("open"),
-      ))
-    ) {
-      await previewSettings.locator(":scope > summary").click();
-    }
+    await openPreviewSettings(page);
     await expect(page.locator("#show-contacts")).toBeChecked();
-    await page.locator("#show-orientations").check();
+    await setCheckedState(page, "#show-orientations", true);
     await expect(page.locator("#show-orientations")).toBeChecked();
 
     const playPause = page.locator("#play-pause");
@@ -316,21 +303,24 @@ test.describe("real browser model-pack", () => {
     }
     await expect(playPause).toHaveAttribute("aria-label", "Play motion");
 
-    await setRange(page, "#target-buffer", 40);
-    await setRange(page, "#timeline", 39);
+    await setSliderValue(page, "#target-buffer", 40);
+    await setSliderValue(page, "#timeline", 39);
     timings.appendWallMs = await runGeneration(
       page,
-      () => page.locator("#stream-generation").check(),
+      () => setCheckedState(page, "#stream-generation", true),
       80,
     );
-    await page.locator("#stream-generation").uncheck();
+    await setCheckedState(page, "#stream-generation", false);
     if ((await playPause.getAttribute("aria-label")) === "Pause motion") {
       await playPause.click();
     }
     await expect(playPause).toHaveAttribute("aria-label", "Play motion");
 
-    await setRange(page, "#timeline", 18);
-    await expect(page.locator("#timeline")).toHaveValue("18");
+    await setSliderValue(page, "#timeline", 18);
+    await expect(page.locator("#timeline [role=slider]")).toHaveAttribute(
+      "aria-valuenow",
+      "18",
+    );
     timings.branchWallMs = await runGeneration(
       page,
       () => page.locator("#restart-from-now").click(),
@@ -359,7 +349,10 @@ test.describe("real browser model-pack", () => {
         "aria-pressed",
         "false",
       );
-      await expect(page.locator("#timeline")).toHaveValue("0");
+      await expect(page.locator("#timeline [role=slider]")).toHaveAttribute(
+        "aria-valuenow",
+        "0",
+      );
     } else {
       await expect(playPause).toHaveAttribute("aria-label", "Pause motion");
     }

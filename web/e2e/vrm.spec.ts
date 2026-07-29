@@ -3,6 +3,11 @@
 
 import { expect, test, type Page } from "@playwright/test";
 
+import {
+  openPreviewSettings,
+  setCheckedState,
+} from "./control-helpers";
+
 interface TestVrmMetadata {
   readonly name: string;
   readonly version: string;
@@ -140,14 +145,6 @@ function createTestVrm(metadata: TestVrmMetadata): Buffer {
   return glb;
 }
 
-async function openPreviewSettings(page: Page): Promise<void> {
-  const settings = page.locator("#preview-settings");
-  await expect(settings).toBeVisible();
-  if (!(await settings.evaluate((element) => element.hasAttribute("open")))) {
-    await settings.locator(":scope > summary").click();
-  }
-}
-
 test("loads, hides, replaces, and removes a local VRM avatar", async ({
   page,
 }) => {
@@ -156,7 +153,7 @@ test("loads, hides, replaces, and removes a local VRM avatar", async ({
 
   const state = page.locator("#vrm-state");
   const card = page.locator("#vrm-card");
-  const showAvatar = page.getByRole("checkbox", {
+  const showAvatar = page.getByRole("switch", {
     name: "Show VRM avatar",
   });
 
@@ -230,10 +227,10 @@ test("loads, hides, replaces, and removes a local VRM avatar", async ({
   );
   expect(observedStates).toContainEqual({ label: "Loading", busy: true });
 
-  await showAvatar.uncheck();
+  await setCheckedState(page, "#show-vrm", false);
   await expect(showAvatar).not.toBeChecked();
   await expect(page.locator("#app-status")).toContainText("VRM avatar hidden.");
-  await showAvatar.check();
+  await setCheckedState(page, "#show-vrm", true);
   await expect(showAvatar).toBeChecked();
   await expect(page.locator("#app-status")).toContainText("VRM avatar shown.");
 

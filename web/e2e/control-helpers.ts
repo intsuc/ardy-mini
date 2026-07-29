@@ -1,0 +1,63 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
+// SPDX-License-Identifier: Apache-2.0
+
+import { expect, type Page } from "@playwright/test"
+
+export async function setSliderValue(
+  page: Page,
+  selector: string,
+  value: number
+): Promise<void> {
+  const thumb = page.locator(`${selector} [role="slider"]`)
+  await expect(thumb).toBeEnabled()
+  await thumb.focus()
+
+  const minimum = Number(await thumb.getAttribute("aria-valuemin"))
+  const maximum = Number(await thumb.getAttribute("aria-valuemax"))
+  if (
+    !Number.isFinite(minimum) ||
+    !Number.isFinite(maximum) ||
+    value < minimum ||
+    value > maximum
+  ) {
+    throw new RangeError(
+      `Slider target ${value} is outside ${minimum}–${maximum}.`
+    )
+  }
+
+  await page.keyboard.press("Home")
+  for (let attempt = 0; attempt < 1000; attempt += 1) {
+    const current = Number(await thumb.getAttribute("aria-valuenow"))
+    if (current === value) break
+    const key = current < value ? "ArrowRight" : "ArrowLeft"
+    await page.keyboard.press(key)
+    const next = Number(await thumb.getAttribute("aria-valuenow"))
+    if (next === current) {
+      throw new RangeError(`Slider cannot reach ${value} from ${current}.`)
+    }
+  }
+
+  await expect(thumb).toHaveAttribute("aria-valuenow", String(value))
+}
+
+export async function setCheckedState(
+  page: Page,
+  selector: string,
+  checked: boolean
+): Promise<void> {
+  const control = page.locator(selector)
+  const expected = String(checked)
+  if ((await control.getAttribute("aria-checked")) !== expected) {
+    await control.click()
+  }
+  await expect(control).toHaveAttribute("aria-checked", expected)
+}
+
+export async function openPreviewSettings(page: Page): Promise<void> {
+  const trigger = page.locator("#preview-settings-trigger")
+  await expect(trigger).toBeVisible()
+  if ((await trigger.getAttribute("aria-expanded")) !== "true") {
+    await trigger.click()
+  }
+  await expect(trigger).toHaveAttribute("aria-expanded", "true")
+}

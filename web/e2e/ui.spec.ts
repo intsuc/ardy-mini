@@ -6,13 +6,10 @@ import path from "node:path";
 
 import { expect, test, type Page } from "@playwright/test";
 
-async function setRange(page: Page, selector: string, value: number): Promise<void> {
-  await page.locator(selector).evaluate((element, nextValue) => {
-    const input = element as HTMLInputElement;
-    input.value = String(nextValue);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  }, value);
-}
+import {
+  openPreviewSettings,
+  setSliderValue,
+} from "./control-helpers";
 
 test("renders the two-pane technical workspace without motion parameters", async ({
   page,
@@ -55,6 +52,10 @@ test("renders the two-pane technical workspace without motion parameters", async
     /WASM (threads ready|single-thread)/,
   );
   await expect(page.locator("#import-model")).toContainText("Choose model pack");
+  await expect(page.getByText("20 FPS", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Core40", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Runtime notes", { exact: true })).toHaveCount(0);
+  await expect(page.locator("#runtime-settings")).toHaveCount(0);
 
   for (const selector of [
     "#generate",
@@ -122,11 +123,35 @@ test("renders the two-pane technical workspace without motion parameters", async
   }
 
   await expect(page.locator("#preview-settings")).toBeVisible();
-  await page.locator("#preview-settings > summary").click();
+  await expect(page.locator("#preview-settings")).toHaveAttribute(
+    "data-slot",
+    "accordion",
+  );
+  await expect(page.locator("#stream-generation")).toHaveAttribute(
+    "data-slot",
+    "switch",
+  );
+  await expect(page.locator("#duration")).toHaveAttribute(
+    "data-slot",
+    "slider",
+  );
+  await expect(page.locator("#button-shortcut")).toHaveAttribute(
+    "data-slot",
+    "kbd",
+  );
+  await openPreviewSettings(page);
   await expect(page.getByText("VRM avatar", { exact: true })).toBeVisible();
   await expect(page.locator("#import-vrm")).toBeEnabled();
   await expect(page.getByText("Foot contacts", { exact: true })).toBeVisible();
   await expect(page.getByText("Orientations", { exact: true })).toBeVisible();
+  await expect(page.locator("#show-skeleton")).toHaveAttribute(
+    "data-slot",
+    "checkbox",
+  );
+  await expect(page.locator("#show-vrm")).toHaveAttribute(
+    "data-slot",
+    "switch",
+  );
   await expect(page.getByText("Body proxy", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Reference motion", { exact: true })).toHaveCount(0);
 });
@@ -514,8 +539,10 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
   await page.locator("#prompt-count").click();
   await expect(prompt).toBeFocused();
 
-  await setRange(page, "#duration", 8);
+  await setSliderValue(page, "#duration", 8);
   await expect(page.locator("#duration-output")).toHaveText("8 seconds");
+  await setSliderValue(page, "#target-buffer", 120);
+  await expect(page.locator("#target-buffer-output")).toHaveText("120 frames");
   await expect(page.getByRole("spinbutton", { name: "Seed" })).toHaveValue("2");
   await expect(page.getByLabel("Backend")).toHaveValue("auto");
 
@@ -566,11 +593,13 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   await page.keyboard.press("Tab");
   await expect(page.locator(".skip-link")).toBeFocused();
 
-  const runtimeNotes = page.locator("#runtime-settings");
-  const summary = runtimeNotes.locator("summary");
-  await summary.focus();
+  const previewSettingsTrigger = page.locator("#preview-settings-trigger");
+  await previewSettingsTrigger.focus();
   await page.keyboard.press("Space");
-  await expect(runtimeNotes).toHaveAttribute("open", "");
+  await expect(previewSettingsTrigger).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
 
   for (const label of [
     "Motion description",
@@ -622,18 +651,8 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   await page.keyboard.press("Home");
 
   const loopToggle = page.locator("#loop-toggle");
-  await page.evaluate(async () => {
-    const { LOOP_CONTROL_STATE_EVENT } = await import("/src/ui-events.ts");
-    document.dispatchEvent(
-      new CustomEvent(LOOP_CONTROL_STATE_EVENT, {
-        detail: { disabled: false },
-      }),
-    );
-  });
-  await expect(loopToggle).toBeEnabled();
-  await loopToggle.click();
-  await expect(loopToggle).toHaveAttribute("aria-pressed", "false");
   await expect(loopToggle).toBeDisabled();
+  await expect(loopToggle).toHaveAttribute("aria-pressed", "true");
 });
 
 test("keeps invalid model-pack errors beside the model setup action", async ({
@@ -717,7 +736,7 @@ test("stacks the workspace before the two-pane layout can overflow", async ({
     .toBe(true);
 });
 
-test("honors reduced motion and keeps native shadcn controls usable on mobile", async ({
+test("honors reduced motion and keeps shadcn controls usable on mobile", async ({
   page,
 }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
@@ -784,7 +803,7 @@ test("honors reduced motion and keeps native shadcn controls usable on mobile", 
   expect(panes[0]!.y).toBeLessThan(panes[1]!.y);
   await expect(page.locator(".inspector-panel")).toHaveCount(0);
 
-  await page.locator("#preview-settings > summary").click();
+  await openPreviewSettings(page);
   const preview = await page.locator("#viewport").boundingBox();
   expect(preview).not.toBeNull();
   expect(preview!.height).toBeGreaterThanOrEqual(384);
@@ -820,23 +839,6 @@ test("honors reduced motion and keeps native shadcn controls usable on mobile", 
     expect(box!.height).toBeGreaterThanOrEqual(28);
   }
 
-  const checkboxLabels = await Promise.all(
-    [
-      "#stream-generation",
-      "#show-vrm",
-      "#show-skeleton",
-      "#show-contacts",
-      "#show-orientations",
-      "#show-trajectory",
-    ].map((selector) =>
-      page.locator(selector).locator("xpath=..").boundingBox(),
-    ),
-  );
-  for (const label of checkboxLabels) {
-    expect(label).not.toBeNull();
-    expect(label!.height).toBeGreaterThanOrEqual(44);
-  }
-
   const playbackBoxes = await Promise.all(
     ["#play-pause", "#playback-speed", "#loop-toggle", "#reset-camera"].map(
       (selector) => page.locator(selector).boundingBox(),
@@ -853,4 +855,127 @@ test("honors reduced motion and keeps native shadcn controls usable on mobile", 
       ),
     )
     .toBe(true);
+});
+
+test("keeps coarse-pointer controls at least 44 pixels", async ({
+  browser,
+}, testInfo) => {
+  const context = await browser.newContext({
+    baseURL: testInfo.project.use.baseURL as string,
+    hasTouch: true,
+    viewport: { width: 390, height: 844 },
+  });
+  const page = await context.newPage();
+
+  try {
+    await page.goto("/");
+    await openPreviewSettings(page);
+    await expect
+      .poll(() =>
+        page.evaluate(() => matchMedia("(any-pointer: coarse)").matches),
+      )
+      .toBe(true);
+
+    const selectors = [
+      "#import-model",
+      "#prompt-example",
+      "#apply-prompt",
+      "#randomize-seed",
+      "#generate",
+      "#preview-settings-trigger",
+      "#play-pause",
+      "#playback-speed",
+      "#loop-toggle",
+      "#reset-camera",
+      "#import-vrm",
+      "#duration",
+      "#target-buffer",
+      "#timeline",
+    ];
+    const boxes = await Promise.all(
+      selectors.map((selector) => page.locator(selector).boundingBox()),
+    );
+    for (const box of boxes) {
+      expect(box).not.toBeNull();
+      expect(box!.width).toBeGreaterThanOrEqual(44);
+      expect(box!.height).toBeGreaterThanOrEqual(44);
+    }
+
+    const promptExamples = page.locator('[data-slot="select-item"]');
+    await page.locator("#prompt-example").click();
+    await expect(promptExamples).toHaveCount(10);
+    for (const item of await promptExamples.all()) {
+      const box = await item.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.height).toBeGreaterThanOrEqual(44);
+    }
+    await page.keyboard.press("Escape");
+
+    for (const controlId of [
+      "stream-generation",
+      "show-vrm",
+      "show-skeleton",
+      "show-contacts",
+      "show-orientations",
+      "show-trajectory",
+    ]) {
+      const label = page.locator(`label[for="${controlId}"]`);
+      const box = await label.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.height).toBeGreaterThanOrEqual(44);
+    }
+
+    const continuousGeneration = page.locator("#stream-generation");
+    const continuousLabel = page.locator(
+      'label[for="stream-generation"]',
+    );
+    await continuousLabel.scrollIntoViewIfNeeded();
+    const continuousLabelBox = await continuousLabel.boundingBox();
+    expect(continuousLabelBox).not.toBeNull();
+    await page.mouse.click(
+      continuousLabelBox!.x + continuousLabelBox!.width - 2,
+      continuousLabelBox!.y + 2,
+    );
+    await expect(continuousGeneration).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+
+    const orientations = page.locator("#show-orientations");
+    const orientationsLabel = page.locator(
+      'label[for="show-orientations"]',
+    );
+    await orientationsLabel.scrollIntoViewIfNeeded();
+    const orientationsLabelBox = await orientationsLabel.boundingBox();
+    expect(orientationsLabelBox).not.toBeNull();
+    await page.mouse.click(
+      orientationsLabelBox!.x + orientationsLabelBox!.width - 2,
+      orientationsLabelBox!.y + orientationsLabelBox!.height - 2,
+    );
+    await expect(orientations).toHaveAttribute("aria-checked", "true");
+  } finally {
+    await context.close();
+  }
+});
+
+test("returns focus to model selection after saved pack removal", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.locator("#model-state")).toHaveText("Not loaded");
+
+  const removeModel = page.locator("#remove-model");
+  await removeModel.evaluate((element) => {
+    (element as HTMLButtonElement).hidden = false;
+  });
+  await removeModel.click();
+  await expect(
+    page.getByRole("alertdialog", {
+      name: "Remove the saved model pack?",
+    }),
+  ).toBeVisible();
+
+  await page.locator("#confirm-remove-model").click();
+  await expect(page.locator("#import-model")).toBeFocused();
+  await expect(removeModel).toBeHidden();
 });

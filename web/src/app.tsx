@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef } from "react"
 import {
   IconCameraRotate,
   IconPlayerPause,
@@ -18,6 +18,23 @@ import {
   AlertDescription,
   AlertTitle,
 } from "@/components/ui/alert"
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -41,6 +58,8 @@ import {
   FieldError,
   FieldGroup,
   FieldLabel,
+  FieldLegend,
+  FieldSet,
 } from "@/components/ui/field"
 import {
   InputGroup,
@@ -50,6 +69,8 @@ import {
   InputGroupText,
   InputGroupTextarea,
 } from "@/components/ui/input-group"
+import { Kbd } from "@/components/ui/kbd"
+import { Label } from "@/components/ui/label"
 import {
   NativeSelect,
   NativeSelectOption,
@@ -68,15 +89,30 @@ import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import { Toggle } from "@/components/ui/toggle"
 import {
+  BoundCheckbox,
+  BoundSlider,
+  BoundSwitch,
+} from "@/components/control-bindings"
+import {
   PROMPT_EXAMPLES,
   PROMPT_EXAMPLE_EVENT,
 } from "@/prompt-examples"
 import { bootstrap } from "@/main"
 import {
-  LOOP_CONTROL_CHANGE_EVENT,
-  LOOP_CONTROL_STATE_EVENT,
-  type LoopControlState,
-} from "@/ui-events"
+  continuousGenerationControl,
+  durationControl,
+  loopControl,
+  previewSettingsControl,
+  removeSavedModelAction,
+  showContactsControl,
+  showOrientationsControl,
+  showSkeletonControl,
+  showTrajectoryControl,
+  showVrmControl,
+  targetBufferControl,
+  timelineControl,
+  useControlState,
+} from "@/ui-control-store"
 
 function EmptyFieldError({
   id,
@@ -182,22 +218,20 @@ function AppHeader() {
 }
 
 function ModelSection() {
+  const importModelRef = useRef<HTMLButtonElement>(null)
+  const focusImportAfterCloseRef = useRef(false)
+
   return (
     <section
       className="model-setup flex flex-col gap-3 border-b p-3"
       aria-labelledby="model-step-title"
     >
-      <div className="flex items-center justify-between gap-3">
-        <h2
-          className="text-xs font-medium text-muted-foreground"
-          id="model-step-title"
-        >
-          Model
-        </h2>
-        <Badge variant="secondary">
-          Core40
-        </Badge>
-      </div>
+      <h2
+        className="text-xs font-medium text-muted-foreground"
+        id="model-step-title"
+      >
+        Model
+      </h2>
 
       <Card id="model-card" size="sm">
         <CardHeader>
@@ -257,6 +291,7 @@ function ModelSection() {
 
       <div className="grid min-w-0 gap-1.5 min-[360px]:grid-cols-[minmax(0,1fr)_auto]">
         <Button
+          ref={importModelRef}
           id="import-model"
           className="min-w-0"
           variant="secondary"
@@ -272,16 +307,52 @@ function ModelSection() {
           hidden
           aria-hidden="true"
         />
-        <Button
-          id="remove-model"
-          className="min-w-0"
-          variant="destructive"
-          size="lg"
-          type="button"
-          hidden
-        >
-          Remove saved pack
-        </Button>
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <Button
+              id="remove-model"
+              className="min-w-0"
+              variant="destructive"
+              size="lg"
+              type="button"
+              hidden
+            >
+              Remove saved pack
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent
+            size="sm"
+            onCloseAutoFocus={(event) => {
+              if (!focusImportAfterCloseRef.current) return
+              focusImportAfterCloseRef.current = false
+              event.preventDefault()
+              importModelRef.current?.focus()
+            }}
+          >
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                Remove the saved model pack?
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                This unloads the model and removes its browser copy.
+                Generated motion remains available in the preview.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                id="confirm-remove-model"
+                variant="destructive"
+                onClick={() => {
+                  focusImportAfterCloseRef.current = true
+                  removeSavedModelAction.trigger()
+                }}
+              >
+                Remove saved pack
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
 
       <Alert
@@ -367,6 +438,10 @@ function PromptSection() {
 }
 
 function ClipSection() {
+  const continuousGeneration = useControlState(
+    continuousGenerationControl
+  )
+
   return (
     <section
       className="flex flex-col gap-3 border-b p-3"
@@ -382,7 +457,6 @@ function ClipSection() {
         <output
           id="duration-output"
           className="text-xs text-muted-foreground"
-          htmlFor="duration"
         >
           4 seconds
         </output>
@@ -390,17 +464,10 @@ function ClipSection() {
 
       <FieldGroup>
         <Field>
-          <FieldLabel htmlFor="duration">Duration</FieldLabel>
-          <input
-            id="duration"
-            name="duration"
-            type="range"
-            min="2"
-            max="10"
-            step="2"
-            defaultValue="4"
-            aria-label="Duration"
-            aria-valuetext="4 seconds"
+          <FieldLabel id="duration-label">Duration</FieldLabel>
+          <BoundSlider
+            control={durationControl}
+            aria-labelledby="duration-label"
           />
           <div
             className="flex justify-between text-xs text-muted-foreground"
@@ -470,41 +537,31 @@ function ClipSection() {
           </Field>
         </FieldGroup>
 
-        <label
-          className="flex min-h-11 items-center justify-between gap-2.5"
-          htmlFor="stream-generation"
+        <Field
+          data-disabled={continuousGeneration.disabled || undefined}
+          orientation="horizontal"
         >
-          <span className="text-xs font-medium">
+          <FieldLabel htmlFor={continuousGenerationControl.id}>
             Continuous generation
-          </span>
-          <input
-            id="stream-generation"
-            type="checkbox"
-            role="switch"
-            defaultChecked
-          />
-        </label>
+          </FieldLabel>
+          <BoundSwitch control={continuousGenerationControl} />
+        </Field>
 
         <Field>
           <div className="flex items-center justify-between gap-3">
-            <FieldLabel htmlFor="target-buffer">
+            <FieldLabel id="target-buffer-label">
               Target buffer
             </FieldLabel>
             <output
               className="text-xs text-muted-foreground"
-              htmlFor="target-buffer"
+              id="target-buffer-output"
             >
               80 frames
             </output>
           </div>
-          <input
-            id="target-buffer"
-            type="range"
-            min="40"
-            max="200"
-            step="40"
-            defaultValue="80"
-            aria-label="Target generation buffer in frames"
+          <BoundSlider
+            control={targetBufferControl}
+            aria-labelledby="target-buffer-label"
           />
           <div
             className="flex justify-between text-xs text-muted-foreground"
@@ -578,13 +635,12 @@ function GenerationActionsSection() {
         <span id="generate-label">
           Generate motion
         </span>
-        <span
-          className="text-xs opacity-70"
+        <Kbd
           id="button-shortcut"
           aria-hidden="true"
         >
           Ctrl ↵
-        </span>
+        </Kbd>
       </Button>
 
       <div className="flex flex-wrap items-center gap-1.5 [&>*]:flex-auto">
@@ -621,74 +677,32 @@ function GenerationActionsSection() {
 
 function GenerationMessages() {
   return (
-    <>
-      <Alert
-        className="m-3"
-        id="error-banner"
-        variant="destructive"
-        tabIndex={-1}
-        hidden
-      >
-        <AlertTitle id="error-title">Generation failed</AlertTitle>
-        <AlertDescription id="error-message" />
-        <AlertAction>
-          <Button
-            id="dismiss-error"
-            variant="ghost"
-            size="icon-lg"
-            type="button"
-            aria-label="Dismiss generation error"
-          >
-            <IconX data-icon="inline-start" aria-hidden="true" />
-          </Button>
-        </AlertAction>
-      </Alert>
-
-      <details className="settings-details" id="runtime-settings">
-        <summary>Runtime notes</summary>
-        <div className="details-body">
-          <p>
-            Prompts, model files, avatars, and generated motion stay
-            on this device.
-          </p>
-          <a
-            href="./notices/THIRD_PARTY_MODELS_AND_DATA.md"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Model and software notices
-          </a>
-        </div>
-      </details>
-    </>
+    <Alert
+      className="m-3"
+      id="error-banner"
+      variant="destructive"
+      tabIndex={-1}
+      hidden
+    >
+      <AlertTitle id="error-title">Generation failed</AlertTitle>
+      <AlertDescription id="error-message" />
+      <AlertAction>
+        <Button
+          id="dismiss-error"
+          variant="ghost"
+          size="icon-lg"
+          type="button"
+          aria-label="Dismiss generation error"
+        >
+          <IconX data-icon="inline-start" aria-hidden="true" />
+        </Button>
+      </AlertAction>
+    </Alert>
   )
 }
 
 function LoopToggle() {
-  const [state, setState] = useState({
-    pressed: true,
-    disabled: true,
-  })
-
-  useEffect(() => {
-    const updateState = (event: Event) => {
-      if (!(event instanceof CustomEvent)) return
-      const detail = event.detail as LoopControlState
-      setState((current) => {
-        const next = {
-          pressed: detail.pressed ?? current.pressed,
-          disabled: detail.disabled ?? current.disabled,
-        }
-        return next.pressed === current.pressed &&
-          next.disabled === current.disabled
-          ? current
-          : next
-      })
-    }
-    document.addEventListener(LOOP_CONTROL_STATE_EVENT, updateState)
-    return () =>
-      document.removeEventListener(LOOP_CONTROL_STATE_EVENT, updateState)
-  }, [])
+  const state = useControlState(loopControl)
 
   return (
     <Toggle
@@ -697,14 +711,7 @@ function LoopToggle() {
       size="lg"
       pressed={state.pressed}
       disabled={state.disabled}
-      onPressedChange={(pressed) => {
-        setState((current) => ({ ...current, pressed }))
-        document.dispatchEvent(
-          new CustomEvent<boolean>(LOOP_CONTROL_CHANGE_EVENT, {
-            detail: pressed,
-          })
-        )
-      }}
+      onPressedChange={loopControl.commit}
       aria-label="Loop playback"
     >
       <IconRepeat data-icon="inline-start" aria-hidden="true" />
@@ -806,16 +813,10 @@ function ViewportPanel() {
         >
           00:00.00
         </span>
-        <input
-          id="timeline"
-          className="timeline-slider"
-          type="range"
-          min="0"
-          max="1"
-          step="1"
-          defaultValue="0"
+        <BoundSlider
+          control={timelineControl}
+          className="min-w-12 max-[520px]:col-start-2"
           aria-label="Motion timeline"
-          disabled
         />
         <span
           className="min-w-15 text-xs text-muted-foreground tabular-nums"
@@ -823,7 +824,7 @@ function ViewportPanel() {
         >
           00:00.00
         </span>
-        <label className="speed-control">
+        <Label className="speed-control">
           <span className="sr-only">Playback speed</span>
           <NativeSelect
             id="playback-speed"
@@ -835,7 +836,7 @@ function ViewportPanel() {
             <NativeSelectOption value="1">1×</NativeSelectOption>
             <NativeSelectOption value="2">2×</NativeSelectOption>
           </NativeSelect>
-        </label>
+        </Label>
         <LoopToggle />
         <Button
           id="reset-camera"
@@ -855,6 +856,8 @@ function ViewportPanel() {
 }
 
 function VrmAvatarSection() {
+  const showVrm = useControlState(showVrmControl)
+
   return (
     <section
       className="grid gap-3"
@@ -908,13 +911,15 @@ function VrmAvatarSection() {
         </CardFooter>
       </Card>
 
-      <label
-        className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
-        htmlFor="show-vrm"
+      <Field
+        orientation="horizontal"
+        data-disabled={showVrm.disabled || undefined}
       >
-        <input id="show-vrm" type="checkbox" defaultChecked disabled />
-        <span>Show VRM avatar</span>
-      </label>
+        <FieldLabel htmlFor={showVrmControl.id}>
+          Show VRM avatar
+        </FieldLabel>
+        <BoundSwitch control={showVrmControl} />
+      </Field>
 
       <Alert
         id="vrm-error-banner"
@@ -942,57 +947,56 @@ function VrmAvatarSection() {
 
 function DisplayControls() {
   return (
-    <section className="grid gap-3" aria-labelledby="display-title">
-      <h3
-        className="text-xs font-medium text-muted-foreground"
-        id="display-title"
+    <FieldSet>
+      <FieldLegend variant="label">Display</FieldLegend>
+      <FieldGroup
+        data-slot="checkbox-group"
+        className="grid grid-cols-2 max-[520px]:grid-cols-1"
       >
-        Display
-      </h3>
-      <div className="grid grid-cols-2 max-[520px]:grid-cols-1">
-        <label
-          className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
-          htmlFor="show-skeleton"
-        >
-          <input id="show-skeleton" type="checkbox" defaultChecked />
-          <span>Skeleton</span>
-        </label>
-        <label
-          className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
-          htmlFor="show-contacts"
-        >
-          <input id="show-contacts" type="checkbox" defaultChecked />
-          <span>Foot contacts</span>
-        </label>
-        <label
-          className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
-          htmlFor="show-orientations"
-        >
-          <input id="show-orientations" type="checkbox" />
-          <span>Orientations</span>
-        </label>
-        <label
-          className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
-          htmlFor="show-trajectory"
-        >
-          <input id="show-trajectory" type="checkbox" defaultChecked />
-          <span>Root trajectory</span>
-        </label>
-      </div>
-    </section>
+        {([
+          [showSkeletonControl, "Skeleton"],
+          [showContactsControl, "Foot contacts"],
+          [showOrientationsControl, "Orientations"],
+          [showTrajectoryControl, "Root trajectory"],
+        ] as const).map(([control, label]) => (
+          <Field
+            orientation="horizontal"
+            key={control.id}
+          >
+            <BoundCheckbox control={control} />
+            <FieldLabel htmlFor={control.id}>{label}</FieldLabel>
+          </Field>
+        ))}
+      </FieldGroup>
+    </FieldSet>
   )
 }
 
 function PreviewSettingsSection() {
+  const state = useControlState(previewSettingsControl)
+
   return (
-    <details className="settings-details" id="preview-settings">
-      <summary>View settings</summary>
-      <div className="details-body grid gap-3">
-        <VrmAvatarSection />
-        <Separator />
-        <DisplayControls />
-      </div>
-    </details>
+    <Accordion
+      id={previewSettingsControl.id}
+      className="border-b px-3"
+      type="single"
+      collapsible
+      value={state.open ? "view-settings" : ""}
+      onValueChange={(value) =>
+        previewSettingsControl.commit(value === "view-settings")
+      }
+    >
+      <AccordionItem value="view-settings">
+        <AccordionTrigger id="preview-settings-trigger">
+          View settings
+        </AccordionTrigger>
+        <AccordionContent forceMount className="grid gap-3 pb-3">
+          <VrmAvatarSection />
+          <Separator />
+          <DisplayControls />
+        </AccordionContent>
+      </AccordionItem>
+    </Accordion>
   )
 }
 
@@ -1004,7 +1008,7 @@ function GenerationPanel() {
       aria-labelledby="generation-panel-title"
       tabIndex={-1}
     >
-      <div className="sticky top-0 z-10 flex min-h-15 items-center justify-between gap-3 border-b bg-background px-3 py-2.5 max-[760px]:static">
+      <div className="sticky top-0 z-10 flex min-h-15 items-center gap-3 border-b bg-background px-3 py-2.5 max-[760px]:static">
         <div>
           <p className="text-xs text-muted-foreground">Input</p>
           <h1
@@ -1014,7 +1018,6 @@ function GenerationPanel() {
             Motion generation
           </h1>
         </div>
-        <Badge variant="outline">20 FPS</Badge>
       </div>
 
       <form id="generation-form" noValidate>
