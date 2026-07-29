@@ -3,6 +3,13 @@
 
 import { defineConfig, devices } from "@playwright/test";
 
+const webGpuLaunchArgs = [
+  "--enable-unsafe-webgpu",
+  ...(process.platform === "linux"
+    ? ["--use-angle=vulkan", "--enable-features=Vulkan"]
+    : []),
+];
+
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
@@ -23,7 +30,10 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
+      use: {
+        ...devices["Desktop Chrome"],
+        launchOptions: { args: webGpuLaunchArgs },
+      },
     },
   ],
 });

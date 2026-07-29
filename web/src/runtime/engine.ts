@@ -4,11 +4,7 @@
 import { applyDdimStepInPlace, ddimStepForIndex } from "./ddim";
 import type { BrowserModelPackManifest } from "./manifest";
 import type { ModelPack } from "./model-pack";
-import type {
-  RuntimeBackend,
-  RuntimeBackendPreference,
-  RuntimeProgressStage,
-} from "./protocol";
+import type { RuntimeProgressStage } from "./protocol";
 import {
   PortableRandom,
   type PortableRandomState,
@@ -42,8 +38,6 @@ export interface RuntimeProgress {
 }
 
 export interface RuntimeLoadOptions {
-  backend?: RuntimeBackendPreference;
-  wasmPaths?: string;
   signal?: AbortSignal;
   onProgress?: (progress: RuntimeProgress) => void;
 }
@@ -105,7 +99,6 @@ export interface RuntimeMotionArrays {
 export interface RuntimeGenerationChunk extends RuntimeMotionArrays {
   seed: number;
   prompt: string;
-  backend: RuntimeBackend;
   fps: number;
   startFrame: number;
   frameCount: number;
@@ -126,7 +119,6 @@ export interface RuntimeContinuationState {
 export interface RuntimeGenerationResult extends RuntimeMotionArrays {
   seed: number;
   prompt: string;
-  backend: RuntimeBackend;
   fps: number;
   frameCount: number;
   startFrame: number;
@@ -384,7 +376,6 @@ function buildGlobalHybridTokens(
 
 export class BrowserArdyGenerationSession {
   readonly manifest: BrowserModelPackManifest;
-  readonly backend: RuntimeBackend;
   readonly #tokenizer: LocalTokenizer;
   readonly #sessions: RuntimeSessions;
   #random: PortableRandom;
@@ -395,7 +386,6 @@ export class BrowserArdyGenerationSession {
 
   constructor(
     manifest: BrowserModelPackManifest,
-    backend: RuntimeBackend,
     tokenizer: LocalTokenizer,
     sessions: RuntimeSessions,
     options: RuntimeSessionOptions,
@@ -405,7 +395,6 @@ export class BrowserArdyGenerationSession {
       options.initialHeading,
     );
     this.manifest = manifest;
-    this.backend = backend;
     this.#tokenizer = tokenizer;
     this.#sessions = sessions;
     this.#random = new PortableRandom(options.seed);
@@ -936,7 +925,6 @@ export class BrowserArdyGenerationSession {
       const chunk: RuntimeGenerationChunk = {
         seed: this.#random.seed,
         prompt: options.prompt,
-        backend: this.backend,
         fps: dimensions.fps,
         startFrame: chunkStartFrame,
         frameCount: framesToCopy,
@@ -1053,7 +1041,6 @@ export class BrowserArdyGenerationSession {
     const result: RuntimeGenerationResult = {
       seed: this.#random.seed,
       prompt: options.prompt,
-      backend: this.backend,
       fps: dimensions.fps,
       startFrame,
       frameCount: writtenFrames,
@@ -1108,7 +1095,6 @@ export class BrowserArdyGenerationSession {
 
 export class BrowserArdyRuntime {
   readonly manifest: BrowserModelPackManifest;
-  readonly backend: RuntimeBackend;
   readonly #tokenizer: LocalTokenizer;
   readonly #sessions: RuntimeSessions;
   #disposed = false;
@@ -1121,7 +1107,6 @@ export class BrowserArdyRuntime {
     this.manifest = manifest;
     this.#tokenizer = tokenizer;
     this.#sessions = sessions;
-    this.backend = sessions.backend;
   }
 
   static async create(
@@ -1144,8 +1129,6 @@ export class BrowserArdyRuntime {
     try {
       const sessions = await createRuntimeSessions(
         pack,
-        options.backend,
-        options.wasmPaths,
         (completed, total, message) => {
           throwIfCancelled(options.signal);
           options.onProgress?.({
@@ -1175,7 +1158,6 @@ export class BrowserArdyRuntime {
     }
     return new BrowserArdyGenerationSession(
       this.manifest,
-      this.backend,
       this.#tokenizer,
       this.#sessions,
       options,

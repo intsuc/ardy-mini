@@ -150,7 +150,9 @@ measurements from the completed run are in
 ### Fully in-browser MiniLM demo
 
 The Core40 MiniLM path runs end to end in the browser. A dedicated Web Worker
-uses ONNX Runtime Web with WebGPU first and WebAssembly (WASM) as a fallback.
+uses ONNX Runtime Web's WebGPU execution provider exclusively; there is no CPU
+or WebAssembly execution-provider fallback. The app checks for a secure
+context and a usable WebGPU adapter before opening the model pack.
 WordPiece tokenization, text conditioning, DDIM diffusion, autoregressive
 recentering/requantization, structured motion decoding, and three.js playback
 all remain on the user's device. The app is deliberately presented as a simple

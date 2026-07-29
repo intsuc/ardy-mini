@@ -67,9 +67,10 @@ Generation commands use these fixed internal values:
 | Automatic-extension threshold | `10` frames |
 | Initial root translation / heading | `[0, 0, 0]` / `0` radians |
 
-Duration (2–10 seconds), seed, backend, continuous generation, and its target
-buffer remain normal user controls. The browser model and worker contracts do
-not contain a constraint graph or constraint-generation inputs.
+Duration (2–10 seconds), seed, continuous generation, and its target buffer
+remain normal user controls. The WebGPU-only browser model and worker
+contracts do not contain a backend selector, a constraint graph, or
+constraint-generation inputs.
 
 The browser application does not expose or apply root/full-body/end-effector
 constraints, waypoints, dense trajectories, target velocity/heading, an
@@ -128,8 +129,9 @@ the current exporter.
 ## Architecture
 
 Inference runs in a dedicated Web Worker so ONNX execution does not block the
-main UI. ONNX Runtime Web selects WebGPU first in `auto` mode and creates
-separate WebAssembly sessions if WebGPU session creation fails.
+main UI. ONNX Runtime Web creates all three sessions with only the `webgpu`
+execution provider. If WebGPU is unavailable or session creation fails, the
+error is reported without creating replacement CPU/WebAssembly sessions.
 
 | Graph | Main inputs | Outputs |
 |---|---|---|
@@ -229,7 +231,7 @@ origin-private storage for later visits.
 The desktop UI has an **Input** pane and an **Output** pane:
 
 1. Load the model pack in **Input**, enter a prompt or select one of the
-   examples, choose clip duration/seed/backend, and generate.
+   examples, choose clip duration and seed, and generate.
 2. Use the Output pane's **View settings** disclosure for the skeleton,
    contacts, orientation axes, trajectory, and a local VRM avatar.
 3. Select **Load VRM** and choose a `.vrm` file. The avatar stays local to the
@@ -240,12 +242,10 @@ There is no right-side Control/Motion-parameters inspector. Kinematic
 constraints and detailed planning controls belong to the separate
 Python/Viser demo.
 
-The header reports the backend that actually loaded:
-
-- **WebGPU** is preferred and requires a supporting browser plus HTTPS or
-  localhost.
-- **WebAssembly** is the compatibility fallback. It can be substantially
-  slower and is not a real-time guarantee for this model size.
+The **Model** card reports WebGPU requirements before model selection. WebGPU
+is required; the app checks the secure context, `navigator.gpu`, and adapter
+availability before reading or decompressing the model archive. Use HTTPS or
+localhost on a browser and device with WebGPU.
 
 The preview supports drag/swipe orbit, wheel/pinch zoom, and keyboard
 operation. The camera follows the generated root position while preserving the
@@ -299,11 +299,13 @@ Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Embedder-Policy: require-corp
 ```
 
-These headers enable cross-origin isolation and multithreaded WASM where the
-browser supports it. Without isolation, the runtime selects one WASM thread.
-A production static host should send the same headers and serve the app, ONNX
-Runtime `.mjs`/`.wasm` assets, and any hosted model assets from compatible
-origins. WebGPU itself requires a secure context.
+These headers enable cross-origin isolation for ONNX Runtime's multithreaded
+host runtime. ONNX Runtime Web's WebGPU execution provider still uses an
+internal WebAssembly core for session management; that implementation detail
+is not a selectable inference backend or fallback. A production static host
+should send the same headers and serve the app, ONNX Runtime `.mjs`/`.wasm`
+host assets, and any hosted model assets from compatible origins. WebGPU
+itself requires a secure context.
 
 ## Validation
 
@@ -333,22 +335,17 @@ CPU errors:
 | Global rotations | `1.09e-3` |
 | Root positions / headings / contacts | `0` |
 
-Browser runtime and memory measurements are device-, browser-, driver-, and
-execution-provider-specific. The current pack has three graphs; measurements
+Browser runtime and memory measurements are device-, browser-, and
+driver-specific. The current pack has three graphs; measurements
 from the former four-graph directory pack or positions-only packs do not
 describe this contract.
 
-An opt-in real-pack Playwright run can force either provider:
+Run the opt-in real-pack Playwright test on WebGPU with:
 
 ```bash
 cd web
 
 ARDY_BROWSER_MODEL_PACK=../artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz \
-ARDY_BROWSER_BACKEND=wasm \
-npm run test:e2e -- e2e/real-model.spec.ts
-
-ARDY_BROWSER_MODEL_PACK=../artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz \
-ARDY_BROWSER_BACKEND=webgpu \
 npm run test:e2e -- e2e/real-model.spec.ts
 ```
 
@@ -377,8 +374,8 @@ Set `ARDY_BROWSER_REDUCED_MOTION=1` to exercise paused initial playback.
   VRM is the only supported local character format; the browser has no general
   scene-mesh importer.
 - A loaded VRM is page-local and must be selected again after a reload.
-- WASM is a fallback, not a performance promise. Three large graph sessions can
-  require considerably more RAM than the on-disk pack.
+- WebGPU is required. There is no CPU or WebAssembly execution-provider
+  fallback when WebGPU initialization or session creation fails.
 
 ## Distribution and trust
 

@@ -46,10 +46,10 @@ test("renders the two-pane technical workspace without motion parameters", async
   await expect(page.locator("#model-setup-help")).toContainText(
     "ardy-minilm-core40-browser-v1.tar.gz",
   );
-  await expect(page.locator("#privacy-badge")).toContainText("Local");
-  await expect(page.locator("#isolation-label")).toContainText(
-    /WASM (threads ready|single-thread)/,
-  );
+  await expect(page.locator("#privacy-badge")).toHaveCount(0);
+  await expect(page.locator("#gpu-badge")).toHaveCount(0);
+  await expect(page.locator("#isolation-badge")).toHaveCount(0);
+  await expect(page.locator("#backend")).toHaveCount(0);
   await expect(page.locator("#import-model")).toContainText("Choose model pack");
   await expect(page.locator("#model-file-input")).toHaveAttribute(
     "accept",
@@ -163,6 +163,32 @@ test("renders the two-pane technical workspace without motion parameters", async
   await expect(page.getByText("Reference motion", { exact: true })).toHaveCount(0);
 });
 
+test("blocks model loading before archive work when WebGPU is unavailable", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "gpu", {
+      configurable: true,
+      value: {
+        requestAdapter: async () => null,
+      },
+    });
+  });
+  await page.goto("/");
+
+  await expect(page.locator("#model-title")).toHaveText("WebGPU required");
+  await expect(page.locator("#model-state")).toHaveText("Unavailable");
+  await expect(page.locator("#model-detail")).toContainText(
+    "No compatible GPU adapter is available",
+  );
+  await expect(page.locator("#import-model")).toBeDisabled();
+  await expect(page.locator("#model-file-input")).toBeDisabled();
+  await expect(page.locator("#model-setup-help")).toBeHidden();
+  await expect(page.locator("#generate-help")).toContainText(
+    "WebGPU is required",
+  );
+});
+
 test("retains the square Lyra treatment on standard shadcn surfaces", async ({
   page,
 }) => {
@@ -171,7 +197,6 @@ test("retains the square Lyra treatment on standard shadcn surfaces", async ({
   const radii = await page.evaluate(() =>
     [
       "#model-card",
-      "#privacy-badge",
       "#generate",
       "#prompt",
       "#seed",
@@ -185,7 +210,7 @@ test("retains the square Lyra treatment on standard shadcn surfaces", async ({
     }),
   );
 
-  expect(radii).toEqual(["0px", "0px", "0px", "0px", "0px", "0px"]);
+  expect(radii).toEqual(["0px", "0px", "0px", "0px", "0px"]);
 });
 
 test("keeps the shadow light and plane under off-origin motion", async ({
@@ -551,7 +576,6 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
   await setSliderValue(page, "#target-buffer", 120);
   await expect(page.locator("#target-buffer-output")).toHaveText("120 frames");
   await expect(page.getByRole("spinbutton", { name: "Seed" })).toHaveValue("2");
-  await expect(page.getByLabel("Backend")).toHaveValue("auto");
 
   const promptExample = page.getByRole("combobox", {
     name: "Example prompt",
@@ -627,7 +651,6 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   for (const label of [
     "Motion description",
     "Seed",
-    "Backend",
   ]) {
     await expect(page.getByLabel(label, { exact: true })).toHaveCount(1);
   }
@@ -844,7 +867,7 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
   expect(preview!.height).toBeGreaterThanOrEqual(384);
 
   const mobileFormFontSizes = await page.evaluate(() =>
-    ["#prompt", "#seed", "#backend", "#prompt-example"].map((selector) => {
+    ["#prompt", "#seed", "#prompt-example"].map((selector) => {
       const element = document.querySelector(selector);
       if (!(element instanceof HTMLElement)) {
         throw new Error(`Missing mobile form control: ${selector}`);
@@ -852,7 +875,7 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
       return getComputedStyle(element).fontSize;
     }),
   );
-  expect(mobileFormFontSizes).toEqual(["16px", "16px", "16px", "16px"]);
+  expect(mobileFormFontSizes).toEqual(["16px", "16px", "16px"]);
 
   const controlSelectors = [
     "#import-model",

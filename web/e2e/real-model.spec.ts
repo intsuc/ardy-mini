@@ -12,20 +12,8 @@ import {
 } from "./control-helpers";
 
 const configuredPack = process.env.ARDY_BROWSER_MODEL_PACK;
-const configuredBackend = process.env.ARDY_BROWSER_BACKEND ?? "wasm";
 const reducedMotion = process.env.ARDY_BROWSER_REDUCED_MOTION === "1";
 const operationTimeout = 20 * 60 * 1000;
-const webGpuLaunchArgs =
-  configuredBackend === "webgpu"
-    ? [
-        "--enable-unsafe-webgpu",
-        ...(process.platform === "linux"
-          ? ["--use-angle=vulkan", "--enable-features=Vulkan"]
-          : []),
-      ]
-    : [];
-
-test.use({ launchOptions: { args: webGpuLaunchArgs } });
 
 async function runGeneration(
   page: Page,
@@ -60,7 +48,6 @@ test.describe("real browser model-pack", () => {
     page,
   }, testInfo) => {
     testInfo.setTimeout(45 * 60 * 1000);
-    expect(["auto", "webgpu", "wasm"]).toContain(configuredBackend);
 
     // This test covers inference rather than persistence. Avoid a second
     // OPFS copy while running in CI or on a developer workstation.
@@ -86,7 +73,7 @@ test.describe("real browser model-pack", () => {
 
     if (reducedMotion) await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto("/");
-    await page.waitForFunction(() => document.querySelector("#backend") !== null);
+    await expect(page.locator("#model-state")).toHaveText("Not loaded");
     await expect(page.locator("#model-setup-help")).toContainText(
       "ardy-minilm-core40-browser-v1.tar.gz",
     );
@@ -115,6 +102,7 @@ test.describe("real browser model-pack", () => {
           (navigator as Navigator & { deviceMemory?: number }).deviceMemory ??
           null,
         webgpu: gpu !== undefined,
+        adapterAvailable: adapter !== null,
         adapter:
           adapter?.info === undefined
             ? null
@@ -127,6 +115,8 @@ test.describe("real browser model-pack", () => {
       };
     });
     expect(environment.crossOriginIsolated).toBe(true);
+    expect(environment.webgpu).toBe(true);
+    expect(environment.adapterAvailable).toBe(true);
 
     await page.evaluate(() => {
       const title = document.querySelector("#model-title");
@@ -140,13 +130,6 @@ test.describe("real browser model-pack", () => {
         window as typeof window & { __ardyModelLoadStages?: string[] }
       ).__ardyModelLoadStages = stages;
     });
-    await page.evaluate((backend) => {
-      const select = document.querySelector<HTMLSelectElement>("#backend");
-      if (!select) throw new Error("Missing backend selector");
-      select.value = backend;
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    }, configuredBackend);
-
     const loadStart = performance.now();
     await page
       .locator("#model-file-input")
@@ -177,7 +160,7 @@ test.describe("real browser model-pack", () => {
       "ardy-minilm-core40-browser-v1",
     );
     await expect(page.locator("#model-detail")).not.toContainText(
-      /WebGPU|WebAssembly|FPS/,
+      /WebGPU|FPS/,
     );
     const prompt = page.getByLabel("Motion description");
     const seed = page.getByRole("spinbutton", { name: "Seed" });
@@ -386,9 +369,7 @@ test.describe("real browser model-pack", () => {
       body: Buffer.from(
         JSON.stringify(
           {
-            configuredBackend,
             reducedMotion,
-            launchArgs: webGpuLaunchArgs,
             loadWallMs,
             timings,
             environment,

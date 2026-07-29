@@ -11,6 +11,7 @@ import {
   type RuntimeProgress,
 } from "./runtime/engine";
 import { loadModelPackFromTarGzip } from "./runtime/model-pack";
+import { assertWebGpuAvailable } from "./runtime/sessions";
 import {
   parseWorkerCommand,
   serializeWorkerError,
@@ -243,6 +244,7 @@ function motionTransfers(
 
 function load(command: Extract<WorkerCommand, { type: "loadModelPack" }>): void {
   startOperation(command.requestId, "loading", async (operation) => {
+    await assertWebGpuAvailable();
     const pack = await loadModelPackFromTarGzip(
       command.archive,
       (progress) => postProgress(command.requestId, progress),
@@ -254,8 +256,6 @@ function load(command: Extract<WorkerCommand, { type: "loadModelPack" }>): void 
       generationSession = null;
     }
     const loaded = await BrowserArdyRuntime.create(pack, {
-      backend: command.backend,
-      wasmPaths: command.wasmPaths,
       signal: operation.controller.signal,
       onProgress: (progress) => postProgress(command.requestId, progress),
     });
@@ -267,7 +267,6 @@ function load(command: Extract<WorkerCommand, { type: "loadModelPack" }>): void 
       model: {
         id: loaded.manifest.model.id,
         variant: loaded.manifest.model.variant,
-        backend: loaded.backend,
         fps: loaded.manifest.dimensions.fps,
         minFrames: loaded.manifest.generation.min_frames,
         maxFrames: loaded.manifest.generation.max_frames,
@@ -484,7 +483,6 @@ function status(command: Extract<WorkerCommand, { type: "getStatus" }>): void {
         state: active?.kind === "generating" ? "generating" : "ready",
         ...(active === null ? {} : { activeRequestId: active.requestId }),
         modelId: runtime.manifest.model.id,
-        backend: runtime.backend,
         generatedFrameCount: generationSession?.frameCount ?? 0,
         capabilities: capabilitiesFor(runtime),
       },

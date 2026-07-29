@@ -8,10 +8,6 @@ import type {
   GraphSpec,
 } from "./manifest";
 import type { ModelPack } from "./model-pack";
-import type {
-  RuntimeBackend,
-  RuntimeBackendPreference,
-} from "./protocol";
 
 export { ort };
 
@@ -19,7 +15,6 @@ export interface RuntimeSessions {
   textEncoder: ort.InferenceSession;
   denoiser: ort.InferenceSession;
   decoder: ort.InferenceSession;
-  backend: RuntimeBackend;
 }
 
 export type SessionProgressCallback = (
@@ -28,25 +23,57 @@ export type SessionProgressCallback = (
   message: string,
 ) => void;
 
-function webGpuAvailable(): boolean {
-  const navigatorWithGpu = globalThis.navigator as
-    | (Navigator & { gpu?: unknown })
-    | undefined;
-  return navigatorWithGpu?.gpu !== undefined && globalThis.isSecureContext !== false;
+interface WebGpuApi {
+  requestAdapter(): Promise<unknown | null>;
 }
 
-function configureOrt(wasmPaths = "/ort/"): void {
+let webGpuReady = false;
+
+export async function assertWebGpuAvailable(): Promise<void> {
+  if (webGpuReady) return;
+  if (globalThis.isSecureContext === false) {
+    throw new Error(
+      "WebGPU requires HTTPS or localhost. Open this demo in a secure context and try again.",
+    );
+  }
+  const navigatorWithGpu = globalThis.navigator as
+    | (Navigator & { gpu?: WebGpuApi })
+    | undefined;
+  if (!navigatorWithGpu?.gpu) {
+    throw new Error(
+      "WebGPU is required. Use a WebGPU-capable browser and device.",
+    );
+  }
+  let adapter: unknown | null;
+  try {
+    adapter = await navigatorWithGpu.gpu.requestAdapter();
+  } catch (error) {
+    throw new Error("WebGPU adapter initialization failed.", { cause: error });
+  }
+  if (adapter === null) {
+    throw new Error(
+      "WebGPU is required, but no compatible GPU adapter is available.",
+    );
+  }
+  webGpuReady = true;
+}
+
+function runtimeAssetBaseUrl(): string {
+  if (typeof globalThis.location === "undefined") return "/ort/";
+  return new URL("../ort/", globalThis.location.href).href;
+}
+
+function configureOrt(): void {
   // ORT reports benign WebGPU CPU-fallback assignments at warning severity
   // through console.error. Keep actionable runtime failures visible without
   // presenting expected shape-op placement as an application error.
   ort.env.logLevel = "error";
+  // ONNX Runtime's WebGPU execution provider is hosted by its WebAssembly
+  // runtime. These settings initialize that host; they do not enable the
+  // WebAssembly execution provider or a CPU fallback session.
   ort.env.wasm.proxy = false;
   ort.env.wasm.numThreads = globalThis.crossOriginIsolated ? 0 : 1;
-  ort.env.wasm.wasmPaths = wasmPaths;
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
+  ort.env.wasm.wasmPaths = runtimeAssetBaseUrl();
 }
 
 async function createSession(
@@ -55,7 +82,6 @@ async function createSession(
     Record<string, string>,
     Record<string, string | undefined>
   >,
-  executionProviders: ort.InferenceSession.ExecutionProviderConfig[],
 ): Promise<ort.InferenceSession> {
   const [model, externalData] = await Promise.all([
     pack.read(graph.model),
@@ -67,7 +93,7 @@ async function createSession(
     ),
   ]);
   return ort.InferenceSession.create(model, {
-    executionProviders,
+    executionProviders: ["webgpu"],
     logSeverityLevel: 3,
     ...(externalData.length === 0 ? {} : { externalData }),
   });
@@ -80,27 +106,24 @@ async function releaseSessions(sessions: ort.InferenceSession[]): Promise<void> 
 async function createAll(
   pack: ModelPack,
   graphs: BrowserGraphSpecs,
-  providers: ort.InferenceSession.ExecutionProviderConfig[],
-  backend: RuntimeBackend,
   onProgress?: SessionProgressCallback,
 ): Promise<RuntimeSessions> {
   const created: ort.InferenceSession[] = [];
   const total = 3;
   try {
-    const textEncoder = await createSession(pack, graphs.text_encoder, providers);
+    const textEncoder = await createSession(pack, graphs.text_encoder);
     created.push(textEncoder);
     onProgress?.(1, total, "text_encoder.onnx");
-    const denoiser = await createSession(pack, graphs.denoiser, providers);
+    const denoiser = await createSession(pack, graphs.denoiser);
     created.push(denoiser);
     onProgress?.(2, total, "denoiser.onnx");
-    const decoder = await createSession(pack, graphs.decoder, providers);
+    const decoder = await createSession(pack, graphs.decoder);
     created.push(decoder);
     onProgress?.(total, total, "decoder.onnx");
     return {
       textEncoder,
       denoiser,
       decoder,
-      backend,
     };
   } catch (error) {
     await releaseSessions(created);
@@ -123,31 +146,13 @@ function releaseGraphAssets(pack: ModelPack, graphs: BrowserGraphSpecs): void {
 
 export async function createRuntimeSessions(
   pack: ModelPack,
-  preference: RuntimeBackendPreference = "auto",
-  wasmPaths?: string,
   onProgress?: SessionProgressCallback,
 ): Promise<RuntimeSessions> {
-  configureOrt(wasmPaths);
+  await assertWebGpuAvailable();
+  configureOrt();
   const graphs = pack.manifest.graphs;
-  const shouldTryWebGpu = preference !== "wasm" && webGpuAvailable();
   try {
-    if (shouldTryWebGpu) {
-      try {
-        return await createAll(
-          pack,
-          graphs,
-          ["webgpu"],
-          "webgpu",
-          onProgress,
-        );
-      } catch (webGpuError) {
-        if (isAbortError(webGpuError)) {
-          throw webGpuError;
-        }
-        console.warn("WebGPU initialization failed; retrying with WASM.", webGpuError);
-      }
-    }
-    return await createAll(pack, graphs, ["wasm"], "wasm", onProgress);
+    return await createAll(pack, graphs, onProgress);
   } finally {
     releaseGraphAssets(pack, graphs);
   }

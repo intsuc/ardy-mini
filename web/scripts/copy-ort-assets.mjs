@@ -27,8 +27,9 @@ if (packageMetadata.version !== expectedVersion) {
   );
 }
 
-// The external-WASM build selected by `onnxruntime-web/webgpu` uses Asyncify
-// for both its WebGPU path and the WASM execution-provider fallback.
+// `onnxruntime-web/webgpu` uses this Asyncify WebAssembly core to host its
+// WebGPU execution provider. Shipping it does not enable a selectable
+// WebAssembly execution provider or a CPU fallback session.
 const assets = [
   "ort-wasm-simd-threaded.asyncify.mjs",
   "ort-wasm-simd-threaded.asyncify.wasm",

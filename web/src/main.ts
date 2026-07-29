@@ -13,7 +13,6 @@ import {
   type LoadModelPackCommand,
   type ModelLoadedEvent,
   type ProgressEvent,
-  type RuntimeBackendPreference,
   type WorkerCommand,
   type WorkerEvent,
 } from "./runtime/protocol";
@@ -59,7 +58,6 @@ const UINT32_MAX = 0xffff_ffff;
 const ALLOWED_DURATIONS = new Set([2, 4, 6, 8, 10]);
 const CACHE_ROOT = "ardy-mini-model-cache";
 const CACHE_ARCHIVE = "active-pack.tar.gz";
-const ORT_WASM_PATH = new URL("ort/", document.baseURI).href;
 const DEFAULT_TEXT_CFG_WEIGHT = 3.5;
 const DEFAULT_HISTORY_FRAMES = 40;
 const DEFAULT_REPLAN_BUFFER_FRAMES = 20;
@@ -75,6 +73,30 @@ interface FormValidation {
   values?: FormValues;
   promptError?: string;
   seedError?: string;
+}
+
+type WebGpuState = "checking" | "ready" | "unavailable";
+
+interface WebGpuApi {
+  requestAdapter(): Promise<unknown | null>;
+}
+
+async function webGpuUnavailableReason(): Promise<string | null> {
+  if (globalThis.isSecureContext === false) {
+    return "Open this demo over HTTPS or localhost, then reload the page.";
+  }
+  const gpu = (navigator as Navigator & { gpu?: WebGpuApi }).gpu;
+  if (!gpu) {
+    return "Use a browser and device that support WebGPU, then reload the page.";
+  }
+  try {
+    if ((await gpu.requestAdapter()) === null) {
+      return "No compatible GPU adapter is available. Check browser GPU settings or use another device.";
+    }
+  } catch {
+    return "WebGPU could not initialize. Check browser GPU settings or use another device.";
+  }
+  return null;
 }
 
 export function cameraMoveForCode(
@@ -621,8 +643,6 @@ export function bootstrap(): () => void {
   const seed = requiredElement<HTMLInputElement>("seed");
   const seedError = requiredElement<HTMLElement>("seed-error");
   const randomizeSeed = requiredElement<HTMLButtonElement>("randomize-seed");
-  const backend = requiredElement<HTMLSelectElement>("backend");
-  const backendHelp = requiredElement<HTMLElement>("backend-help");
   const importModel = requiredElement<HTMLButtonElement>("import-model");
   const importModelLabel = requiredElement<HTMLElement>("import-model-label");
   const removeModel = requiredElement<HTMLButtonElement>("remove-model");
@@ -672,17 +692,9 @@ export function bootstrap(): () => void {
   const playbackSpeed =
     requiredElement<HTMLSelectElement>("playback-speed");
   const resetCamera = requiredElement<HTMLButtonElement>("reset-camera");
-  const gpuDot = requiredElement<HTMLElement>("gpu-dot");
-  const gpuLabel = requiredElement<HTMLElement>("gpu-label");
-  const isolationDot = requiredElement<HTMLElement>("isolation-dot");
-  const isolationLabel = requiredElement<HTMLElement>("isolation-label");
   const appStatus = requiredElement<HTMLElement>("app-status");
   const viewportPanel = requiredElement<HTMLElement>("viewport-panel");
   const viewport = requiredElement<HTMLElement>("viewport");
-  const modelRuntimeStatus =
-    requiredElement<HTMLElement>("model-runtime-status");
-  const modelRuntimeDetail =
-    requiredElement<HTMLElement>("model-runtime-detail");
 
   const vrmCard = requiredElement<HTMLElement>("vrm-card");
   const vrmName = requiredElement<HTMLElement>("vrm-name");
@@ -701,21 +713,7 @@ export function bootstrap(): () => void {
 
   restartFromNow.disabled = true;
 
-  const hasWebGpu = "gpu" in navigator;
-  const webGpuOption =
-    backend.querySelector<HTMLOptionElement>('option[value="webgpu"]');
-  if (webGpuOption) webGpuOption.disabled = !hasWebGpu;
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-  gpuDot.dataset.state = hasWebGpu ? "available" : "unavailable";
-  gpuLabel.textContent = hasWebGpu
-    ? "WebGPU available"
-    : "WebGPU unavailable";
-  isolationDot.dataset.state = crossOriginIsolated
-    ? "available"
-    : "unavailable";
-  isolationLabel.textContent = crossOriginIsolated
-    ? "WASM threads ready"
-    : "WASM single-thread";
 
   let errorReturnFocus: HTMLElement | null = null;
   let modelErrorReturnFocus: HTMLElement | null = null;
@@ -748,8 +746,8 @@ export function bootstrap(): () => void {
   let packPendingCache = false;
   let cachedPack = false;
   let modelLabel = "";
-  let modelBackend = "";
   let modelInfo: ModelLoadedEvent["model"] | null = null;
+  let webGpuState: WebGpuState = "checking";
   let activeManifest: BrowserModelPackManifest | null = null;
   let generationProgressValue = 0;
   let modelProgressValue = 0;
@@ -836,7 +834,7 @@ export function bootstrap(): () => void {
   }
 
   function setModelStatus(
-    state: "missing" | "loading" | "ready",
+    state: "missing" | "loading" | "ready" | "unavailable",
     title: string,
     detail: string,
     label: string,
@@ -846,19 +844,10 @@ export function bootstrap(): () => void {
     modelTitle.textContent = title;
     modelDetail.textContent = detail;
     modelState.textContent = label;
-    modelSetupHelp.hidden = state === "ready";
+    modelSetupHelp.hidden = state === "ready" || state === "unavailable";
     importModelLabel.textContent =
       state === "ready" ? "Replace model pack" : "Choose model pack";
     form.dataset.modelState = state;
-    modelRuntimeStatus.dataset.state = state;
-    modelRuntimeDetail.textContent = `${title}. ${detail}`;
-  }
-
-  function resetRuntimeBadge(): void {
-    gpuDot.dataset.state = hasWebGpu ? "available" : "unavailable";
-    gpuLabel.textContent = hasWebGpu
-      ? "WebGPU available"
-      : "WebGPU unavailable";
   }
 
   function showError(title: string, message: string): void {
@@ -1042,13 +1031,20 @@ export function bootstrap(): () => void {
         generationBusy ||
         (currentMotion !== null && currentContinuation === null),
     });
-    importModel.disabled = modelLoading || modelCaching;
+    importModel.disabled =
+      webGpuState !== "ready" || modelLoading || modelCaching;
+    fileInput.disabled = importModel.disabled;
     removeModel.disabled = modelLoading || modelCaching;
 
     if (generationBusy) {
       generateHelp.textContent = activeRestoreRequest
         ? "Restoring the saved generation state."
         : "Generating locally. Received frames remain available if you cancel.";
+    } else if (webGpuState === "checking") {
+      generateHelp.textContent = "Checking WebGPU support.";
+    } else if (webGpuState === "unavailable") {
+      generateHelp.textContent =
+        "WebGPU is required to load the model and generate motion.";
     } else if (modelLoading || modelCaching) {
       generateHelp.textContent = "Preparing the local model pack.";
     } else if (!modelReady) {
@@ -1068,9 +1064,13 @@ export function bootstrap(): () => void {
     ) {
       generationStage.textContent = modelReady
         ? "Ready to generate"
-        : modelLoading || modelCaching
-          ? "Preparing model"
-          : "Waiting for model";
+        : webGpuState === "checking"
+          ? "Checking WebGPU"
+          : webGpuState === "unavailable"
+            ? "WebGPU unavailable"
+            : modelLoading || modelCaching
+              ? "Preparing model"
+              : "Waiting for model";
       generationPercent.textContent = "—";
     }
   }
@@ -1184,6 +1184,11 @@ export function bootstrap(): () => void {
   ): Promise<void> {
     clearError();
     clearModelError();
+    if (webGpuState !== "ready") {
+      throw new Error(
+        "WebGPU is required. Use a supported browser and device over HTTPS or localhost.",
+      );
+    }
     if (!isModelPackArchive(archive)) {
       throw new Error("Choose a non-empty .tar.gz model-pack file.");
     }
@@ -1194,13 +1199,6 @@ export function bootstrap(): () => void {
     modelLoading = true;
     modelReady = false;
     modelCard.setAttribute("aria-busy", "true");
-    gpuDot.removeAttribute("data-state");
-    gpuLabel.textContent =
-      backend.value === "wasm"
-        ? "Preparing WebAssembly"
-        : backend.value === "webgpu"
-          ? "Preparing WebGPU"
-          : "Selecting runtime";
     modelProgress.hidden = false;
     modelProgressValue = 0;
     setProgress(modelProgressControl, 0);
@@ -1219,8 +1217,6 @@ export function bootstrap(): () => void {
       type: "loadModelPack",
       requestId: activeLoadRequest,
       archive,
-      backend: backend.value as RuntimeBackendPreference,
-      wasmPaths: ORT_WASM_PATH,
     };
     postCommand(command);
   }
@@ -1334,10 +1330,6 @@ export function bootstrap(): () => void {
     activeManifest = event.model.manifest;
     modelInfo = event.model;
     modelLabel = event.model.variant || event.model.id;
-    modelBackend =
-      event.model.backend === "webgpu" ? "WebGPU" : "WebAssembly";
-    gpuDot.dataset.state = "available";
-    gpuLabel.textContent = `Running on ${modelBackend}`;
     modelCard.removeAttribute("aria-busy");
     modelProgress.hidden = true;
     setModelStatus(
@@ -1356,8 +1348,8 @@ export function bootstrap(): () => void {
     updateGenerateAvailability();
     announce(
       incompatibleContinuation
-        ? `${event.model.variant || "ARDY Mini Core40"} is ready on ${modelBackend}. The displayed motion remains playback-only because its continuation belongs to a different model pack.`
-        : `${event.model.variant || "ARDY Mini Core40"} is ready on ${modelBackend}.`,
+        ? `${event.model.variant || "ARDY Mini Core40"} is ready on WebGPU. The displayed motion remains playback-only because its continuation belongs to a different model pack.`
+        : `${event.model.variant || "ARDY Mini Core40"} is ready on WebGPU.`,
     );
     if (currentContinuation) {
       restoreWorkerContinuation();
@@ -1418,7 +1410,6 @@ export function bootstrap(): () => void {
     currentProvenance = {
       prompt: chunk.prompt,
       seed: chunk.seed,
-      backend: chunk.backend,
       modelId: modelInfo?.id,
       modelVariant: modelInfo?.variant,
       createdAt: new Date().toISOString(),
@@ -1768,7 +1759,6 @@ export function bootstrap(): () => void {
             modelReady = false;
             modelProgress.hidden = true;
             modelCard.removeAttribute("aria-busy");
-            resetRuntimeBadge();
             setModelStatus(
               "missing",
               "Model pack could not be loaded",
@@ -1805,7 +1795,6 @@ export function bootstrap(): () => void {
         }
         case "disposed":
           modelReady = false;
-          resetRuntimeBadge();
           updateGenerateAvailability();
           break;
         default:
@@ -1823,7 +1812,6 @@ export function bootstrap(): () => void {
       activeGeneration = null;
       setGenerationBusy(false);
       modelCard.removeAttribute("aria-busy");
-      resetRuntimeBadge();
       setModelStatus(
         "missing",
         "Inference worker unavailable",
@@ -1871,29 +1859,6 @@ export function bootstrap(): () => void {
     updateSeed();
   });
 
-  backend.addEventListener("change", () => {
-    const selected = backend.value as RuntimeBackendPreference;
-    if (selected === "webgpu" && !hasWebGpu) {
-      backendHelp.textContent =
-        "WebGPU is unavailable. Select Auto or WebAssembly.";
-    } else if (selected === "wasm") {
-      backendHelp.textContent = crossOriginIsolated
-        ? "WebAssembly uses local SIMD and multi-threaded CPU inference."
-        : "WebAssembly is single-threaded without COOP/COEP headers.";
-    } else {
-      backendHelp.textContent =
-        "Auto prefers WebGPU and falls back to WebAssembly.";
-    }
-    if (lastPackArchive && modelReady) {
-      void loadModelPack(lastPackArchive, false).catch((error) =>
-        showModelError(
-          "Could not reload model",
-          error instanceof Error ? error.message : String(error),
-        ),
-      );
-    }
-  });
-
   importModel.addEventListener("click", () => {
     fileInput.click();
   });
@@ -1920,7 +1885,6 @@ export function bootstrap(): () => void {
       modelReady = false;
       removeModel.hidden = true;
       postCommand({ type: "dispose", requestId: requestId("dispose") });
-      resetRuntimeBadge();
       setModelStatus(
         "missing",
         "Model pack required",
@@ -2167,22 +2131,33 @@ export function bootstrap(): () => void {
     signal: lifecycle.signal,
   });
 
-  updatePrompt();
-  updateDuration();
-  updateSeed();
-  updateTargetBuffer();
-  syncOutputVisibility();
-  setVrmStatus(null);
-  setVrmLoading(false);
-  modelCard.setAttribute("aria-busy", "true");
-  setModelStatus(
-    "loading",
-    "Checking local model cache",
-    "No network request is made.",
-    "Checking",
-  );
-  void readCachedModelPack()
-    .then(async (archive) => {
+  async function initializeModelPack(): Promise<void> {
+    const unavailableReason = await webGpuUnavailableReason();
+    if (disposed) return;
+    if (unavailableReason) {
+      webGpuState = "unavailable";
+      modelCard.removeAttribute("aria-busy");
+      setModelStatus(
+        "unavailable",
+        "WebGPU required",
+        unavailableReason,
+        "Unavailable",
+      );
+      updateGenerateAvailability();
+      announce(`WebGPU is unavailable. ${unavailableReason}`);
+      return;
+    }
+
+    webGpuState = "ready";
+    setModelStatus(
+      "loading",
+      "Checking local model cache",
+      "No network request is made.",
+      "Checking",
+    );
+    updateGenerateAvailability();
+    try {
+      const archive = await readCachedModelPack();
       if (disposed) return;
       if (archive) {
         cachedPack = true;
@@ -2196,9 +2171,9 @@ export function bootstrap(): () => void {
           "Choose the exported Core40 .tar.gz model pack.",
           "Not loaded",
         );
+        updateGenerateAvailability();
       }
-    })
-    .catch((error) => {
+    } catch (error) {
       if (disposed) return;
       modelCard.removeAttribute("aria-busy");
       setModelStatus(
@@ -2211,6 +2186,25 @@ export function bootstrap(): () => void {
         "Could not read model cache",
         error instanceof Error ? error.message : String(error),
       );
-    });
+      updateGenerateAvailability();
+    }
+  }
+
+  updatePrompt();
+  updateDuration();
+  updateSeed();
+  updateTargetBuffer();
+  syncOutputVisibility();
+  setVrmStatus(null);
+  setVrmLoading(false);
+  modelCard.setAttribute("aria-busy", "true");
+  setModelStatus(
+    "loading",
+    "Checking WebGPU",
+    "A compatible GPU and secure context are required.",
+    "Checking",
+  );
+  updateGenerateAvailability();
+  void initializeModelPack();
   return cleanup;
 }

@@ -41,7 +41,6 @@ type UnknownRecord = Record<string, unknown>;
 export interface MotionSessionProvenance {
   prompt?: string;
   seed?: number;
-  backend?: string;
   modelId?: string;
   modelVariant?: string;
   createdAt?: string;
@@ -179,7 +178,6 @@ function normalizeProvenance(value: unknown): MotionSessionProvenance | undefine
   return Object.freeze({
     prompt: boundedString(value.prompt, "Session prompt", 16_384),
     seed,
-    backend: boundedString(value.backend, "Session backend", 128),
     modelId: boundedString(value.modelId ?? value.model_id, "Session model id", 512),
     modelVariant: boundedString(
       value.modelVariant ?? value.model_variant,

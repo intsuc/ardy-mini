@@ -122,7 +122,6 @@ function exampleSession() {
     provenance: {
       prompt: "walk forward",
       seed: 42,
-      backend: "webgpu",
       modelId: "ardy-mini",
       createdAt: "2026-07-29T00:00:00.000Z",
     },

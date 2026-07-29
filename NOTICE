@@ -10,7 +10,7 @@ Files changed from that source carry a prominent modification notice.
 
 The derivative adds a distilled MiniLM text-encoder runtime, training and
 evaluation tools, interactive-demo integration, a local-only browser export
-and WebGPU/WebAssembly demo, tests, and aggregate benchmark documentation. It
+and WebGPU-only demo, tests, and aggregate benchmark documentation. It
 is not affiliated with or endorsed by NVIDIA.
 
 No pretrained or fine-tuned model weights, ARDY checkpoints, teacher caches,

@@ -179,53 +179,10 @@ function PromptExampleSelect() {
 
 function AppHeader() {
   return (
-    <header className="relative z-10 grid min-h-15 grid-cols-[auto_minmax(0,1fr)] items-center gap-4 border-b bg-background px-3 py-2 max-[760px]:grid-cols-1 max-[520px]:gap-2 max-[520px]:px-2.5">
+    <header className="flex min-h-15 items-center border-b bg-background px-3 py-2 max-[520px]:px-2.5">
       <strong className="text-sm leading-tight">
         ARDY Mini
       </strong>
-
-      <div
-        className="flex min-w-0 items-center justify-end gap-1.5 overflow-hidden max-[760px]:justify-start max-[760px]:overflow-x-auto"
-        id="model-runtime-status"
-        aria-label="Model and runtime status"
-      >
-        <Badge variant="outline" id="privacy-badge">
-          <span
-            className="size-1.5 shrink-0 rounded-full bg-primary"
-            aria-hidden="true"
-          />
-          Local
-        </Badge>
-        <Separator
-          orientation="vertical"
-          role="none"
-          aria-hidden="true"
-        />
-        <Badge variant="outline" id="gpu-badge">
-          <span
-            className="size-1.5 shrink-0 rounded-full bg-muted-foreground data-[state=available]:bg-primary"
-            id="gpu-dot"
-            aria-hidden="true"
-          />
-          <span id="gpu-label">Checking WebGPU</span>
-        </Badge>
-        <Separator
-          orientation="vertical"
-          role="none"
-          aria-hidden="true"
-        />
-        <Badge variant="outline" id="isolation-badge">
-          <span
-            className="size-1.5 shrink-0 rounded-full bg-muted-foreground data-[state=available]:bg-primary"
-            id="isolation-dot"
-            aria-hidden="true"
-          />
-          <span id="isolation-label">Checking WASM threads</span>
-        </Badge>
-        <span className="sr-only" id="model-runtime-detail">
-          Model, WebGPU, and WebAssembly runtime readiness.
-        </span>
-      </div>
     </header>
   )
 }
@@ -503,7 +460,7 @@ function ClipSection() {
           </div>
         </Field>
 
-        <FieldGroup className="grid grid-cols-2 gap-2.5 max-[520px]:grid-cols-1">
+        <FieldGroup>
           <Field>
             <FieldLabel htmlFor="seed">Seed</FieldLabel>
             <InputGroup>
@@ -533,32 +490,6 @@ function ClipSection() {
               </InputGroupAddon>
             </InputGroup>
             <EmptyFieldError id="seed-error" />
-          </Field>
-
-          <Field>
-            <FieldLabel htmlFor="backend">Backend</FieldLabel>
-            <NativeSelect
-              id="backend"
-              name="backend"
-              aria-describedby="backend-help"
-              defaultValue="auto"
-            >
-              <NativeSelectOption value="auto">
-                Auto
-              </NativeSelectOption>
-              <NativeSelectOption value="webgpu">
-                WebGPU
-              </NativeSelectOption>
-              <NativeSelectOption value="wasm">
-                WASM
-              </NativeSelectOption>
-            </NativeSelect>
-            <FieldDescription
-              className="sr-only"
-              id="backend-help"
-            >
-              Auto prefers WebGPU and falls back to WebAssembly.
-            </FieldDescription>
           </Field>
         </FieldGroup>
 

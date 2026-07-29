@@ -9,7 +9,7 @@ import type {
 import type { PortableRandomState } from "./random";
 import type { BrowserModelPackManifest } from "./manifest";
 
-export const WORKER_PROTOCOL_VERSION = 3;
+export const WORKER_PROTOCOL_VERSION = 4;
 
 export const MAX_WORKER_REQUEST_ID_LENGTH = 256;
 export const MAX_WORKER_PROMPT_LENGTH = 4_096;
@@ -19,13 +19,10 @@ export const MAX_WORKER_HYBRID_DIM = 65_536;
 export const MAX_WORKER_CONTINUATION_VALUES = 100_000_000;
 
 const MAX_MODEL_PACK_BYTES = 8 * 1024 * 1024 * 1024;
-const MAX_WASM_PATH_LENGTH = 4_096;
 const MAX_CFG_WEIGHT = 100;
 const MAX_DURATION_SECONDS = 3_600;
 const UINT32_RANGE = 0x1_0000_0000;
 
-export type RuntimeBackendPreference = "auto" | "webgpu" | "wasm";
-export type RuntimeBackend = "webgpu" | "wasm";
 export type GenerationMode = "replace" | "append" | "branch";
 
 export type RuntimeProgressStage =
@@ -57,9 +54,6 @@ export interface LoadModelPackCommand extends RequestMessage {
   type: "loadModelPack";
   /** The canonical gzip-compressed POSIX ustar model pack. */
   archive: File;
-  backend?: RuntimeBackendPreference;
-  /** URL prefix containing ORT's version-matched .mjs/.wasm files. */
-  wasmPaths?: string;
 }
 
 export interface GenerateCommand extends RequestMessage {
@@ -133,7 +127,6 @@ export interface ModelLoadedEvent extends RequestMessage {
   model: {
     id: string;
     variant: string;
-    backend: RuntimeBackend;
     fps: number;
     minFrames: number;
     maxFrames: number;
@@ -193,7 +186,6 @@ export interface RuntimeStatusEvent extends RequestMessage {
         state: "ready" | "generating";
         activeRequestId?: string;
         modelId: string;
-        backend: RuntimeBackend;
         generatedFrameCount: number;
         capabilities: RuntimeCapabilities;
       };
@@ -300,16 +292,6 @@ function cfgWeight(value: unknown, label: string): number | undefined {
     throw new RangeError(`${label} must be between 0 and ${MAX_CFG_WEIGHT}`);
   }
   return weight;
-}
-
-function optionalBackend(value: unknown): RuntimeBackendPreference | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (value !== "auto" && value !== "webgpu" && value !== "wasm") {
-    throw new TypeError("backend must be 'auto', 'webgpu', or 'wasm'");
-  }
-  return value;
 }
 
 function isFile(value: unknown): value is File {
@@ -579,21 +561,15 @@ export function parseWorkerCommand(value: unknown): WorkerCommand {
           `loadModelPack.archive must be at most ${MAX_MODEL_PACK_BYTES} bytes`,
         );
       }
-      if (
-        value.wasmPaths !== undefined &&
-        (typeof value.wasmPaths !== "string" ||
-          value.wasmPaths.length > MAX_WASM_PATH_LENGTH)
-      ) {
+      if ("backend" in value || "wasmPaths" in value) {
         throw new TypeError(
-          `loadModelPack.wasmPaths must be a string of at most ${MAX_WASM_PATH_LENGTH} characters`,
+          "loadModelPack no longer accepts backend configuration; the runtime requires WebGPU.",
         );
       }
       return {
         type: "loadModelPack",
         requestId: id,
         archive: value.archive,
-        backend: optionalBackend(value.backend),
-        wasmPaths: value.wasmPaths,
       };
     }
     case "generate":

@@ -66,7 +66,6 @@ function manifest(): BrowserModelPackManifest {
 function session(): BrowserArdyGenerationSession {
   return new BrowserArdyGenerationSession(
     manifest(),
-    "wasm",
     {} as LocalTokenizer,
     {} as RuntimeSessions,
     {
@@ -139,7 +138,6 @@ describe("stateful browser generation session", () => {
       () =>
         new BrowserArdyGenerationSession(
           manifest(),
-          "wasm",
           {} as LocalTokenizer,
           {} as RuntimeSessions,
           {
@@ -261,7 +259,6 @@ describe("stateful generation coordinates", () => {
       })),
     } as unknown as LocalTokenizer;
     const sessions = {
-      backend: "wasm",
       textEncoder: {
         run: vi.fn(async () => ({
           text_conditions: new ort.Tensor(
@@ -389,7 +386,6 @@ describe("stateful generation coordinates", () => {
     } as unknown as RuntimeSessions;
     const runtimeSession = new BrowserArdyGenerationSession(
       pack,
-      "wasm",
       tokenizer,
       sessions,
       {

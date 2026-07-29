@@ -10,8 +10,8 @@ import {
   WORKER_PROTOCOL_VERSION,
 } from "./protocol";
 
-describe("worker protocol v3", () => {
-  it("accepts one tar.gz archive and rejects the legacy file array", () => {
+describe("worker protocol v4", () => {
+  it("accepts one tar.gz archive and rejects legacy load options", () => {
     const archive = new File(["gzip"], "model-pack.tar.gz", {
       type: "application/gzip",
     });
@@ -20,12 +20,10 @@ describe("worker protocol v3", () => {
         type: "loadModelPack",
         requestId: "load",
         archive,
-        backend: "webgpu",
       }),
     ).toMatchObject({
       type: "loadModelPack",
       archive,
-      backend: "webgpu",
     });
     expect(() =>
       parseWorkerCommand({
@@ -37,6 +35,22 @@ describe("worker protocol v3", () => {
     expect(() =>
       parseWorkerCommand({
         type: "loadModelPack",
+        requestId: "legacy-backend",
+        archive,
+        backend: "wasm",
+      }),
+    ).toThrow(/requires WebGPU/);
+    expect(() =>
+      parseWorkerCommand({
+        type: "loadModelPack",
+        requestId: "legacy-paths",
+        archive,
+        wasmPaths: "/ort/",
+      }),
+    ).toThrow(/requires WebGPU/);
+    expect(() =>
+      parseWorkerCommand({
+        type: "loadModelPack",
         requestId: "wrong-extension",
         archive: new File(["gzip"], "model-pack.zip"),
       }),
@@ -44,7 +58,7 @@ describe("worker protocol v3", () => {
   });
 
   it("parses a replace-compatible generation command", () => {
-    expect(WORKER_PROTOCOL_VERSION).toBe(3);
+    expect(WORKER_PROTOCOL_VERSION).toBe(4);
     const command = parseWorkerCommand({
       type: "generate",
       requestId: "legacy",
