@@ -4,7 +4,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  BODY_PROXY_DESCRIPTION,
   canPreserveMotionContinuity,
   CORE27_FOOT_CONTACT_JOINTS,
   CORE27_JOINT_COUNT,
@@ -13,7 +12,6 @@ import {
   frameAfterElapsed,
   normalizeMotionClip,
   normalizeSkeletonMetadata,
-  referenceFrameAtPlayhead,
   SkeletonViewer,
   skeletonInstanceCounts,
 } from "./viewer";
@@ -138,7 +136,6 @@ describe("streaming clip continuity", () => {
     const updatePose = vi.fn();
     const viewer = {
       clip: previousClip,
-      referenceClip: null,
       skeleton: previousClip.skeleton,
       frameCursor: 57.25,
       playing: true,
@@ -176,12 +173,7 @@ describe("streaming clip continuity", () => {
   });
 });
 
-describe("optional comparison layers", () => {
-  it("describes the lightweight body display as a proxy rather than SMPL", () => {
-    expect(BODY_PROXY_DESCRIPTION).toMatch(/body proxy/i);
-    expect(BODY_PROXY_DESCRIPTION).toMatch(/not an SMPL/i);
-  });
-
+describe("dynamic skeleton layers", () => {
   it("sizes every instanced layer from dynamic skeleton metadata", () => {
     expect(skeletonInstanceCounts(CORE27_SKELETON)).toEqual({
       joints: CORE27_JOINT_COUNT,
@@ -198,12 +190,5 @@ describe("optional comparison layers", () => {
       joints: 4,
       bones: 3,
     });
-  });
-
-  it("keeps a reference with a different FPS on the same wall-clock time", () => {
-    expect(referenceFrameAtPlayhead(20, 20, 30, 100)).toBe(30);
-    expect(referenceFrameAtPlayhead(80, 20, 30, 100)).toBe(99);
-    expect(referenceFrameAtPlayhead(-4, 20, 30, 100)).toBe(0);
-    expect(() => referenceFrameAtPlayhead(2, 0, 30, 100)).toThrow(/timing/);
   });
 });

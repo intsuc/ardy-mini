@@ -401,7 +401,7 @@ input[role="switch"]:checked::before {
   }
 
   [data-slot="select-content"],
-  .loading-indicator {
+  [data-slot="spinner"] {
     animation: none;
   }
 

@@ -9,9 +9,8 @@ pack have loaded, no Python process or inference API is involved.
 The interface is a deliberately simple technical demo rather than a marketing
 page or a feature-for-feature copy of the Python/Viser application. It has two
 working areas: the **Input** pane contains model, prompt, clip, and generation
-controls; the **Output** pane contains export, view settings, the 3D preview,
-and the playback timeline. The panes stack vertically at narrow viewport
-widths.
+controls; the **Output** pane contains view settings, the 3D preview, and the
+playback timeline. The panes stack vertically at narrow viewport widths.
 
 The shell uses React and shadcn/ui preset `buFzUhO`: Lyra components, the
 neutral theme, Noto Sans, and Tabler icons on Tailwind CSS v4. Stock shadcn
@@ -37,7 +36,7 @@ beyond that by appending additional 40-frame chunks.
 
 ## What is available in the browser
 
-### Streaming and session editing
+### Streaming and replanning
 
 The worker decodes and emits each generated chunk instead of waiting for the
 entire requested clip. Core40 produces at most 40 new frames per window.
@@ -78,9 +77,7 @@ denoiser path.
 The browser application does not expose or apply root/full-body/end-effector
 constraints, waypoints, dense trajectories, target velocity/heading, an
 initial-transform editor, or browser postprocess parameters. These remain
-Python/Viser features. When an older browser session contains removed editor
-state or generation constraints, import preserves its motion for playback but
-sanitizes those fields before any later generation or export.
+Python/Viser features.
 
 ### Structured output and viewer
 
@@ -94,12 +91,8 @@ The current decoder returns all of the following for every emitted chunk:
 
 The viewer consumes dynamic skeleton names, parents, root index, and contact
 metadata instead of assuming one fixed topology. The current compatible pack
-describes Core27, while imported motion/session data may carry another
-validated skeleton. Display controls expose the skeleton, root trajectory,
-predicted contacts, joint orientation axes, body proxy, and reference overlay.
-The optional **Body proxy** is generated directly from the active skeleton as
-joint spheres and bone capsules, so it adapts to validated dynamic skeleton
-metadata without an external character asset.
+describes Core27. Display controls expose the skeleton, root trajectory,
+predicted contacts, and joint orientation axes.
 
 Under **View settings**, **Load VRM** accepts a local VRM 0.x or 1.x humanoid
 file. [`@pixiv/three-vrm`](https://github.com/pixiv/three-vrm) loads the avatar
@@ -108,10 +101,8 @@ and removal without reloading the motion. Core27 hips translation is scaled to
 the avatar, and Core27 joint rotations are retargeted onto the normalized VRM
 humanoid. Missing optional VRM bones are skipped.
 
-The body proxy is not an SMPL body or a production character renderer. A VRM
-is the supported skinned-avatar format; the app has no general scene-mesh
-importer. The reference overlay separately accepts a compatible structured
-motion JSON or browser session and draws a time-aligned reference skeleton.
+A VRM is the supported skinned-avatar format; the app has no general
+scene-mesh or reference-motion importer.
 
 ### VRM rotation-track requirement
 
@@ -133,9 +124,9 @@ motion. The current exported pack supplies both. The manifest should contain:
 ```
 
 Do not use `schema_version` alone to distinguish old and current packs. With an
-older positions-only pack or session, the skeleton still animates and the VRM
-hips follows position, but the avatar bones remain in their rest/T pose. This
-is intentional: the browser does not guess bone rotations from positions.
+older positions-only pack, the skeleton still animates and the VRM hips follows
+position, but the avatar bones remain in their rest/T pose. This is
+intentional: the browser does not guess bone rotations from positions.
 Regenerate the pack with the current exporter rather than adding a positional
 fallback.
 
@@ -239,13 +230,11 @@ The desktop UI has an **Input** pane and an **Output** pane:
 
 1. Load the model pack in **Input**, enter a prompt or select one of the
    examples, choose clip duration/seed/backend, and generate.
-2. Use the Output pane's **View settings** disclosure for skeleton overlays,
-   contacts, orientation axes, trajectory, the body proxy, reference motion,
-   and a local VRM avatar.
+2. Use the Output pane's **View settings** disclosure for the skeleton,
+   contacts, orientation axes, trajectory, and a local VRM avatar.
 3. Select **Load VRM** and choose a `.vrm` file. The avatar stays local to the
    current page and can be hidden, replaced, or removed.
-4. Use the timeline and playback controls, then export either the browser
-   session or motion JSON/CSV.
+4. Use the timeline and playback controls to inspect the generated motion.
 
 There is no right-side Control/Motion-parameters inspector. Kinematic
 constraints and detailed planning controls belong to the separate
@@ -281,47 +270,23 @@ npm run preview
 and runtime notices, and generated third-party license information. It does
 not contain the model pack.
 
-## Session and motion I/O
+## Session codec compatibility
 
-Browser persistence uses explicit, versioned, validated data structures—not
-pickle or executable Python objects.
-
-- Session import accepts the versioned browser-session JSON schema and the
-  binary `.ardysession` container. The UI exports `.ardysession`, which stores
-  motion, skeleton metadata, output visibility, provenance, and continuation
-  data with little-endian typed-array payloads. This avoids JSON number
-  expansion for large arrays.
-- When a compatible continuation payload is present, append/branch generation
-  can resume. Motion-only or incompatible imports remain playback-capable but
-  require a generation restart.
-- The decoder continues to validate legacy session fields for compatibility,
-  but the current app discards imported editor constraints, waypoints, initial
-  transform controls, and normalized generation constraints. They are neither
-  shown nor silently applied to later generation.
-- **Export motion** downloads both a structured JSON file—which preserves
-  normalized motion, rotations, roots, joints, contacts, and skeleton
-  metadata—and a flat CSV with frame/time, per-joint XYZ positions, root
-  components, and contact channels.
-- **Import reference** accepts a structured motion JSON or a browser session.
-  The reference must use a skeleton compatible with the active clip.
-
-Import reconstructs known fields and validates versions, shapes, finite
-values, skeleton topology, array sizes, legacy constraint ranges, and
-continuation dimensions. Unknown objects are not evaluated. Downloads are
-assembled with browser `Blob` URLs and remain local.
+The repository retains versioned JSON and binary session codecs for validation
+and library-level compatibility tests. The current browser interface does not
+expose session import/export, motion export, or reference-motion import entry
+points.
 
 ## Privacy and hosting
 
-Prompts, seeds, model-pack files, selected VRM avatars, generation state,
-imported sessions, reference motion, and generated motion remain in the
-browser. Model and avatar selection read local files; inference does not upload
-them. VRM object URLs are revoked after loading. The app has no inference
-service dependency.
+Prompts, seeds, model-pack files, selected VRM avatars, generation state, and
+generated motion remain in the browser. Model and avatar selection read local
+files; inference does not upload them. VRM object URLs are revoked after
+loading. The app has no inference service dependency.
 
 The validated model pack may be retained in origin-private storage when the
-browser permits it. A selected VRM avatar is not persisted, embedded in a
-session, or included in motion export; select it again after reloading the
-page.
+browser permits it. A selected VRM avatar is page-local; select it again after
+reloading the page.
 
 Vite development and preview send:
 
@@ -408,13 +373,9 @@ Set `ARDY_BROWSER_REDUCED_MOTION=1` to exercise paused initial playback.
   motion moves the hips but leaves the avatar in its rest/T pose; there is no
   position-derived rotation fallback.
 - The pack supplies Core27 skeleton metadata and no bundled character mesh.
-  The built-in body proxy is a joint-driven sphere/capsule visualization—not
-  SMPL or a skinned mesh. VRM is the only supported local character format;
-  the browser has no general scene-mesh importer.
-- Reference visualization is a compatible motion/session skeleton overlay, not
-  a reference character mesh.
-- A loaded VRM is page-local and is not persisted in `.ardysession` or motion
-  exports.
+  VRM is the only supported local character format; the browser has no general
+  scene-mesh importer.
+- A loaded VRM is page-local and must be selected again after a reload.
 - WASM is a fallback, not a performance promise. Four large graph sessions can
   require considerably more RAM than the on-disk pack.
 

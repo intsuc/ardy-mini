@@ -155,8 +155,8 @@ WordPiece tokenization, text conditioning, DDIM diffusion, autoregressive
 recentering/requantization, structured motion decoding, and three.js playback
 all remain on the user's device. The app is deliberately presented as a simple
 two-pane technical demo: input and generation controls are on the left, while
-the 3D preview, view settings, export action, and playback timeline are on the
-right. At narrower widths the two panes stack vertically.
+the 3D preview, view settings, and playback timeline are on the right. At
+narrower widths the two panes stack vertically.
 
 The UI uses React and shadcn/ui preset `buFzUhO` (Lyra, neutral, Noto Sans,
 Tabler icons, and Tailwind CSS v4). Stock shadcn styling is retained for
@@ -171,23 +171,18 @@ The browser runtime provides:
   editor: text CFG `3.5`, constraint CFG `1.0`, up to 40 history frames, an
   80-frame future window, a 20-frame live-prompt replan buffer, a 10-frame
   automatic-extension threshold, and a zero initial root transform;
-- predicted contacts, joint-orientation axes, root trajectory, and a built-in
-  joint-driven body proxy;
+- predicted contacts, joint-orientation axes, and root trajectory;
 - dynamic skeleton metadata supplied by the model pack rather than a fixed
   viewer topology;
 - local VRM 0.x/1.x avatar loading through
   [`@pixiv/three-vrm`](https://github.com/pixiv/three-vrm), with Core27 motion
   retargeting, show/hide, replace, and remove controls under **View settings**;
-- reference overlays imported from a compatible motion JSON or browser session,
-  structured motion export as both JSON and CSV, and validated binary session
-  import/export with continuation state. These formats are browser data
-  formats, not Python pickle files.
 
 The browser UI does not expose or apply the Python/Viser demo's kinematic
 constraints, waypoints, target-velocity controls, initial-transform editor,
 CFG/history/future tuning controls, or optional motion-correction controls.
-Legacy session fields for those removed features are accepted by the session
-decoder for playback compatibility but are discarded before later generation.
+Versioned session codecs remain covered as internal compatibility utilities,
+but the browser UI has no session or motion file import/export actions.
 The exported pack still contains the constraint-aware denoiser graph; the
 current UI sends no user-authored constraint set and therefore generates
 through the unconstrained path.
@@ -211,26 +206,25 @@ Choose `artifacts/browser/core40` with the demo's **Choose model-pack folder**
 button. The measured FP32 pack contains four ONNX graphs and is approximately
 1.4 GiB (about 1.5 GB decimal); after loading, the header reports the backend
 actually in use. The static web build contains no model weights, and inference
-does not send prompts, model-pack files, VRM files, sessions, or motion to a
-server.
+does not send prompts, model-pack files, VRM files, generation state, or motion
+to a server.
 
 VRM animation requires a current structured-output pack. Its
 `manifest.json` must report `runtime.contract_revision: 2` and decoder outputs
-for `localRotations` and `globalRotations`. An older pack or a positions-only
-motion/session can still animate the skeleton and VRM hips position, but the
-avatar's bones remain in their rest/T pose; the browser deliberately does not
-infer rotations from joint positions. Regenerate the pack with the command
-above if those rotation outputs are absent.
+for `localRotations` and `globalRotations`. An older positions-only pack can
+still animate the skeleton and VRM hips position, but the avatar's bones remain
+in their rest/T pose; the browser deliberately does not infer rotations from
+joint positions. Regenerate the pack with the command above if those rotation
+outputs are absent.
 
 This MiniLM artifact is specific to
 `ARDY-Core-RP-20FPS-Horizon40` and typo-free English motion prompts. Branch
 points are rounded down to complete four-frame tokens. The pack includes
-Core27 skeleton metadata but no bundled character mesh. The optional **Body
-proxy** is the viewer's built-in joint-driven sphere/capsule visualization;
-alternatively, load a local humanoid `.vrm` file under **View settings**. A
-reference overlay comes from a compatible motion JSON or browser session. The
-browser demo does not port the native Viser rotation-space IK, kinematic
-constraint editor, or general scene-mesh import tools. See the
+Core27 skeleton metadata but no bundled character mesh. Load a local humanoid
+`.vrm` file under **View settings** when a skinned character preview is needed.
+The browser demo does not port the native Viser rotation-space IK, kinematic
+constraint editor, reference-motion tools, or general scene-mesh import tools.
+See the
 [browser demo guide](docs/browser_demo.md) for controls, architecture,
 VRM requirements, hosting requirements, validation, limitations, and
 distribution cautions.

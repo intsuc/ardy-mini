@@ -211,6 +211,12 @@ test.describe("real browser model-pack", () => {
       "data-invalid",
       "true",
     );
+    await seed.fill("-1");
+    await expect(page.locator("#seed-error")).toContainText(
+      "whole-number seed",
+    );
+    await seed.fill("2");
+    await expect(page.locator("#seed-error")).toBeEmpty();
 
     await setRange(page, "#duration", 2);
     await page.locator("#stream-generation").uncheck();
@@ -303,8 +309,6 @@ test.describe("real browser model-pack", () => {
     await expect(page.locator("#show-contacts")).toBeChecked();
     await page.locator("#show-orientations").check();
     await expect(page.locator("#show-orientations")).toBeChecked();
-    await expect(page.locator("#export-session")).toBeEnabled();
-    await expect(page.locator("#export-motion")).toBeEnabled();
 
     const playPause = page.locator("#play-pause");
     if ((await playPause.getAttribute("aria-label")) === "Pause motion") {

@@ -61,13 +61,22 @@ test("renders the two-pane technical workspace without motion parameters", async
     "#apply-prompt",
     "#restart-generation",
     "#restart-from-now",
-    "#export-session",
-    "#export-motion",
   ]) {
     await expect(page.locator(selector)).toBeDisabled();
   }
-  await expect(page.locator("#new-session")).toBeEnabled();
-  await expect(page.locator("#import-session")).toBeEnabled();
+  for (const selector of [
+    "#new-session",
+    "#import-session",
+    "#export-session",
+    "#export-motion",
+    "#show-mesh",
+    "#show-reference",
+    "#import-reference",
+    "#loading-overlay",
+    "#camera-hint",
+  ]) {
+    await expect(page.locator(selector)).toHaveCount(0);
+  }
 
   for (const selector of [
     "#initial-x",
@@ -118,7 +127,8 @@ test("renders the two-pane technical workspace without motion parameters", async
   await expect(page.locator("#import-vrm")).toBeEnabled();
   await expect(page.getByText("Foot contacts", { exact: true })).toBeVisible();
   await expect(page.getByText("Orientations", { exact: true })).toBeVisible();
-  await expect(page.getByText("Body proxy", { exact: true })).toBeVisible();
+  await expect(page.getByText("Body proxy", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Reference motion", { exact: true })).toHaveCount(0);
 });
 
 test("retains the square Lyra treatment on standard shadcn surfaces", async ({
@@ -530,7 +540,7 @@ test("honors reduced motion and keeps native shadcn controls usable on mobile", 
   await expect
     .poll(() =>
       page
-        .locator(".loading-indicator")
+        .locator("#generate-spinner")
         .evaluate((element) => getComputedStyle(element).animationName),
     )
     .toBe("none");
@@ -604,9 +614,6 @@ test("honors reduced motion and keeps native shadcn controls usable on mobile", 
   expect(mobileFormFontSizes).toEqual(["16px", "16px", "16px", "16px"]);
 
   const controlSelectors = [
-    "#new-session",
-    "#import-session",
-    "#export-session",
     "#import-model",
     "#prompt-example",
     "#apply-prompt",
@@ -624,6 +631,23 @@ test("honors reduced motion and keeps native shadcn controls usable on mobile", 
     expect(box).not.toBeNull();
     expect(box!.width).toBeGreaterThanOrEqual(28);
     expect(box!.height).toBeGreaterThanOrEqual(28);
+  }
+
+  const checkboxLabels = await Promise.all(
+    [
+      "#stream-generation",
+      "#show-vrm",
+      "#show-skeleton",
+      "#show-contacts",
+      "#show-orientations",
+      "#show-trajectory",
+    ].map((selector) =>
+      page.locator(selector).locator("xpath=..").boundingBox(),
+    ),
+  );
+  for (const label of checkboxLabels) {
+    expect(label).not.toBeNull();
+    expect(label!.height).toBeGreaterThanOrEqual(44);
   }
 
   const playbackBoxes = await Promise.all(

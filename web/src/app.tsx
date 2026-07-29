@@ -4,7 +4,6 @@
 import { useEffect } from "react"
 import {
   IconCameraRotate,
-  IconDownload,
   IconPlayerPause,
   IconPlayerPlay,
   IconRefresh,
@@ -127,13 +126,13 @@ function PromptExampleSelect() {
 
 function AppHeader() {
   return (
-    <header className="relative z-10 grid min-h-15 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-4 border-b bg-background px-3 py-2 max-[760px]:grid-cols-[minmax(0,1fr)_auto] max-[520px]:gap-2 max-[520px]:px-2.5">
+    <header className="relative z-10 grid min-h-15 grid-cols-[auto_minmax(0,1fr)] items-center gap-4 border-b bg-background px-3 py-2 max-[760px]:grid-cols-1 max-[520px]:gap-2 max-[520px]:px-2.5">
       <strong className="text-sm leading-tight">
         ARDY Mini
       </strong>
 
       <div
-        className="flex min-w-0 items-center justify-center gap-1.5 overflow-hidden max-[760px]:col-span-full max-[760px]:row-start-2 max-[760px]:justify-start max-[760px]:overflow-x-auto"
+        className="flex min-w-0 items-center justify-end gap-1.5 overflow-hidden max-[760px]:justify-start max-[760px]:overflow-x-auto"
         id="model-runtime-status"
         aria-label="Model and runtime status"
       >
@@ -172,43 +171,6 @@ function AppHeader() {
           Model, WebGPU, and WebAssembly runtime readiness.
         </span>
       </div>
-
-      <nav
-        className="flex items-center justify-end gap-1.5"
-        aria-label="Session"
-      >
-        <Button
-          id="new-session"
-          variant="ghost"
-          size="sm"
-          type="button"
-        >
-          New
-        </Button>
-        <Button
-          id="import-session"
-          variant="ghost"
-          size="sm"
-          type="button"
-        >
-          Import
-        </Button>
-        <input
-          id="session-file-input"
-          type="file"
-          accept=".json,.ardysession,application/json,application/vnd.ardy.session"
-          hidden
-          aria-hidden="true"
-        />
-        <Button
-          id="export-session"
-          variant="ghost"
-          size="sm"
-          type="button"
-        >
-          Export
-        </Button>
-      </nav>
     </header>
   )
 }
@@ -501,7 +463,7 @@ function ClipSection() {
         </FieldGroup>
 
         <label
-          className="flex items-center justify-between gap-2.5"
+          className="flex min-h-11 items-center justify-between gap-2.5"
           htmlFor="stream-generation"
         >
           <span className="text-xs font-medium">
@@ -723,14 +685,6 @@ function ViewportPanel() {
           >
             <strong id="runtime-value">—</strong>
           </Badge>
-          <Button
-            id="export-motion"
-            variant="secondary"
-            type="button"
-          >
-            <IconDownload data-icon="inline-start" aria-hidden="true" />
-            Export motion
-          </Button>
         </div>
       </div>
 
@@ -764,34 +718,6 @@ function ViewportPanel() {
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
-
-        <Card
-          className="absolute top-1/2 left-1/2 z-10 min-w-60 -translate-x-1/2 -translate-y-1/2"
-          id="loading-overlay"
-          size="sm"
-          aria-hidden="true"
-          hidden
-        >
-          <CardHeader className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3">
-            <Spinner className="loading-indicator" />
-            <div className="flex flex-col gap-0.5">
-              <CardTitle id="loading-title">
-                Generating motion
-              </CardTitle>
-              <CardDescription id="loading-detail">
-                Encoding prompt…
-              </CardDescription>
-            </div>
-          </CardHeader>
-        </Card>
-
-        <Badge
-          variant="outline"
-          className="pointer-events-none absolute right-3 bottom-3 max-[520px]:hidden"
-          id="camera-hint"
-        >
-          Drag: orbit · Wheel: zoom · Home: reset
-        </Badge>
       </div>
 
       <div
@@ -939,7 +865,7 @@ function VrmAvatarSection() {
       </Card>
 
       <label
-        className="flex items-center gap-2.5 text-xs font-medium"
+        className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
         htmlFor="show-vrm"
       >
         <input id="show-vrm" type="checkbox" defaultChecked disabled />
@@ -981,62 +907,33 @@ function DisplayControls() {
       </h3>
       <div className="grid grid-cols-2 max-[520px]:grid-cols-1">
         <label
-          className="flex items-center gap-2.5 text-xs font-medium"
+          className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
           htmlFor="show-skeleton"
         >
           <input id="show-skeleton" type="checkbox" defaultChecked />
           <span>Skeleton</span>
         </label>
         <label
-          className="flex items-center gap-2.5 text-xs font-medium"
+          className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
           htmlFor="show-contacts"
         >
           <input id="show-contacts" type="checkbox" defaultChecked />
           <span>Foot contacts</span>
         </label>
         <label
-          className="flex items-center gap-2.5 text-xs font-medium"
+          className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
           htmlFor="show-orientations"
         >
           <input id="show-orientations" type="checkbox" />
           <span>Orientations</span>
         </label>
         <label
-          className="flex items-center gap-2.5 text-xs font-medium"
+          className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
           htmlFor="show-trajectory"
         >
           <input id="show-trajectory" type="checkbox" defaultChecked />
           <span>Root trajectory</span>
         </label>
-        <label
-          className="flex items-center gap-2.5 text-xs font-medium"
-          htmlFor="show-mesh"
-        >
-          <input id="show-mesh" type="checkbox" />
-          <span>Body proxy</span>
-        </label>
-        <label
-          className="flex items-center gap-2.5 text-xs font-medium"
-          htmlFor="show-reference"
-        >
-          <input id="show-reference" type="checkbox" />
-          <span>Reference motion</span>
-        </label>
-        <Button
-          id="import-reference"
-          className="col-span-full w-full max-[520px]:col-span-1"
-          variant="secondary"
-          type="button"
-        >
-          Import reference
-        </Button>
-        <input
-          id="reference-file-input"
-          type="file"
-          accept=".json,.ardysession,application/json,application/vnd.ardy.session"
-          hidden
-          aria-hidden="true"
-        />
       </div>
     </section>
   )

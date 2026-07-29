@@ -26,13 +26,7 @@ import {
   type StructuredMotionResult,
 } from "./motion-data";
 import {
-  decodeMotionJson,
-  decodeSessionFile,
-  downloadMotionCsv,
-  downloadMotionJson,
-  downloadSessionBinary,
   isContinuationModelCompatible,
-  type BrowserMotionSession,
   type MotionSessionProvenance,
 } from "./session-format";
 import {
@@ -41,7 +35,6 @@ import {
   type ViewerOutputVisibility,
 } from "./editor-state";
 import {
-  BODY_PROXY_DESCRIPTION,
   SkeletonViewer,
   type PlaybackState,
   type VrmModelInfo,
@@ -760,27 +753,6 @@ function cloneEditorState(state: MotionEditorState): MotionEditorState {
   };
 }
 
-/**
- * Keep display preferences from imported sessions, but discard the removed
- * motion-parameter state so it cannot invisibly affect later generation.
- */
-export function sanitizeImportedEditorState(
-  state: MotionEditorState,
-): MotionEditorState {
-  return cloneEditorState({
-    ...DEFAULT_EDITOR_STATE,
-    outputVisibility: {
-      ...DEFAULT_EDITOR_STATE.outputVisibility,
-      skeleton: state.outputVisibility.skeleton,
-      mesh: state.outputVisibility.mesh,
-      reference: false,
-      trajectory: state.outputVisibility.trajectory,
-      contacts: state.outputVisibility.contacts,
-      orientationAxes: state.outputVisibility.orientationAxes,
-    },
-  });
-}
-
 export function bootstrap(): () => void {
   if (!document.getElementById("app")) return () => {};
   const lifecycle = new AbortController();
@@ -853,9 +825,6 @@ export function bootstrap(): () => void {
   const dismissError = requiredElement<HTMLButtonElement>("dismiss-error");
   const canvas = requiredElement<HTMLCanvasElement>("motion-canvas");
   const emptyState = requiredElement<HTMLElement>("empty-state");
-  const loadingOverlay = requiredElement<HTMLElement>("loading-overlay");
-  const loadingTitle = requiredElement<HTMLElement>("loading-title");
-  const loadingDetail = requiredElement<HTMLElement>("loading-detail");
   const motionBadge = requiredElement<HTMLElement>("motion-badge");
   const runtimeMetric = requiredElement<HTMLElement>("runtime-metric");
   const runtimeValue = requiredElement<HTMLElement>("runtime-value");
@@ -879,25 +848,12 @@ export function bootstrap(): () => void {
   const modelRuntimeDetail =
     requiredElement<HTMLElement>("model-runtime-detail");
 
-  const newSession = requiredElement<HTMLButtonElement>("new-session");
-  const importSession = requiredElement<HTMLButtonElement>("import-session");
-  const sessionFileInput =
-    requiredElement<HTMLInputElement>("session-file-input");
-  const exportSession = requiredElement<HTMLButtonElement>("export-session");
-  const exportMotion = requiredElement<HTMLButtonElement>("export-motion");
-
   const showSkeleton = requiredElement<HTMLInputElement>("show-skeleton");
   const showContacts = requiredElement<HTMLInputElement>("show-contacts");
   const showOrientations =
     requiredElement<HTMLInputElement>("show-orientations");
   const showTrajectory =
     requiredElement<HTMLInputElement>("show-trajectory");
-  const showMesh = requiredElement<HTMLInputElement>("show-mesh");
-  const showReference = requiredElement<HTMLInputElement>("show-reference");
-  const importReference =
-    requiredElement<HTMLButtonElement>("import-reference");
-  const referenceFileInput =
-    requiredElement<HTMLInputElement>("reference-file-input");
   const previewSettings =
     requiredElement<HTMLDetailsElement>("preview-settings");
   const vrmCard = requiredElement<HTMLElement>("vrm-card");
@@ -918,10 +874,6 @@ export function bootstrap(): () => void {
 
   fileInput.setAttribute("webkitdirectory", "");
   fileInput.setAttribute("directory", "");
-  showMesh.title = BODY_PROXY_DESCRIPTION;
-  showReference.disabled = true;
-  exportSession.disabled = true;
-  exportMotion.disabled = true;
   restartFromNow.disabled = true;
 
   const hasWebGpu = "gpu" in navigator;
@@ -980,14 +932,11 @@ export function bootstrap(): () => void {
   let pendingManifest: BrowserModelPackManifest | null = null;
   let generationProgressValue = 0;
   let modelProgressValue = 0;
-  let loadingOverlayTimer = 0;
   let generationReturnFocus: HTMLElement | null = null;
   let currentMotion: StructuredMotionResult | null = null;
-  let referenceMotion: StructuredMotionResult | null = null;
   let currentContinuation: RuntimeContinuationState | null = null;
   let currentProvenance: MotionSessionProvenance = {};
   let editorState = cloneEditorState(DEFAULT_EDITOR_STATE);
-  let pendingNewSession = false;
   let activeVrmLoad = 0;
   let currentVrmInfo: VrmModelInfo | null = null;
 
@@ -1190,7 +1139,7 @@ export function bootstrap(): () => void {
 
   function updatePrompt(): void {
     promptCount.textContent = `${prompt.value.length} / 280`;
-    if (prompt.hasAttribute("aria-invalid")) {
+    if (prompt.dataset.validated === "true") {
       const validation = validateGenerationForm(
         prompt.value,
         duration.value,
@@ -1210,7 +1159,7 @@ export function bootstrap(): () => void {
   }
 
   function updateSeed(): void {
-    if (seed.hasAttribute("aria-invalid")) {
+    if (seed.dataset.validated === "true") {
       const validation = validateGenerationForm(
         prompt.value,
         duration.value,
@@ -1261,8 +1210,6 @@ export function bootstrap(): () => void {
       (currentMotion !== null && currentContinuation === null);
     importModel.disabled = modelLoading || modelCaching;
     removeModel.disabled = modelLoading || modelCaching;
-    exportSession.disabled = currentMotion === null;
-    exportMotion.disabled = currentMotion === null;
 
     if (generationBusy) {
       generateHelp.textContent = activeRestoreRequest
@@ -1329,19 +1276,6 @@ export function bootstrap(): () => void {
     generateSpinner.classList.toggle("hidden", !active);
     buttonShortcut.hidden = active;
     generate.setAttribute("aria-busy", String(active));
-    if (loadingOverlayTimer) {
-      window.clearTimeout(loadingOverlayTimer);
-      loadingOverlayTimer = 0;
-    }
-    if (active && !background && !currentMotion) {
-      loadingOverlayTimer = window.setTimeout(() => {
-        if (activeGeneration && !activeGeneration.background) {
-          loadingOverlay.hidden = false;
-        }
-      }, 300);
-    } else {
-      loadingOverlay.hidden = true;
-    }
     updateGenerateAvailability();
     if (!active) {
       generationReturnFocus = null;
@@ -1367,8 +1301,8 @@ export function bootstrap(): () => void {
     return {
       ...editorState.outputVisibility,
       skeleton: showSkeleton.checked,
-      mesh: showMesh.checked,
-      reference: showReference.checked && referenceMotion !== null,
+      mesh: false,
+      reference: false,
       contacts: showContacts.checked,
       orientationAxes: showOrientations.checked,
       trajectory: showTrajectory.checked,
@@ -1376,18 +1310,8 @@ export function bootstrap(): () => void {
   }
 
   function syncOutputVisibility(): void {
-    if (
-      referenceMotion &&
-      currentMotion &&
-      !sameSkeleton(referenceMotion.skeleton, currentMotion.skeleton)
-    ) {
-      referenceMotion = null;
-      showReference.checked = false;
-      showReference.disabled = true;
-    }
     const visibility = outputVisibilityFromControls();
     editorState = { ...editorState, outputVisibility: visibility };
-    viewer?.setReferenceMotion(referenceMotion);
     viewer?.setOutputVisibility(visibility);
   }
 
@@ -1563,8 +1487,6 @@ export function bootstrap(): () => void {
       generationStage.textContent =
         event.message || humanizeStage(event.stage);
       generationPercent.textContent = `${percent}%`;
-      loadingDetail.textContent =
-        event.message || humanizeStage(event.stage);
     }
   }
 
@@ -1672,8 +1594,6 @@ export function bootstrap(): () => void {
     emptyState.hidden = true;
     motionBadge.dataset.state = "ready";
     motionBadge.textContent = `${currentMotion.frameCount} frames · ${currentMotion.fps} FPS`;
-    exportSession.disabled = false;
-    exportMotion.disabled = false;
     updateGenerateAvailability();
   }
 
@@ -1779,6 +1699,8 @@ export function bootstrap(): () => void {
     );
     promptError.textContent = validation.promptError ?? "";
     seedError.textContent = validation.seedError ?? "";
+    prompt.dataset.validated = "true";
+    seed.dataset.validated = "true";
     setFieldInvalid(prompt, Boolean(validation.promptError));
     setFieldInvalid(seed, Boolean(validation.seedError));
     if (!validation.values) {
@@ -1848,13 +1770,6 @@ export function bootstrap(): () => void {
         : mode === "branch"
           ? "Replanning future"
           : "Starting session";
-    loadingTitle.textContent =
-      mode === "append"
-        ? "Extending motion"
-        : mode === "branch"
-          ? "Replanning motion"
-          : "Generating motion";
-    loadingDetail.textContent = "Encoding prompt…";
     if (!background) {
       generationReturnFocus =
         document.activeElement instanceof HTMLElement &&
@@ -1952,96 +1867,6 @@ export function bootstrap(): () => void {
     });
   }
 
-  function clearMotionState(): void {
-    currentMotion = null;
-    referenceMotion = null;
-    currentContinuation = null;
-    currentProvenance = {};
-    editorState = cloneEditorState(DEFAULT_EDITOR_STATE);
-    viewer?.clearMotion();
-    viewer?.applyEditorState(editorState);
-    emptyState.hidden = false;
-    motionBadge.removeAttribute("data-state");
-    motionBadge.textContent = "No motion";
-    runtimeMetric.hidden = true;
-    showReference.checked = false;
-    showReference.disabled = true;
-    viewer?.setReferenceMotion(null);
-    referenceFileInput.value = "";
-    exportSession.disabled = true;
-    exportMotion.disabled = true;
-    restartFromNow.disabled = true;
-    updateGenerateAvailability();
-  }
-
-  async function restoreSession(session: BrowserMotionSession): Promise<void> {
-    currentMotion = session.motion;
-    referenceMotion = null;
-    viewer?.setReferenceMotion(null);
-    currentContinuation = session.continuation ?? null;
-    currentProvenance = session.provenance ?? {};
-    const incompatibleContinuation =
-      currentContinuation !== null &&
-      modelReady &&
-      modelInfo !== null &&
-      !isContinuationModelCompatible(currentProvenance, modelInfo);
-    if (incompatibleContinuation) {
-      currentContinuation = null;
-    }
-    editorState = sanitizeImportedEditorState(session.editor);
-    if (session.provenance?.prompt) prompt.value = session.provenance.prompt;
-    if (session.provenance?.seed !== undefined) {
-      seed.value = String(session.provenance.seed);
-    }
-    showSkeleton.checked = editorState.outputVisibility.skeleton;
-    showMesh.checked = editorState.outputVisibility.mesh;
-    showReference.checked =
-      editorState.outputVisibility.reference && referenceMotion !== null;
-    showContacts.checked = editorState.outputVisibility.contacts;
-    showOrientations.checked = editorState.outputVisibility.orientationAxes;
-    showTrajectory.checked = editorState.outputVisibility.trajectory;
-    updatePrompt();
-    updateSeed();
-    refreshViewer(0, false, true);
-    if (currentContinuation === null) {
-      markCurrentMotionPlaybackOnly();
-      if (modelReady) {
-        resetWorkerSession();
-      }
-    } else if (modelReady) {
-      restoreWorkerContinuation();
-    }
-    announce(
-      incompatibleContinuation
-        ? `Restored ${currentMotion.frameCount} frames for playback only because the saved continuation belongs to a different model pack.`
-        : currentContinuation
-          ? `Restored a continuable ${currentMotion.frameCount}-frame session.`
-          : `Restored a playback-only ${currentMotion.frameCount}-frame session.`,
-    );
-  }
-
-  async function importReferenceFile(file: File): Promise<void> {
-    let motion: StructuredMotionResult;
-    try {
-      motion = decodeMotionJson(await file.text());
-    } catch {
-      try {
-        motion = (await decodeSessionFile(file)).motion;
-      } catch (error) {
-        throw new Error(
-          `Reference must be an ARDY motion JSON or session file. ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
-    }
-    referenceMotion = motion;
-    showReference.disabled = false;
-    showReference.checked = true;
-    syncOutputVisibility();
-    announce(`Loaded ${motion.frameCount} reference frames.`);
-  }
-
   worker.addEventListener(
     "message",
     (message: MessageEvent<WorkerEvent>) => {
@@ -2108,12 +1933,6 @@ export function bootstrap(): () => void {
                 ? "Generation cancelled. Received frames remain available for playback, but continuation and replanning are disabled."
                 : "Generation cancelled.",
             );
-            if (pendingNewSession) {
-              pendingNewSession = false;
-              clearMotionState();
-              resetWorkerSession();
-              announce("Started a new motion session.");
-            }
           }
           break;
         case "status":
@@ -2358,110 +2177,17 @@ export function bootstrap(): () => void {
     });
   });
 
-  newSession.addEventListener("click", () => {
-    if (
-      currentMotion &&
-      !window.confirm(
-        "Start a new session? Export the current session first if you want to keep it.",
-      )
-    ) {
-      return;
-    }
-    if (activeGeneration) {
-      pendingNewSession = true;
-      cancelGeneration.click();
-      announce("Cancelling generation before starting a new session.");
-      return;
-    }
-    clearMotionState();
-    resetWorkerSession();
-    announce("Started a new motion session.");
-  });
-
-  importSession.addEventListener("click", () => sessionFileInput.click());
-  sessionFileInput.addEventListener("change", () => {
-    const file = sessionFileInput.files?.[0];
-    sessionFileInput.value = "";
-    if (!file) return;
-    if (activeGeneration) {
-      showError(
-        "Session import unavailable",
-        "Cancel the active generation before importing a session.",
-      );
-      return;
-    }
-    void decodeSessionFile(file)
-      .then(restoreSession)
-      .catch((error) =>
-        showError(
-          "Could not import session",
-          error instanceof Error ? error.message : String(error),
-        ),
-      );
-  });
-
-  exportSession.addEventListener("click", () => {
-    if (!currentMotion) return;
-    try {
-      downloadSessionBinary(
-        {
-          motion: currentMotion,
-          editor: editorState,
-          provenance: currentProvenance,
-          continuation: currentContinuation ?? undefined,
-        },
-        "ardy-motion.ardysession",
-      );
-      announce("Session export started.");
-    } catch (error) {
-      showError(
-        "Could not export session",
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-  });
-
-  exportMotion.addEventListener("click", () => {
-    if (!currentMotion) return;
-    try {
-      downloadMotionJson(currentMotion, "ardy-motion.json");
-      downloadMotionCsv(currentMotion, "ardy-motion.csv");
-      announce("Motion JSON and CSV exports started.");
-    } catch (error) {
-      showError(
-        "Could not export motion",
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-  });
-
   const outputControls: Array<
     [HTMLInputElement, keyof ViewerOutputVisibility]
   > = [
     [showSkeleton, "skeleton"],
-    [showMesh, "mesh"],
     [showContacts, "contacts"],
     [showOrientations, "orientationAxes"],
     [showTrajectory, "trajectory"],
-    [showReference, "reference"],
   ];
   for (const [control] of outputControls) {
     control.addEventListener("change", syncOutputVisibility);
   }
-  importReference.addEventListener("click", () =>
-    referenceFileInput.click(),
-  );
-  referenceFileInput.addEventListener("change", () => {
-    const file = referenceFileInput.files?.[0];
-    referenceFileInput.value = "";
-    if (!file) return;
-    void importReferenceFile(file).catch((error) =>
-      showError(
-        "Could not import reference",
-        error instanceof Error ? error.message : String(error),
-      ),
-    );
-  });
   importVrm.addEventListener("click", () => vrmFileInput.click());
   vrmFileInput.addEventListener("change", () => {
     const file = vrmFileInput.files?.[0];
@@ -2612,10 +2338,6 @@ export function bootstrap(): () => void {
     if (disposed) return;
     disposed = true;
     activeVrmLoad += 1;
-    if (loadingOverlayTimer) {
-      window.clearTimeout(loadingOverlayTimer);
-      loadingOverlayTimer = 0;
-    }
     try {
       postCommand({ type: "dispose", requestId: requestId("dispose") });
     } catch {

@@ -86,25 +86,15 @@ export type MotionClip = StructuredMotionResult;
 export type { VrmModelInfo } from "./vrm-loader";
 
 /**
- * This optional display is a joint-driven capsule/sphere body proxy. It is
- * intentionally lightweight and is not an SMPL body mesh or a skinning result.
- */
-export const BODY_PROXY_DESCRIPTION =
-  "Joint-driven capsule and sphere body proxy (not an SMPL body mesh).";
-
-/**
  * sRGB counterparts of the dark neutral tokens from shadcn preset buFzUhO.
  * Three.js does not parse CSS custom properties or OKLCH color strings.
  */
 const VIEWER_COLORS = {
   background: "#0a0a0a",
-  card: "#171717",
   foreground: "#fafafa",
   primary: "#e5e5e5",
   mutedForeground: "#a1a1a1",
   chart1: "#d4d4d4",
-  chart2: "#737373",
-  chart3: "#525252",
   chart4: "#404040",
   chart5: "#262626",
   destructive: "#ff6467",
@@ -178,7 +168,7 @@ export function canPreserveMotionContinuity({
   );
 }
 
-/** Counts used by each instanced skeleton/proxy layer for a dynamic skeleton. */
+/** Counts used by the instanced skeleton layers for a dynamic skeleton. */
 export function skeletonInstanceCounts(
   skeleton: SkeletonMetadata,
 ): SkeletonInstanceCounts {
@@ -189,30 +179,6 @@ export function skeletonInstanceCounts(
       0,
     ),
   };
-}
-
-/** Map the primary clip playhead to the same wall-clock time in a reference. */
-export function referenceFrameAtPlayhead(
-  playheadFrame: number,
-  primaryFps: number,
-  referenceFps: number,
-  referenceFrameCount: number,
-): number {
-  if (
-    !Number.isFinite(playheadFrame) ||
-    !Number.isFinite(primaryFps) ||
-    !Number.isFinite(referenceFps) ||
-    primaryFps <= 0 ||
-    referenceFps <= 0 ||
-    !Number.isSafeInteger(referenceFrameCount) ||
-    referenceFrameCount < 1
-  ) {
-    throw new RangeError("Reference playback timing must contain valid finite values.");
-  }
-  return Math.min(
-    Math.max(0, (playheadFrame / primaryFps) * referenceFps),
-    referenceFrameCount - 1,
-  );
 }
 
 /**
@@ -294,10 +260,6 @@ export class SkeletonViewer {
   private readonly controls: OrbitControls;
   private joints!: THREE.InstancedMesh;
   private bones!: THREE.InstancedMesh;
-  private proxyJoints!: THREE.InstancedMesh;
-  private proxyBones!: THREE.InstancedMesh;
-  private referenceJoints!: THREE.InstancedMesh;
-  private referenceBones!: THREE.InstancedMesh;
   private readonly trajectory: THREE.Line;
   private readonly orientationAxesGroup = new THREE.Group();
   private readonly constraintGroup = new THREE.Group();
@@ -341,7 +303,6 @@ export class SkeletonViewer {
   private localWorldRotations: THREE.Quaternion[] = [];
   private localRotationResolved = new Uint8Array();
   private clip: MotionClip | null = null;
-  private referenceClip: MotionClip | null = null;
   private vrm: VRM | null = null;
   private vrmUtils: LoadedVrmAvatar["utils"] | null = null;
   private vrmRetargetPlan: VrmRetargetPlan | null = null;
@@ -554,10 +515,6 @@ export class SkeletonViewer {
     );
     this.joints.visible = false;
     this.bones.visible = false;
-    this.proxyJoints.visible = false;
-    this.proxyBones.visible = false;
-    this.referenceJoints.visible = false;
-    this.referenceBones.visible = false;
     this.trajectory.visible = false;
     this.orientationAxesGroup.visible = false;
     this.constraintGroup.visible = false;
@@ -604,12 +561,6 @@ export class SkeletonViewer {
       return;
     }
     if (this.clip) this.clearMotion();
-    if (
-      this.referenceClip &&
-      !sameSkeleton(this.referenceClip.skeleton, normalized)
-    ) {
-      this.referenceClip = null;
-    }
     this.skeleton = normalized;
     this.rebuildVrmRetargetPlan();
     this.createSkeletonMeshes(normalized);
@@ -723,12 +674,6 @@ export class SkeletonViewer {
       previousFrame,
       nextFrame,
     });
-    if (
-      this.referenceClip &&
-      !sameSkeleton(this.referenceClip.skeleton, clip.skeleton)
-    ) {
-      this.referenceClip = null;
-    }
     this.clip = clip;
     if (skeletonChanged) {
       this.skeleton = clip.skeleton;
@@ -765,34 +710,6 @@ export class SkeletonViewer {
     this.emitPlaybackState(true);
   }
 
-  /**
-   * Overlay a comparison clip at the same wall-clock playhead as the primary
-   * clip. The reference uses a neutral wireframe skeleton so it is
-   * distinguishable by both tonal value and shape.
-   */
-  setReferenceMotion(clip: MotionClip | null): void {
-    if (clip === null) {
-      this.referenceClip = null;
-      this.applyOutputVisibility();
-      this.invalidate();
-      return;
-    }
-    if (this.clip && !sameSkeleton(this.clip.skeleton, clip.skeleton)) {
-      throw new RangeError(
-        "Reference motion skeleton must match the primary motion skeleton.",
-      );
-    }
-    if (!this.clip && !sameSkeleton(this.skeleton, clip.skeleton)) {
-      this.skeleton = clip.skeleton;
-      this.createSkeletonMeshes(this.skeleton);
-      this.setOrientationAxes("all", this.orientationAxisSize);
-    }
-    this.referenceClip = clip;
-    this.updateReferencePose(this.frameCursor);
-    this.applyOutputVisibility();
-    this.invalidate();
-  }
-
   clearMotion(): void {
     this.clip = null;
     this.playing = false;
@@ -800,10 +717,6 @@ export class SkeletonViewer {
     this.lastAnimationTime = null;
     this.joints.visible = false;
     this.bones.visible = false;
-    this.proxyJoints.visible = false;
-    this.proxyBones.visible = false;
-    this.referenceJoints.visible = false;
-    this.referenceBones.visible = false;
     this.trajectory.visible = false;
     this.orientationAxesGroup.visible = false;
     this.constraintGroup.visible = false;
@@ -1216,96 +1129,11 @@ export class SkeletonViewer {
     this.bones.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.bones.castShadow = true;
     this.bones.frustumCulled = false;
-    this.proxyJoints = new THREE.InstancedMesh(
-      new THREE.SphereGeometry(0.064, 14, 10),
-      new THREE.MeshStandardMaterial({
-        color: VIEWER_COLORS.chart2,
-        roughness: 0.82,
-        metalness: 0,
-        transparent: true,
-        opacity: 0.4,
-        depthWrite: false,
-      }),
-      jointCount,
-    );
-    this.proxyJoints.name = "body-proxy-joints";
-    this.proxyJoints.userData.description = BODY_PROXY_DESCRIPTION;
-    this.proxyJoints.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.proxyJoints.frustumCulled = false;
-    this.proxyJoints.renderOrder = 1;
-    this.proxyBones = new THREE.InstancedMesh(
-      new THREE.CapsuleGeometry(0.043, 1, 4, 8),
-      new THREE.MeshStandardMaterial({
-        color: VIEWER_COLORS.chart3,
-        roughness: 0.86,
-        metalness: 0,
-        transparent: true,
-        opacity: 0.36,
-        depthWrite: false,
-      }),
-      Math.max(1, boneCount),
-    );
-    this.proxyBones.name = "body-proxy-bones";
-    this.proxyBones.userData.description = BODY_PROXY_DESCRIPTION;
-    this.proxyBones.count = boneCount;
-    this.proxyBones.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.proxyBones.frustumCulled = false;
-    this.proxyBones.renderOrder = 1;
-
-    this.referenceJoints = new THREE.InstancedMesh(
-      new THREE.IcosahedronGeometry(0.035, 1),
-      new THREE.MeshBasicMaterial({
-        color: VIEWER_COLORS.chart1,
-        wireframe: true,
-        transparent: true,
-        opacity: 0.9,
-        depthWrite: false,
-      }),
-      jointCount,
-    );
-    this.referenceJoints.name = "reference-motion-joints";
-    this.referenceJoints.userData.description =
-      "Reference motion overlay (neutral wireframe comparison).";
-    this.referenceJoints.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.referenceJoints.frustumCulled = false;
-    this.referenceJoints.renderOrder = 2;
-    this.referenceBones = new THREE.InstancedMesh(
-      new THREE.CapsuleGeometry(0.012, 1, 3, 6),
-      new THREE.MeshBasicMaterial({
-        color: VIEWER_COLORS.chart2,
-        wireframe: true,
-        transparent: true,
-        opacity: 0.78,
-        depthWrite: false,
-      }),
-      Math.max(1, boneCount),
-    );
-    this.referenceBones.name = "reference-motion-bones";
-    this.referenceBones.userData.description =
-      "Reference motion overlay (neutral wireframe comparison).";
-    this.referenceBones.count = boneCount;
-    this.referenceBones.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.referenceBones.frustumCulled = false;
-    this.referenceBones.renderOrder = 2;
-    this.scene.add(
-      this.proxyJoints,
-      this.proxyBones,
-      this.referenceJoints,
-      this.referenceBones,
-      this.joints,
-      this.bones,
-    );
+    this.scene.add(this.joints, this.bones);
   }
 
   private disposeSkeletonMeshes(): void {
-    for (const mesh of [
-      this.joints,
-      this.bones,
-      this.proxyJoints,
-      this.proxyBones,
-      this.referenceJoints,
-      this.referenceBones,
-    ]) {
+    for (const mesh of [this.joints, this.bones]) {
       if (mesh) {
         this.scene.remove(mesh);
         mesh.geometry.dispose();
@@ -1351,7 +1179,6 @@ export class SkeletonViewer {
     const frame0 = Math.min(Math.floor(frameCursor), clip.frameCount - 1);
     const frame1 = Math.min(frame0 + 1, clip.frameCount - 1);
     const alpha = frame1 === frame0 ? 0 : frameCursor - frame0;
-    const updateProxy = this.outputVisibility.mesh;
     for (let joint = 0; joint < this.skeleton.jointNames.length; joint += 1) {
       this.pointAt(this.currentPoint, joint, frame0, frame1, alpha);
       this.jointTransform.position.copy(this.currentPoint);
@@ -1359,9 +1186,6 @@ export class SkeletonViewer {
       this.jointTransform.quaternion.identity();
       this.jointTransform.updateMatrix();
       this.joints.setMatrixAt(joint, this.jointTransform.matrix);
-      if (updateProxy) {
-        this.proxyJoints.setMatrixAt(joint, this.jointTransform.matrix);
-      }
 
       const contactChannel = this.contactChannelByJoint[joint];
       const inContact =
@@ -1389,26 +1213,12 @@ export class SkeletonViewer {
       this.boneTransform.scale.set(1, Math.max(0.001, length - 0.028), 1);
       this.boneTransform.updateMatrix();
       this.bones.setMatrixAt(boneIndex, this.boneTransform.matrix);
-      if (updateProxy) {
-        this.boneTransform.scale.set(
-          1,
-          Math.max(0.001, length - 0.086),
-          1,
-        );
-        this.boneTransform.updateMatrix();
-        this.proxyBones.setMatrixAt(boneIndex, this.boneTransform.matrix);
-      }
       boneIndex += 1;
     }
 
     this.joints.instanceMatrix.needsUpdate = true;
     if (this.joints.instanceColor) this.joints.instanceColor.needsUpdate = true;
     this.bones.instanceMatrix.needsUpdate = true;
-    if (updateProxy) {
-      this.proxyJoints.instanceMatrix.needsUpdate = true;
-      this.proxyBones.instanceMatrix.needsUpdate = true;
-    }
-    this.updateReferencePose(frameCursor);
     this.updateOrientationAxes(frameCursor);
     this.updateConstraintMarkers(frame0);
     const vrmFrame = this.updateVrmPose(frameCursor);
@@ -1524,95 +1334,6 @@ export class SkeletonViewer {
     this.vrmRetargetPlan = null;
     this.vrmRoot.position.set(0, 0, 0);
     this.vrmRoot.visible = false;
-  }
-
-  private updateReferencePose(primaryFrameCursor: number): void {
-    const primary = this.clip;
-    const reference = this.referenceClip;
-    if (!primary || !reference || !this.outputVisibility.reference) return;
-    const referenceCursor = referenceFrameAtPlayhead(
-      primaryFrameCursor,
-      primary.fps,
-      reference.fps,
-      reference.frameCount,
-    );
-    const frame0 = Math.min(
-      Math.floor(referenceCursor),
-      reference.frameCount - 1,
-    );
-    const frame1 = Math.min(frame0 + 1, reference.frameCount - 1);
-    const alpha = frame1 === frame0 ? 0 : referenceCursor - frame0;
-
-    for (
-      let joint = 0;
-      joint < reference.skeleton.jointNames.length;
-      joint += 1
-    ) {
-      this.pointAtClip(
-        this.currentPoint,
-        reference,
-        joint,
-        frame0,
-        frame1,
-        alpha,
-      );
-      this.jointTransform.position.copy(this.currentPoint);
-      this.jointTransform.quaternion.identity();
-      this.jointTransform.scale.setScalar(
-        joint === reference.skeleton.rootJointIndex ? 1.18 : 1,
-      );
-      this.jointTransform.updateMatrix();
-      this.referenceJoints.setMatrixAt(joint, this.jointTransform.matrix);
-    }
-
-    let boneIndex = 0;
-    for (
-      let joint = 0;
-      joint < reference.skeleton.jointNames.length;
-      joint += 1
-    ) {
-      const parent = reference.skeleton.parents[joint];
-      if (parent === -1) continue;
-      this.pointAtClip(
-        this.currentPoint,
-        reference,
-        joint,
-        frame0,
-        frame1,
-        alpha,
-      );
-      this.pointAtClip(
-        this.parentPoint,
-        reference,
-        parent,
-        frame0,
-        frame1,
-        alpha,
-      );
-      this.direction.subVectors(this.currentPoint, this.parentPoint);
-      const length = Math.max(this.direction.length(), 0.0001);
-      this.midpoint
-        .addVectors(this.currentPoint, this.parentPoint)
-        .multiplyScalar(0.5);
-      this.boneTransform.position.copy(this.midpoint);
-      this.boneTransform.quaternion.setFromUnitVectors(
-        this.upAxis,
-        this.direction.normalize(),
-      );
-      this.boneTransform.scale.set(
-        1,
-        Math.max(0.001, length - 0.024),
-        1,
-      );
-      this.boneTransform.updateMatrix();
-      this.referenceBones.setMatrixAt(
-        boneIndex,
-        this.boneTransform.matrix,
-      );
-      boneIndex += 1;
-    }
-    this.referenceJoints.instanceMatrix.needsUpdate = true;
-    this.referenceBones.instanceMatrix.needsUpdate = true;
   }
 
   private rotationAt(
@@ -1846,15 +1567,8 @@ export class SkeletonViewer {
 
   private applyOutputVisibility(): void {
     const hasClip = Boolean(this.clip);
-    const hasReference = hasClip && Boolean(this.referenceClip);
     this.joints.visible = hasClip && this.outputVisibility.skeleton;
     this.bones.visible = hasClip && this.outputVisibility.skeleton;
-    this.proxyJoints.visible = hasClip && this.outputVisibility.mesh;
-    this.proxyBones.visible = hasClip && this.outputVisibility.mesh;
-    this.referenceJoints.visible =
-      hasReference && this.outputVisibility.reference;
-    this.referenceBones.visible =
-      hasReference && this.outputVisibility.reference;
     this.trajectory.visible =
       this.outputVisibility.trajectory &&
       (this.customTrajectory !== null || Boolean(this.clip)) &&
