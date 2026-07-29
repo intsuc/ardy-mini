@@ -79,6 +79,31 @@ test("renders the three-pane technical workspace with model-gated controls", asy
   await expect(page.getByText("Body proxy", { exact: true })).toBeVisible();
 });
 
+test("retains the square Lyra treatment on standard shadcn surfaces", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  const radii = await page.evaluate(() =>
+    [
+      "#model-card",
+      "#privacy-badge",
+      "#generate",
+      "#prompt",
+      "#seed",
+      "#playback-speed",
+    ].map((selector) => {
+      const element = document.querySelector(selector);
+      if (!(element instanceof HTMLElement)) {
+        throw new Error(`Missing Lyra surface: ${selector}`);
+      }
+      return getComputedStyle(element).borderRadius;
+    }),
+  );
+
+  expect(radii).toEqual(["0px", "0px", "0px", "0px", "0px", "0px"]);
+});
+
 test("exposes deterministic inputs and enforces the prompt contract", async ({
   page,
 }) => {

@@ -77,6 +77,24 @@ export type MotionClip = StructuredMotionResult;
 export const BODY_PROXY_DESCRIPTION =
   "Joint-driven capsule and sphere body proxy (not an SMPL body mesh).";
 
+/**
+ * sRGB counterparts of the dark neutral tokens from shadcn preset buFzUhO.
+ * Three.js does not parse CSS custom properties or OKLCH color strings.
+ */
+const VIEWER_COLORS = {
+  background: "#0a0a0a",
+  card: "#171717",
+  foreground: "#fafafa",
+  primary: "#e5e5e5",
+  mutedForeground: "#a1a1a1",
+  chart1: "#d4d4d4",
+  chart2: "#737373",
+  chart3: "#525252",
+  chart4: "#404040",
+  chart5: "#262626",
+  destructive: "#ff6467",
+} as const;
+
 export interface PlaybackState {
   frame: number;
   frameCount: number;
@@ -224,8 +242,8 @@ export class SkeletonViewer {
   private readonly direction = new THREE.Vector3();
   private readonly midpoint = new THREE.Vector3();
   private readonly upAxis = new THREE.Vector3(0, 1, 0);
-  private readonly regularJointColor = new THREE.Color("#b9f55a");
-  private readonly contactJointColor = new THREE.Color("#c877ff");
+  private readonly regularJointColor = new THREE.Color(VIEWER_COLORS.primary);
+  private readonly contactJointColor = new THREE.Color(VIEWER_COLORS.destructive);
   private readonly rotationA = new THREE.Quaternion();
   private readonly rotationB = new THREE.Quaternion();
   private readonly rotationMatrix = new THREE.Matrix4();
@@ -346,8 +364,8 @@ export class SkeletonViewer {
     this.canvas = canvas;
     this.canvas.style.touchAction = "none";
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color("#071013");
-    this.scene.fog = new THREE.FogExp2("#071013", 0.035);
+    this.scene.background = new THREE.Color(VIEWER_COLORS.background);
+    this.scene.fog = new THREE.FogExp2(VIEWER_COLORS.background, 0.035);
 
     this.camera = new THREE.PerspectiveCamera(38, 1, 0.01, 100);
     this.camera.position.set(3.1, 2.15, 3.4);
@@ -378,21 +396,25 @@ export class SkeletonViewer {
     this.canvas.addEventListener("pointerup", this.handleGroundPointerUp);
     this.canvas.addEventListener("pointercancel", this.handleGroundPointerCancel);
 
-    const hemisphere = new THREE.HemisphereLight("#d9f8ff", "#173026", 2.1);
+    const hemisphere = new THREE.HemisphereLight(
+      VIEWER_COLORS.foreground,
+      VIEWER_COLORS.chart5,
+      2.1,
+    );
     this.scene.add(hemisphere);
-    const keyLight = new THREE.DirectionalLight("#ecffd1", 4.2);
+    const keyLight = new THREE.DirectionalLight(VIEWER_COLORS.primary, 4.2);
     keyLight.position.set(-3, 6, 4);
     keyLight.castShadow = true;
     keyLight.shadow.mapSize.set(1024, 1024);
     this.scene.add(keyLight);
-    const rimLight = new THREE.DirectionalLight("#55d8dd", 2.2);
+    const rimLight = new THREE.DirectionalLight(VIEWER_COLORS.mutedForeground, 2.2);
     rimLight.position.set(5, 2, -4);
     this.scene.add(rimLight);
 
     const floor = new THREE.Mesh(
       new THREE.CircleGeometry(11, 96),
       new THREE.MeshStandardMaterial({
-        color: "#0c1719",
+        color: VIEWER_COLORS.card,
         roughness: 0.92,
         metalness: 0.03,
       }),
@@ -402,7 +424,12 @@ export class SkeletonViewer {
     floor.receiveShadow = true;
     this.scene.add(floor);
 
-    const grid = new THREE.GridHelper(18, 36, "#345357", "#183033");
+    const grid = new THREE.GridHelper(
+      18,
+      36,
+      VIEWER_COLORS.chart4,
+      VIEWER_COLORS.chart5,
+    );
     const gridMaterial = grid.material as THREE.LineBasicMaterial;
     gridMaterial.transparent = true;
     gridMaterial.opacity = 0.48;
@@ -412,7 +439,7 @@ export class SkeletonViewer {
     this.trajectory = new THREE.Line(
       new THREE.BufferGeometry(),
       new THREE.LineBasicMaterial({
-        color: "#6cffbd",
+        color: VIEWER_COLORS.chart1,
         transparent: true,
         opacity: 0.5,
       }),
@@ -534,8 +561,8 @@ export class SkeletonViewer {
 
   /**
    * Overlay a comparison clip at the same wall-clock playhead as the primary
-   * clip. The reference uses a warm wireframe skeleton so it is distinguishable
-   * by both color and shape.
+   * clip. The reference uses a neutral wireframe skeleton so it is
+   * distinguishable by both tonal value and shape.
    */
   setReferenceMotion(clip: MotionClip | null): void {
     if (clip === null) {
@@ -944,7 +971,7 @@ export class SkeletonViewer {
     this.joints = new THREE.InstancedMesh(
       new THREE.SphereGeometry(0.027, 18, 12),
       new THREE.MeshStandardMaterial({
-        color: "#ffffff",
+        color: VIEWER_COLORS.foreground,
         roughness: 0.38,
         metalness: 0.12,
       }),
@@ -956,7 +983,7 @@ export class SkeletonViewer {
     this.bones = new THREE.InstancedMesh(
       new THREE.CapsuleGeometry(0.014, 1, 4, 8),
       new THREE.MeshStandardMaterial({
-        color: "#67c6c4",
+        color: VIEWER_COLORS.mutedForeground,
         roughness: 0.5,
         metalness: 0.08,
       }),
@@ -969,7 +996,7 @@ export class SkeletonViewer {
     this.proxyJoints = new THREE.InstancedMesh(
       new THREE.SphereGeometry(0.064, 14, 10),
       new THREE.MeshStandardMaterial({
-        color: "#78989d",
+        color: VIEWER_COLORS.chart2,
         roughness: 0.82,
         metalness: 0,
         transparent: true,
@@ -986,7 +1013,7 @@ export class SkeletonViewer {
     this.proxyBones = new THREE.InstancedMesh(
       new THREE.CapsuleGeometry(0.043, 1, 4, 8),
       new THREE.MeshStandardMaterial({
-        color: "#5f7d83",
+        color: VIEWER_COLORS.chart3,
         roughness: 0.86,
         metalness: 0,
         transparent: true,
@@ -1005,7 +1032,7 @@ export class SkeletonViewer {
     this.referenceJoints = new THREE.InstancedMesh(
       new THREE.IcosahedronGeometry(0.035, 1),
       new THREE.MeshBasicMaterial({
-        color: "#ffad66",
+        color: VIEWER_COLORS.chart1,
         wireframe: true,
         transparent: true,
         opacity: 0.9,
@@ -1015,14 +1042,14 @@ export class SkeletonViewer {
     );
     this.referenceJoints.name = "reference-motion-joints";
     this.referenceJoints.userData.description =
-      "Reference motion overlay (warm wireframe comparison).";
+      "Reference motion overlay (neutral wireframe comparison).";
     this.referenceJoints.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.referenceJoints.frustumCulled = false;
     this.referenceJoints.renderOrder = 2;
     this.referenceBones = new THREE.InstancedMesh(
       new THREE.CapsuleGeometry(0.012, 1, 3, 6),
       new THREE.MeshBasicMaterial({
-        color: "#ffe0bd",
+        color: VIEWER_COLORS.chart2,
         wireframe: true,
         transparent: true,
         opacity: 0.78,
@@ -1032,7 +1059,7 @@ export class SkeletonViewer {
     );
     this.referenceBones.name = "reference-motion-bones";
     this.referenceBones.userData.description =
-      "Reference motion overlay (warm wireframe comparison).";
+      "Reference motion overlay (neutral wireframe comparison).";
     this.referenceBones.count = boneCount;
     this.referenceBones.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.referenceBones.frustumCulled = false;
@@ -1379,7 +1406,7 @@ export class SkeletonViewer {
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(0.1, 0.13, 28),
       new THREE.MeshBasicMaterial({
-        color: "#6cffbd",
+        color: VIEWER_COLORS.chart1,
         side: THREE.DoubleSide,
         transparent: true,
         opacity: 0.82,
@@ -1390,7 +1417,7 @@ export class SkeletonViewer {
       new THREE.Vector3(0, 0, 1),
       new THREE.Vector3(0, 0.012, 0),
       0.34,
-      "#6cffbd",
+      VIEWER_COLORS.chart1,
       0.09,
       0.045,
     );
@@ -1409,7 +1436,7 @@ export class SkeletonViewer {
       marker.visible = waypoint.enabled;
       const pin = new THREE.Mesh(
         new THREE.SphereGeometry(0.055, 14, 10),
-        new THREE.MeshBasicMaterial({ color: "#ffd56a" }),
+        new THREE.MeshBasicMaterial({ color: VIEWER_COLORS.primary }),
       );
       marker.add(pin);
       if (waypoint.headingRadians !== undefined) {
@@ -1419,7 +1446,7 @@ export class SkeletonViewer {
             new THREE.Vector3(0, 0, 1),
             new THREE.Vector3(0, 0.01, 0),
             0.24,
-            "#ffd56a",
+            VIEWER_COLORS.primary,
             0.07,
             0.035,
           ),
@@ -1438,7 +1465,7 @@ export class SkeletonViewer {
       markerGroup.userData.marker = marker;
       if (marker.position) markerGroup.position.fromArray(marker.position);
       if (marker.orientation) markerGroup.quaternion.fromArray(marker.orientation);
-      const color = marker.color ?? "#ff8f70";
+      const color = marker.color ?? VIEWER_COLORS.destructive;
       if (marker.position || marker.jointIndex !== undefined) {
         markerGroup.add(
           new THREE.Mesh(

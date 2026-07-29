@@ -12,6 +12,9 @@ const ortDist = fileURLToPath(new URL("../node_modules/onnxruntime-web/dist/", i
 const tokenizerRoot = fileURLToPath(
   new URL("../node_modules/@huggingface/tokenizers/", import.meta.url),
 );
+const notoSansRoot = fileURLToPath(
+  new URL("../node_modules/@fontsource-variable/noto-sans/", import.meta.url),
+);
 const threeRoot = fileURLToPath(new URL("../node_modules/three/", import.meta.url));
 const destination = fileURLToPath(new URL("../public/ort/", import.meta.url));
 const noticeDestination = fileURLToPath(new URL("../public/notices/", import.meta.url));
@@ -60,6 +63,7 @@ const notices = [
     `${noticeDestination}THIRD_PARTY_MODELS_AND_DATA.md`,
   ],
   [`${packageRoot}ONNXRUNTIME_LICENSE.txt`, `${noticeDestination}ONNXRUNTIME_LICENSE.txt`],
+  [`${notoSansRoot}LICENSE`, `${noticeDestination}NOTO_SANS_LICENSE.txt`],
   [`${tokenizerRoot}LICENSE`, `${noticeDestination}TOKENIZERS_LICENSE.txt`],
   [`${threeRoot}LICENSE`, `${noticeDestination}THREE_LICENSE.txt`],
 ];

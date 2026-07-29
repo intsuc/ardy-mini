@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
+import tailwindcss from "@tailwindcss/vite";
+import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
 const crossOriginIsolationHeaders = {
@@ -10,7 +12,11 @@ const crossOriginIsolationHeaders = {
 
 export default defineConfig({
   base: "./",
+  plugins: [react(), tailwindcss()],
   resolve: {
+    alias: {
+      "@": new URL("./src", import.meta.url).pathname,
+    },
     conditions: ["onnxruntime-web-use-extern-wasm"],
   },
   build: {
@@ -28,7 +34,7 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     restoreMocks: true,
   },
 });

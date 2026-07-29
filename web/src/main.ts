@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-import "./style.css";
-
 import {
   createCapturedConstraint,
   createRootConstraint,
@@ -981,7 +979,7 @@ function cloneRuntimeConstraint(constraint: MotionConstraint): MotionConstraint 
   };
 }
 
-function bootstrap(): void {
+export function bootstrap(): void {
   if (!document.getElementById("app")) return;
 
   const form = requiredElement<HTMLFormElement>("generation-form");
@@ -3275,10 +3273,4 @@ function bootstrap(): void {
         error instanceof Error ? error.message : String(error),
       );
     });
-}
-
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", bootstrap, { once: true });
-} else {
-  bootstrap();
 }

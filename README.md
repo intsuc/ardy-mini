@@ -158,6 +158,11 @@ on the user's device. The app is deliberately presented as a simple technical
 demo: generation controls, the 3D preview/timeline, and advanced planning tools
 are kept in separate, compact panels.
 
+The UI uses React and shadcn/ui preset `buFzUhO` (Lyra, neutral, Noto Sans,
+Tabler icons, and Tailwind CSS v4). Stock shadcn styling is retained for
+ordinary controls and surfaces; custom CSS is reserved for the 3D workspace
+and motion-specific controls.
+
 The browser runtime provides:
 
 - stateful 40-frame streaming with replace, append, continuous buffer

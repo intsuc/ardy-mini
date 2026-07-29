@@ -13,6 +13,12 @@ working areas keep prompt/session controls, the 3D preview and playback
 timeline, and the less frequently used planning/output controls visibly
 separate.
 
+The shell uses React and shadcn/ui preset `buFzUhO`: Lyra components, the
+neutral theme, Noto Sans, and Tabler icons on Tailwind CSS v4. Stock shadcn
+component styles own regular controls and surfaces. Custom CSS is limited to
+the three-pane workspace, canvas, native range/switch controls, constraint
+timeline, and responsive behavior specific to this technical demo.
+
 The supported model artifact is intentionally narrow:
 
 - `ARDY-Core-RP-20FPS-Horizon40`;
