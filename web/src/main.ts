@@ -5,25 +5,31 @@ import {
   createCapturedConstraint,
   createRootConstraint,
   interpolateRootWaypoints,
-  postprocessMotion,
-  validateModelPackManifest,
   waypointsFromTargetVelocity,
+  type MotionConstraint,
+  type MotionConstraintKind as RuntimeConstraintKind,
+} from "./runtime/constraints";
+import {
+  type RuntimeContinuationState,
+  type RuntimeGenerationChunk,
+  type RuntimeGenerationResult,
+} from "./runtime/engine";
+import {
+  validateModelPackManifest,
   type BrowserModelPackManifest,
+} from "./runtime/manifest";
+import { postprocessMotion } from "./runtime/postprocess";
+import {
   type GenerationCompleteEvent,
   type GenerationMode,
   type LoadModelPackCommand,
   type ModelLoadedEvent,
-  type MotionConstraint,
-  type MotionConstraintKind as RuntimeConstraintKind,
   type ProgressEvent,
   type RuntimeBackendPreference,
   type RuntimeCapabilities,
-  type RuntimeContinuationState,
-  type RuntimeGenerationChunk,
-  type RuntimeGenerationResult,
   type WorkerCommand,
   type WorkerEvent,
-} from "./runtime";
+} from "./runtime/protocol";
 import {
   normalizeStructuredMotion,
   type RotationTrack,
@@ -53,6 +59,7 @@ import {
   SkeletonViewer,
   type PlaybackState,
 } from "./viewer";
+import { PROMPT_EXAMPLE_EVENT } from "./prompt-examples";
 
 const UINT32_MAX = 0xffff_ffff;
 const ALLOWED_DURATIONS = new Set([2, 4, 6, 8, 10]);
@@ -122,9 +129,6 @@ export function validateGenerationForm(
     validation.promptError = "Describe the motion you want to generate.";
   } else if (prompt.length > 280) {
     validation.promptError = "Keep the prompt to 280 characters or fewer.";
-  } else if (!/^[\x09\x0a\x0d\x20-\x7e]+$/.test(prompt)) {
-    validation.promptError =
-      "This model supports typo-free English prompts using standard Latin characters.";
   }
 
   if (!Number.isInteger(seed) || seed < 0 || seed > UINT32_MAX) {
@@ -834,13 +838,14 @@ function trackJointIndex(
   }
   const side = kind.startsWith("left") ? "left" : "right";
   const part = kind.endsWith("hand") ? "hand" : "foot";
-  const candidates = motion.skeleton.jointNames
-    .map((name, index) => ({ name: name.toLowerCase(), index }))
-    .filter(({ name }) => name.includes(side) && name.includes(part));
-  if (candidates.length === 0) {
+  const jointIndex = motion.skeleton.jointNames.findIndex((name) => {
+    const normalizedName = name.toLowerCase();
+    return normalizedName.includes(side) && normalizedName.includes(part);
+  });
+  if (jointIndex === -1) {
     throw new Error(`The loaded skeleton has no ${kind} joint.`);
   }
-  return candidates[0].index;
+  return jointIndex;
 }
 
 function markerLabel(
@@ -1399,6 +1404,35 @@ export function bootstrap(): void {
     applyTargetVelocity.disabled = !modelReady || generating;
     exportSession.disabled = currentMotion === null;
     exportMotion.disabled = currentMotion === null;
+
+    if (generationBusy) {
+      generateHelp.textContent = activeRestoreRequest
+        ? "Restoring the saved generation state."
+        : "Generating locally. Received frames remain available if you cancel.";
+    } else if (modelLoading || modelCaching) {
+      generateHelp.textContent = "Preparing the local model pack.";
+    } else if (!modelReady) {
+      generateHelp.textContent = "Load a model pack to enable generation.";
+    } else if (prompt.value.trim().length === 0) {
+      generateHelp.textContent = "Describe a motion to enable generation.";
+    } else if (currentMotion !== null && currentContinuation === null) {
+      generateHelp.textContent =
+        "Restart to create a new continuable motion session.";
+    } else {
+      generateHelp.textContent = "Ready to generate entirely in this browser.";
+    }
+
+    if (
+      !generationBusy &&
+      generationProgressElement.dataset.state !== "complete"
+    ) {
+      generationStage.textContent = modelReady
+        ? "Ready to generate"
+        : modelLoading || modelCaching
+          ? "Preparing model"
+          : "Waiting for model";
+      generationPercent.textContent = "—";
+    }
   }
 
   function markCurrentMotionPlaybackOnly(): void {
@@ -1413,9 +1447,16 @@ export function bootstrap(): void {
   }
 
   function setGenerationBusy(active: boolean, background = false): void {
-    generationProgressElement.hidden = !active;
-    cancelGeneration.hidden = !active;
-    cancelGeneration.disabled = false;
+    generationProgressElement.dataset.state = active
+      ? "active"
+      : generationProgressValue >= 1
+        ? "complete"
+        : "idle";
+    generationProgressElement.setAttribute("aria-busy", String(active));
+    cancelGeneration.dataset.state = active ? "active" : "idle";
+    cancelGeneration.disabled = !active;
+    cancelGeneration.setAttribute("aria-hidden", String(!active));
+    cancelGeneration.tabIndex = active ? 0 : -1;
     cancelGeneration.textContent = "Cancel";
     generateLabel.textContent = active
       ? background
@@ -1877,15 +1918,19 @@ export function bootstrap(): void {
   function allRuntimeConstraints(): MotionConstraint[] {
     const result = [...runtimeConstraints.values()];
     if (activeManifest) {
-      const rootWaypoints = editorState.waypoints
-        .filter((waypoint) => waypoint.enabled)
-        .map((waypoint) => ({
-          id: waypoint.id,
-          frame: waypoint.frame,
-          x: waypoint.position[0],
-          z: waypoint.position[2],
-          heading: waypoint.headingRadians,
-        }));
+      const rootWaypoints = editorState.waypoints.flatMap((waypoint) =>
+        waypoint.enabled
+          ? [
+              {
+                id: waypoint.id,
+                frame: waypoint.frame,
+                x: waypoint.position[0],
+                z: waypoint.position[2],
+                heading: waypoint.headingRadians,
+              },
+            ]
+          : [],
+      );
       result.push(
         ...interpolateRootWaypoints(
           activeManifest,
@@ -2046,6 +2091,7 @@ export function bootstrap(): void {
         resetPresentation,
         resetPresentation,
       );
+      generationProgressValue = 1;
       generationPercent.textContent = "100%";
       setProgress(generationProgressFill, generationProgressbar, 1);
       runtimeMetric.hidden = false;
@@ -2169,7 +2215,10 @@ export function bootstrap(): void {
     setGenerationBusy(true, background);
     if (!background) {
       window.requestAnimationFrame(() => {
-        if (activeGeneration && !cancelGeneration.hidden) {
+        if (
+          activeGeneration &&
+          cancelGeneration.dataset.state === "active"
+        ) {
           cancelGeneration.focus();
         }
       });
@@ -2725,15 +2774,14 @@ export function bootstrap(): void {
   seed.addEventListener("input", updateSeed);
   targetBuffer.addEventListener("input", updateTargetBuffer);
 
-  document
-    .querySelectorAll<HTMLButtonElement>(".preset-chip")
-    .forEach((button) => {
-      button.addEventListener("click", () => {
-        prompt.value = button.dataset.prompt ?? "";
-        updatePrompt();
-        prompt.focus();
-      });
-    });
+  document.addEventListener(PROMPT_EXAMPLE_EVENT, (event) => {
+    if (!(event instanceof CustomEvent) || typeof event.detail !== "string") {
+      return;
+    }
+    prompt.value = event.detail;
+    updatePrompt();
+    prompt.focus();
+  });
 
   randomizeSeed.addEventListener("click", () => {
     const random = new Uint32Array(1);

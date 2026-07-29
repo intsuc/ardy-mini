@@ -33,14 +33,24 @@ describe("generation form validation", () => {
     });
   });
 
-  it("rejects blank/non-Latin prompts, invalid windows, and invalid seeds", () => {
+  it("accepts multilingual prompts without changing their contents", () => {
+    expect(validateGenerationForm("人物が歩く。", "4", "2")).toEqual({
+      values: {
+        prompt: "人物が歩く。",
+        durationSeconds: 4,
+        seed: 2,
+      },
+    });
+  });
+
+  it("rejects blank and overlong prompts, invalid windows, and invalid seeds", () => {
     expect(validateGenerationForm("", "4", "2").promptError).toMatch(/Describe/);
-    expect(validateGenerationForm("人物が歩く。", "4", "2").promptError).toMatch(/English/);
+    expect(validateGenerationForm("a".repeat(281), "4", "2").promptError).toMatch(/280/);
     expect(validateGenerationForm("A person walks.", "3", "2").promptError).toMatch(/2 to 10/);
     expect(validateGenerationForm("A person walks.", "4", "-1").seedError).toMatch(/whole-number/);
   });
 
-  it("keeps non-empty invalid input submittable so inline validation is reachable", () => {
+  it("keeps non-empty multilingual input submittable", () => {
     expect(canAttemptGeneration("人物が歩く。", true, true, false, false)).toBe(true);
     expect(canAttemptGeneration("   ", true, true, false, false)).toBe(false);
     expect(canAttemptGeneration("A person walks.", true, false, false, false)).toBe(false);

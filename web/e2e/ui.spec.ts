@@ -42,6 +42,12 @@ test("renders the three-pane technical workspace with model-gated controls", asy
   expect(panePositions[1]!.x).toBeLessThan(panePositions[2]!.x);
 
   await expect(page.getByLabel("Motion description")).toBeEditable();
+  await expect(
+    page.getByText(
+      "Clear, typo-free English. Apply updates while streaming.",
+      { exact: true },
+    ),
+  ).toHaveCount(0);
   await expect(page.locator(".setup-note")).toContainText(
     "about 1.4 GiB, four ONNX graphs",
   );
@@ -118,14 +124,19 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
   await expect(page.getByRole("spinbutton", { name: "Seed" })).toHaveValue("2");
   await expect(page.getByLabel("Backend")).toHaveValue("auto");
 
-  await page.getByRole("button", { name: "Dance" }).click();
+  const promptExample = page.getByRole("combobox", {
+    name: "Example prompt",
+  });
+  await promptExample.click();
+  await expect(page.getByRole("option")).toHaveCount(10);
+  await page.getByRole("option", { name: "Joyful dance" }).click();
   await expect(prompt).toHaveValue("A person performs a joyful dance.");
 
   const validation = await page.evaluate(async () => {
     const { validateGenerationForm } = await import("/src/main.ts");
     return {
       empty: validateGenerationForm("", "2", "2").promptError,
-      nonEnglish: validateGenerationForm("人物が歩く。", "2", "2").promptError,
+      multilingual: validateGenerationForm("人物が歩く。", "2", "2").values,
       long: validateGenerationForm("a".repeat(281), "2", "2").promptError,
       seed: validateGenerationForm("A person walks.", "2", "-1").seedError,
       duration: validateGenerationForm("A person walks.", "3", "2").promptError,
@@ -137,7 +148,11 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
     };
   });
   expect(validation.empty).toContain("Describe the motion");
-  expect(validation.nonEnglish).toContain("typo-free English");
+  expect(validation.multilingual).toEqual({
+    prompt: "人物が歩く。",
+    durationSeconds: 2,
+    seed: 2,
+  });
   expect(validation.long).toContain("280 characters");
   expect(validation.seed).toContain("whole-number seed");
   expect(validation.duration).toContain("2 to 10 seconds");
@@ -219,6 +234,36 @@ test("keeps invalid model-pack errors beside the model setup action", async ({
     .toBe(true);
 });
 
+test("keeps saved model actions inside the input panel at minimum width", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 320, height: 800 });
+  await page.goto("/");
+  await page.locator("#remove-model").evaluate((element) => {
+    (element as HTMLButtonElement).hidden = false;
+  });
+
+  const [panel, importButton, removeButton] = await Promise.all(
+    ["#generator-panel", "#import-model", "#remove-model"].map((selector) =>
+      page.locator(selector).boundingBox(),
+    ),
+  );
+  expect(panel).not.toBeNull();
+  expect(importButton).not.toBeNull();
+  expect(removeButton).not.toBeNull();
+  expect(importButton!.x + importButton!.width).toBeLessThanOrEqual(
+    panel!.x + panel!.width,
+  );
+  expect(removeButton!.x + removeButton!.width).toBeLessThanOrEqual(
+    panel!.x + panel!.width,
+  );
+  expect(
+    await page
+      .locator("#generator-panel")
+      .evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+});
+
 test("honors reduced motion and remains touch-safe without mobile overflow", async ({
   page,
 }) => {
@@ -241,6 +286,42 @@ test("honors reduced motion and remains touch-safe without mobile overflow", asy
     )
     .toBe("0s");
 
+  await expect(page.locator("#generation-progress")).toBeVisible();
+  await expect(page.locator("#generation-progress")).not.toHaveAttribute(
+    "hidden",
+    "",
+  );
+  const idleGenerationStatus =
+    await page.locator("#generation-progress").boundingBox();
+  await page.locator("#generation-progress").evaluate((element) => {
+    element.setAttribute("data-state", "active");
+  });
+  const activeGenerationStatus =
+    await page.locator("#generation-progress").boundingBox();
+  expect(activeGenerationStatus).toEqual(idleGenerationStatus);
+
+  await page.locator("#remove-model").evaluate((element) => {
+    (element as HTMLButtonElement).hidden = false;
+  });
+  const modelActionBounds = await Promise.all(
+    ["#import-model", "#remove-model", "#generator-panel"].map((selector) =>
+      page.locator(selector).boundingBox(),
+    ),
+  );
+  expect(modelActionBounds.every(Boolean)).toBe(true);
+  expect(
+    modelActionBounds[1]!.x + modelActionBounds[1]!.width,
+  ).toBeLessThanOrEqual(
+    modelActionBounds[2]!.x + modelActionBounds[2]!.width,
+  );
+  await expect
+    .poll(() =>
+      page.locator("#generator-panel").evaluate(
+        (element) => element.scrollWidth <= element.clientWidth,
+      ),
+    )
+    .toBe(true);
+
   const panes = await Promise.all(
     ["#generator-panel", "#viewport-panel", ".inspector-panel"].map((selector) =>
       page.locator(selector).boundingBox(),
@@ -255,7 +336,7 @@ test("honors reduced motion and remains touch-safe without mobile overflow", asy
     "#import-session",
     "#export-session",
     "#import-model",
-    ".preset-chip:first-of-type",
+    "#prompt-example",
     "#apply-prompt",
     "#generate",
     "#play-pause",

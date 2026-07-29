@@ -941,17 +941,6 @@ export function downloadBlob(data: BlobPart, filename: string, mimeType: string)
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-export function downloadSessionJson(
-  session: MotionSessionInput | BrowserMotionSession,
-  filename = "motion-session.json",
-): void {
-  downloadBlob(
-    encodeSessionJson(session, true),
-    safeDownloadFilename(filename, "motion-session.json"),
-    "application/json;charset=utf-8",
-  );
-}
-
 export function downloadSessionBinary(
   session: MotionSessionInput | BrowserMotionSession,
   filename = `motion-session${SESSION_BINARY_EXTENSION}`,

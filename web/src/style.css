@@ -520,6 +520,8 @@ input[role="switch"]:checked::before {
   [data-slot="input"],
   [data-slot="textarea"],
   [data-slot="native-select"],
+  [data-slot="select-trigger"],
+  [data-slot="select-content"],
   .constraint-track,
   #model-progress-fill,
   #generation-progress-fill,
@@ -528,6 +530,7 @@ input[role="switch"]:checked::before {
     transition: none;
   }
 
+  [data-slot="select-content"],
   .loading-indicator {
     animation: none;
   }
@@ -539,5 +542,6 @@ input[role="switch"]:checked::before {
 
   input[role="switch"]:checked::before {
     margin-left: 1.19rem;
+    transform: none;
   }
 }

@@ -4,21 +4,23 @@
 import {
   BrowserArdyRuntime,
   RuntimeCancelledError,
-  loadModelPackFromFiles,
-  parseWorkerCommand,
-  serializeWorkerError,
-  WORKER_PROTOCOL_VERSION,
   type BrowserArdyGenerationSession,
-  type GenerateCommand,
-  type GenerationMode,
-  type RuntimeCapabilities,
   type RuntimeContinuationState,
   type RuntimeGenerationChunk,
   type RuntimeGenerationResult,
   type RuntimeProgress,
+} from "./runtime/engine";
+import { loadModelPackFromFiles } from "./runtime/model-pack";
+import {
+  parseWorkerCommand,
+  serializeWorkerError,
+  WORKER_PROTOCOL_VERSION,
+  type GenerateCommand,
+  type GenerationMode,
+  type RuntimeCapabilities,
   type WorkerCommand,
   type WorkerEvent,
-} from "./runtime";
+} from "./runtime/protocol";
 
 interface WorkerPort {
   postMessage(message: unknown, transfer?: Transferable[]): void;

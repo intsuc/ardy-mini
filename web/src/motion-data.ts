@@ -307,7 +307,8 @@ export function normalizeSkeletonMetadata(input: unknown): SkeletonMetadata {
     "foot_contact_joint_indices",
   );
   const hasCore27Layout =
-    jointNames.length === CORE27_JOINT_COUNT &&
+    jointNames.length === CORE27_JOINT_NAMES.length &&
+    parents.length === CORE27_PARENTS.length &&
     jointNames.every((name, index) => name === CORE27_JOINT_NAMES[index]) &&
     parents.every((parent, index) => parent === CORE27_PARENTS[index]);
   const contactJointIndices =

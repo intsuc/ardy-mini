@@ -184,21 +184,19 @@ test.describe("real browser model-pack", () => {
     await expect(page.locator("#postprocess-enabled")).toBeEnabled();
 
     const prompt = page.getByLabel("Motion description");
-    await prompt.fill("人物が歩く。");
-    await page.locator("#generate").click();
-    await expect(page.locator("#prompt-error")).toContainText(
-      "typo-free English",
-    );
-    await expect(prompt).toBeFocused();
-
-    await prompt.fill("A person walks forward confidently.");
     const seed = page.getByRole("spinbutton", { name: "Seed" });
+    await prompt.fill("人物が歩く。");
     await seed.fill("-1");
     await page.locator("#generate").click();
+    await expect(page.locator("#prompt-error")).toBeEmpty();
+    await expect(prompt).toHaveValue("人物が歩く。");
+    await expect(prompt).not.toHaveAttribute("aria-invalid", "true");
     await expect(page.locator("#seed-error")).toContainText(
       "whole-number seed",
     );
     await expect(seed).toBeFocused();
+
+    await prompt.fill("A person walks forward confidently.");
     await seed.fill("2");
 
     await setRange(page, "#duration", 2);
@@ -208,7 +206,10 @@ test.describe("real browser model-pack", () => {
     await page.evaluate(() => {
       const stage = document.querySelector("#generation-stage");
       const badge = document.querySelector("#motion-badge");
-      if (!stage || !badge) throw new Error("Missing generation UI");
+      const progress = document.querySelector("#generation-progress");
+      if (!stage || !badge || !progress) {
+        throw new Error("Missing generation UI");
+      }
       const stages = [stage.textContent ?? ""];
       const badges = [badge.textContent ?? ""];
       new MutationObserver(() => stages.push(stage.textContent ?? "")).observe(
@@ -219,10 +220,23 @@ test.describe("real browser model-pack", () => {
         badge,
         { childList: true, characterData: true, subtree: true },
       );
+      let hiddenMutations = 0;
+      new MutationObserver((records) => {
+        hiddenMutations += records.length;
+        (
+          window as typeof window & {
+            __ardyGenerationProgressHiddenMutations?: number;
+          }
+        ).__ardyGenerationProgressHiddenMutations = hiddenMutations;
+      }).observe(progress, {
+        attributes: true,
+        attributeFilter: ["hidden"],
+      });
       (
         window as typeof window & {
           __ardyGenerationStages?: string[];
           __ardyMotionBadges?: string[];
+          __ardyGenerationProgressHiddenMutations?: number;
         }
       ).__ardyGenerationStages = stages;
       (
@@ -231,6 +245,11 @@ test.describe("real browser model-pack", () => {
           __ardyMotionBadges?: string[];
         }
       ).__ardyMotionBadges = badges;
+      (
+        window as typeof window & {
+          __ardyGenerationProgressHiddenMutations?: number;
+        }
+      ).__ardyGenerationProgressHiddenMutations = 0;
     });
 
     const timings: Record<string, number> = {};
@@ -254,6 +273,12 @@ test.describe("real browser model-pack", () => {
     await expect(page.locator("#generation-stage")).toHaveText(
       /40 session frames|Received 40 frames/,
     );
+    await expect(page.locator("#generation-percent")).toHaveText("100%");
+    await expect(page.locator("#generation-progress")).toHaveAttribute(
+      "data-state",
+      "complete",
+    );
+    await expect(page.locator("#generation-progress")).toBeVisible();
     await expect(page.locator("#runtime-metric")).toBeVisible();
     await expect(page.locator("#runtime-value")).toHaveAttribute(
       "title",
@@ -349,6 +374,16 @@ test.describe("real browser model-pack", () => {
 
     await expect(page.locator("#model-error-banner")).toBeHidden();
     await expect(page.locator("#error-banner")).toBeHidden();
+    expect(
+      await page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __ardyGenerationProgressHiddenMutations?: number;
+            }
+          ).__ardyGenerationProgressHiddenMutations ?? 0,
+      ),
+    ).toBe(0);
     expect(pageErrors).toEqual([]);
     expect(
       consoleMessages.filter((message) => message.startsWith("error:")),
