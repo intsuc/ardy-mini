@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   BODY_PROXY_DESCRIPTION,
+  canPreserveMotionContinuity,
   CORE27_FOOT_CONTACT_JOINTS,
   CORE27_JOINT_COUNT,
   CORE27_PARENTS,
@@ -13,6 +14,7 @@ import {
   normalizeMotionClip,
   normalizeSkeletonMetadata,
   referenceFrameAtPlayhead,
+  SkeletonViewer,
   skeletonInstanceCounts,
 } from "./viewer";
 
@@ -77,6 +79,100 @@ describe("absolute-clock playback", () => {
       frame: 39,
       ended: true,
     });
+  });
+});
+
+describe("streaming clip continuity", () => {
+  it("preserves secondary motion for a same-rig update at the same playhead", () => {
+    expect(
+      canPreserveMotionContinuity({
+        requested: true,
+        hasPreviousClip: true,
+        skeletonChanged: false,
+        previousFrame: 57.25,
+        nextFrame: 57.25,
+      }),
+    ).toBe(true);
+  });
+
+  it("resets secondary motion for a new clip, rig change, or actual seek", () => {
+    const base = {
+      requested: true,
+      hasPreviousClip: true,
+      skeletonChanged: false,
+      previousFrame: 57.25,
+      nextFrame: 57.25,
+    };
+
+    expect(
+      canPreserveMotionContinuity({
+        ...base,
+        hasPreviousClip: false,
+      }),
+    ).toBe(false);
+    expect(
+      canPreserveMotionContinuity({
+        ...base,
+        skeletonChanged: true,
+      }),
+    ).toBe(false);
+    expect(
+      canPreserveMotionContinuity({
+        ...base,
+        nextFrame: 58.25,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not reset the VRM spring manager when streaming extends a clip", () => {
+    const previousClip = normalizeMotionClip({
+      positions: new Float32Array(80 * CORE27_JOINT_COUNT * 3),
+      frameCount: 80,
+    });
+    const extendedClip = normalizeMotionClip({
+      positions: new Float32Array(120 * CORE27_JOINT_COUNT * 3),
+      frameCount: 120,
+    });
+    const resetNormalizedPose = vi.fn();
+    const resetSpringBones = vi.fn();
+    const updatePose = vi.fn();
+    const viewer = {
+      clip: previousClip,
+      referenceClip: null,
+      skeleton: previousClip.skeleton,
+      frameCursor: 57.25,
+      playing: true,
+      reducedMotion: false,
+      lastAnimationTime: 1_000,
+      lastReportedFrame: 57,
+      vrm: {
+        humanoid: { resetNormalizedPose },
+        springBoneManager: { reset: resetSpringBones },
+      },
+      rebuildVrmRetargetPlan: vi.fn(),
+      createSkeletonMeshes: vi.fn(),
+      setOrientationAxes: vi.fn(),
+      buildTrajectory: vi.fn(),
+      updatePose,
+      applyOutputVisibility: vi.fn(),
+      resetCamera: vi.fn(),
+      invalidate: vi.fn(),
+      emitPlaybackState: vi.fn(),
+    } as unknown as SkeletonViewer;
+
+    SkeletonViewer.prototype.setMotion.call(viewer, extendedClip, {
+      playing: true,
+      resetCamera: false,
+      preserveContinuity: true,
+    });
+
+    expect(resetNormalizedPose).not.toHaveBeenCalled();
+    expect(resetSpringBones).not.toHaveBeenCalled();
+    expect(updatePose).toHaveBeenCalledWith(57.25);
+    expect(
+      (viewer as unknown as { lastAnimationTime: number | null })
+        .lastAnimationTime,
+    ).toBe(1_000);
   });
 });
 

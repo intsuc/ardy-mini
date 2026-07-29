@@ -203,6 +203,18 @@ export function shouldAutoplayMotion(reducedMotion: boolean): boolean {
   return !reducedMotion;
 }
 
+/**
+ * Only the first visual update of a replace operation starts a new motion
+ * presentation. Append, branch, and later streamed chunks must keep playback
+ * and VRM secondary-motion continuity.
+ */
+export function shouldResetMotionPresentation(
+  mode: GenerationMode,
+  initialVisualUpdate: boolean,
+): boolean {
+  return mode === "replace" && initialVisualUpdate;
+}
+
 export function canAttemptGeneration(
   promptValue: string,
   runtimeReady: boolean,
@@ -1586,21 +1598,34 @@ export function bootstrap(): () => void {
   function refreshViewer(
     preserveFrame: number,
     preservePlaying: boolean,
-    resetLoop = false,
-    resetCamera = false,
+    resetPresentation = false,
   ): void {
     if (!currentMotion || !viewer) return;
-    viewer.setMotion(currentMotion, false, resetCamera);
+    viewer.setMotion(
+      currentMotion,
+      resetPresentation
+        ? {
+            frame: Math.min(
+              preserveFrame,
+              currentMotion.frameCount - 1,
+            ),
+            playing: preservePlaying,
+            resetCamera: true,
+          }
+        : {
+            playing: preservePlaying,
+            resetCamera: false,
+            preserveContinuity: true,
+          },
+    );
     setEditor(editorState);
     syncOutputVisibility();
-    viewer.seek(Math.min(preserveFrame, currentMotion.frameCount - 1));
-    if (resetLoop) {
+    if (resetPresentation) {
       const loop = !streamGeneration.checked && !reducedMotion.matches;
       viewer.setLoop(loop);
       loopToggle.setAttribute("aria-pressed", String(loop));
       loopToggle.classList.toggle("is-active", loop);
     }
-    if (preservePlaying && !reducedMotion.matches) viewer.setPlaying(true);
     emptyState.hidden = true;
     motionBadge.dataset.state = "ready";
     motionBadge.textContent = `${currentMotion.frameCount} frames · ${currentMotion.fps} FPS`;
@@ -1632,12 +1657,13 @@ export function bootstrap(): () => void {
       active.mode === "replace"
         ? shouldAutoplayMotion(reducedMotion.matches)
         : Boolean(previousPlayback?.playing || active.resumePlayback);
-    const resetPresentation =
-      active.mode === "replace" && chunk.startFrame === 0;
+    const resetPresentation = shouldResetMotionPresentation(
+      active.mode,
+      chunk.startFrame === 0,
+    );
     refreshViewer(
       preserveFrame,
       preservePlaying,
-      resetPresentation,
       resetPresentation,
     );
     generationStage.textContent = `Received ${chunk.frameCount} frames`;
@@ -1660,12 +1686,13 @@ export function bootstrap(): () => void {
       }
       currentContinuation = event.result.continuation;
       const playback = viewer?.getPlaybackState();
-      const resetPresentation =
-        active.mode === "replace" && !active.receivedChunk;
+      const resetPresentation = shouldResetMotionPresentation(
+        active.mode,
+        !active.receivedChunk,
+      );
       refreshViewer(
         playback?.frame ?? 0,
         Boolean(playback?.playing || active.resumePlayback),
-        resetPresentation,
         resetPresentation,
       );
       generationProgressValue = 1;
@@ -1932,7 +1959,7 @@ export function bootstrap(): () => void {
     showTrajectory.checked = editorState.outputVisibility.trajectory;
     updatePrompt();
     updateSeed();
-    refreshViewer(0, false, true, true);
+    refreshViewer(0, false, true);
     if (currentContinuation === null) {
       markCurrentMotionPlaybackOnly();
       if (modelReady) {

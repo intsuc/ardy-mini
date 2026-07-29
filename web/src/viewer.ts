@@ -127,6 +127,56 @@ export interface SkeletonInstanceCounts {
   bones: number;
 }
 
+interface SetMotionBaseOptions {
+  /** Whether playback should continue after installing the clip. */
+  playing?: boolean;
+  /** Reset the orbit camera for a genuinely new presentation. */
+  resetCamera?: boolean;
+}
+
+export type SetMotionOptions =
+  | (SetMotionBaseOptions & {
+      /** Start a new presentation at this frame. */
+      frame?: number;
+      preserveContinuity?: false;
+    })
+  | (SetMotionBaseOptions & {
+      /**
+       * Keep the exact internal playhead, playback clock, and VRM spring
+       * simulation while replacing a clip with its streamed continuation.
+       */
+      preserveContinuity: true;
+      frame?: never;
+    });
+
+export interface MotionContinuityContext {
+  requested: boolean;
+  hasPreviousClip: boolean;
+  skeletonChanged: boolean;
+  previousFrame: number;
+  nextFrame: number;
+}
+
+/**
+ * Secondary motion is safe to preserve only when the clip update does not
+ * change either the rig or the playhead. An actual seek must reinitialize the
+ * simulation so stale spring positions are not carried to another pose.
+ */
+export function canPreserveMotionContinuity({
+  requested,
+  hasPreviousClip,
+  skeletonChanged,
+  previousFrame,
+  nextFrame,
+}: MotionContinuityContext): boolean {
+  return (
+    requested &&
+    hasPreviousClip &&
+    !skeletonChanged &&
+    Math.abs(previousFrame - nextFrame) <= 1e-6
+  );
+}
+
 /** Counts used by each instanced skeleton/proxy layer for a dynamic skeleton. */
 export function skeletonInstanceCounts(
   skeleton: SkeletonMetadata,
@@ -625,10 +675,27 @@ export class SkeletonViewer {
 
   setMotion(
     clip: MotionClip,
-    autoplay = true,
-    resetCamera = true,
+    options: SetMotionOptions = {},
   ): void {
+    const hadPreviousClip = this.clip !== null;
+    const previousFrame = this.frameCursor;
+    const previousPlaying = this.playing;
     const skeletonChanged = !sameSkeleton(this.skeleton, clip.skeleton);
+    const requestedContinuity = options.preserveContinuity === true;
+    const nextFrame = THREE.MathUtils.clamp(
+      requestedContinuity && hadPreviousClip
+        ? previousFrame
+        : (options.frame ?? 0),
+      0,
+      clip.frameCount - 1,
+    );
+    const preserveContinuity = canPreserveMotionContinuity({
+      requested: requestedContinuity,
+      hasPreviousClip: hadPreviousClip,
+      skeletonChanged,
+      previousFrame,
+      nextFrame,
+    });
     if (
       this.referenceClip &&
       !sameSkeleton(this.referenceClip.skeleton, clip.skeleton)
@@ -644,16 +711,29 @@ export class SkeletonViewer {
       this.skeleton = clip.skeleton;
     }
     this.rebuildVrmRetargetPlan();
-    this.frameCursor = 0;
-    this.playing = autoplay && !this.reducedMotion && clip.frameCount > 1;
-    this.lastAnimationTime = null;
+    this.frameCursor = nextFrame;
+    this.playing =
+      (options.playing ?? true) &&
+      !this.reducedMotion &&
+      clip.frameCount > 1;
+    if (
+      !preserveContinuity ||
+      !previousPlaying ||
+      !this.playing
+    ) {
+      this.lastAnimationTime = null;
+    }
     this.lastReportedFrame = -1;
     this.buildTrajectory();
-    this.vrm?.humanoid.resetNormalizedPose();
-    this.updatePose(0);
-    this.vrm?.springBoneManager?.reset();
+    if (!preserveContinuity) {
+      this.vrm?.humanoid.resetNormalizedPose();
+    }
+    this.updatePose(nextFrame);
+    if (!preserveContinuity) {
+      this.vrm?.springBoneManager?.reset();
+    }
     this.applyOutputVisibility();
-    if (resetCamera) this.resetCamera();
+    if (options.resetCamera ?? true) this.resetCamera();
     this.invalidate();
     this.emitPlaybackState(true);
   }

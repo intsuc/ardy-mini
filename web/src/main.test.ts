@@ -11,6 +11,7 @@ import {
   formatTime,
   sanitizeImportedEditorState,
   shouldAutoplayMotion,
+  shouldResetMotionPresentation,
   validateGenerationForm,
 } from "./main";
 import type { MotionEditorState } from "./editor-state";
@@ -103,6 +104,17 @@ describe("display formatting", () => {
   it("does not autoplay generated motion when reduced motion is requested", () => {
     expect(shouldAutoplayMotion(false)).toBe(true);
     expect(shouldAutoplayMotion(true)).toBe(false);
+  });
+});
+
+describe("streaming presentation policy", () => {
+  it("resets only the first visual update of a replacement generation", () => {
+    expect(shouldResetMotionPresentation("replace", true)).toBe(true);
+    expect(shouldResetMotionPresentation("replace", false)).toBe(false);
+    expect(shouldResetMotionPresentation("append", true)).toBe(false);
+    expect(shouldResetMotionPresentation("append", false)).toBe(false);
+    expect(shouldResetMotionPresentation("branch", true)).toBe(false);
+    expect(shouldResetMotionPresentation("branch", false)).toBe(false);
   });
 });
 
