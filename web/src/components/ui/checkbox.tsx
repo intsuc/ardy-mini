@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-import * as React from "react"
-import { Checkbox as CheckboxPrimitive } from "radix-ui"
+import { Checkbox as CheckboxPrimitive } from "@base-ui/react/checkbox"
 
 import { cn } from "@/lib/utils"
 import { IconCheck } from "@tabler/icons-react"
@@ -10,7 +9,7 @@ import { IconCheck } from "@tabler/icons-react"
 function Checkbox({
   className,
   ...props
-}: React.ComponentProps<typeof CheckboxPrimitive.Root>) {
+}: Omit<CheckboxPrimitive.Root.Props, "nativeButton" | "render">) {
   return (
     <CheckboxPrimitive.Root
       data-slot="checkbox"
@@ -19,6 +18,8 @@ function Checkbox({
         className
       )}
       {...props}
+      nativeButton
+      render={<button type="button" />}
     >
       <CheckboxPrimitive.Indicator
         data-slot="checkbox-indicator"

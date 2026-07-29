@@ -107,6 +107,10 @@ export interface PressedControlState {
   disabled: boolean
 }
 
+export interface ProgressControlState {
+  value: number
+}
+
 export interface DisclosureControlState {
   open: boolean
 }
@@ -211,6 +215,22 @@ export const previewSettingsControl = createExternalControl<
   { open: false },
   (open) => ({ open })
 )
+
+function createProgressControl(id: string) {
+  return createExternalControl<ProgressControlState, number>(
+    id,
+    { value: 0 },
+    (value) => ({
+      value: Math.max(0, Math.min(100, Math.round(value))),
+    })
+  )
+}
+
+export const modelProgressControl =
+  createProgressControl("model-progressbar")
+
+export const generationProgressControl =
+  createProgressControl("generation-progressbar")
 
 export const removeSavedModelAction = createUiAction()
 

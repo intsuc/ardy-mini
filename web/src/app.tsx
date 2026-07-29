@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   IconCameraRotate,
   IconPlayerPause,
@@ -36,7 +36,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { Button, ButtonLink } from "@/components/ui/button"
 import {
   Card,
   CardAction,
@@ -69,7 +69,6 @@ import {
   InputGroupText,
   InputGroupTextarea,
 } from "@/components/ui/input-group"
-import { Kbd } from "@/components/ui/kbd"
 import { Label } from "@/components/ui/label"
 import {
   NativeSelect,
@@ -84,12 +83,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Progress } from "@/components/ui/progress"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import { Toggle } from "@/components/ui/toggle"
 import {
   BoundCheckbox,
+  BoundProgress,
   BoundSlider,
   BoundSwitch,
 } from "@/components/control-bindings"
@@ -101,7 +100,9 @@ import { bootstrap } from "@/main"
 import {
   continuousGenerationControl,
   durationControl,
+  generationProgressControl,
   loopControl,
+  modelProgressControl,
   previewSettingsControl,
   removeSavedModelAction,
   showContactsControl,
@@ -134,13 +135,23 @@ function selectPrompt(prompt: string) {
   )
 }
 
+const PROMPT_SELECT_ITEMS = PROMPT_EXAMPLES.map(({ label, prompt }) => ({
+  label,
+  value: prompt,
+}))
+
 function PromptExampleSelect() {
   return (
     <Field className="min-w-0">
       <FieldLabel id="prompt-example-label">
         Example prompt
       </FieldLabel>
-      <Select onValueChange={selectPrompt}>
+      <Select
+        items={PROMPT_SELECT_ITEMS}
+        onValueChange={(value) => {
+          if (typeof value === "string") selectPrompt(value)
+        }}
+      >
         <SelectTrigger
           id="prompt-example"
           className="w-full min-w-0"
@@ -148,7 +159,7 @@ function PromptExampleSelect() {
         >
           <SelectValue placeholder="Choose an example" />
         </SelectTrigger>
-        <SelectContent position="popper" align="start">
+        <SelectContent alignItemWithTrigger={false} align="start">
           <SelectGroup>
             <SelectLabel>Motion examples</SelectLabel>
             {PROMPT_EXAMPLES.map((example) => (
@@ -187,7 +198,8 @@ function AppHeader() {
         </Badge>
         <Separator
           orientation="vertical"
-          decorative
+          role="none"
+          aria-hidden="true"
         />
         <Badge variant="outline" id="gpu-badge">
           <span
@@ -199,7 +211,8 @@ function AppHeader() {
         </Badge>
         <Separator
           orientation="vertical"
-          decorative
+          role="none"
+          aria-hidden="true"
         />
         <Badge variant="outline" id="isolation-badge">
           <span
@@ -219,7 +232,9 @@ function AppHeader() {
 
 function ModelSection() {
   const importModelRef = useRef<HTMLButtonElement>(null)
+  const removeDialogCancelRef = useRef<HTMLButtonElement>(null)
   const focusImportAfterCloseRef = useRef(false)
+  const [removeDialogOpen, setRemoveDialogOpen] = useState(false)
 
   return (
     <section
@@ -261,9 +276,8 @@ function ModelSection() {
             id="model-progress"
             hidden
           >
-            <Progress
-              id="model-progressbar"
-              value={0}
+            <BoundProgress
+              control={modelProgressControl}
               aria-label="Model loading progress"
             />
             <span
@@ -276,15 +290,15 @@ function ModelSection() {
           <CardDescription>
             Select <code>artifacts/browser/core40</code> (about 1.4 GiB,
             four ONNX graphs). The pack is stored only in this browser.{" "}
-            <Button variant="link" size="xs" asChild>
-              <a
-                href="https://github.com/intsuc/ardy-mini#fully-in-browser-minilm-demo"
-                target="_blank"
-                rel="noreferrer"
-              >
-                Export instructions
-              </a>
-            </Button>
+            <ButtonLink
+              variant="link"
+              size="xs"
+              href="https://github.com/intsuc/ardy-mini#fully-in-browser-minilm-demo"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Export instructions
+            </ButtonLink>
           </CardDescription>
         </CardFooter>
       </Card>
@@ -307,26 +321,31 @@ function ModelSection() {
           hidden
           aria-hidden="true"
         />
-        <AlertDialog>
-          <AlertDialogTrigger asChild>
-            <Button
-              id="remove-model"
-              className="min-w-0"
-              variant="destructive"
-              size="lg"
-              type="button"
-              hidden
-            >
-              Remove saved pack
-            </Button>
-          </AlertDialogTrigger>
+        <AlertDialog
+          open={removeDialogOpen}
+          onOpenChange={(open) => setRemoveDialogOpen(open)}
+        >
+          <AlertDialogTrigger
+            render={
+              <Button
+                id="remove-model"
+                className="min-w-0"
+                variant="destructive"
+                size="lg"
+                type="button"
+                hidden
+              >
+                Remove saved pack
+              </Button>
+            }
+          />
           <AlertDialogContent
             size="sm"
-            onCloseAutoFocus={(event) => {
-              if (!focusImportAfterCloseRef.current) return
+            initialFocus={removeDialogCancelRef}
+            finalFocus={() => {
+              if (!focusImportAfterCloseRef.current) return true
               focusImportAfterCloseRef.current = false
-              event.preventDefault()
-              importModelRef.current?.focus()
+              return importModelRef.current
             }}
           >
             <AlertDialogHeader>
@@ -339,12 +358,15 @@ function ModelSection() {
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
-              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogCancel ref={removeDialogCancelRef}>
+                Cancel
+              </AlertDialogCancel>
               <AlertDialogAction
                 id="confirm-remove-model"
                 variant="destructive"
                 onClick={() => {
                   focusImportAfterCloseRef.current = true
+                  setRemoveDialogOpen(false)
                   removeSavedModelAction.trigger()
                 }}
               >
@@ -607,10 +629,9 @@ function GenerationActionsSection() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <Progress
+          <BoundProgress
+            control={generationProgressControl}
             aria-label="Generation progress"
-            id="generation-progressbar"
-            value={0}
           />
           <span className="sr-only" id="generation-note">
             The first run may compile GPU pipelines.
@@ -635,12 +656,6 @@ function GenerationActionsSection() {
         <span id="generate-label">
           Generate motion
         </span>
-        <Kbd
-          id="button-shortcut"
-          aria-hidden="true"
-        >
-          Ctrl ↵
-        </Kbd>
       </Button>
 
       <div className="flex flex-wrap items-center gap-1.5 [&>*]:flex-auto">
@@ -979,18 +994,16 @@ function PreviewSettingsSection() {
     <Accordion
       id={previewSettingsControl.id}
       className="border-b px-3"
-      type="single"
-      collapsible
-      value={state.open ? "view-settings" : ""}
+      value={state.open ? ["view-settings"] : []}
       onValueChange={(value) =>
-        previewSettingsControl.commit(value === "view-settings")
+        previewSettingsControl.commit(value.includes("view-settings"))
       }
     >
       <AccordionItem value="view-settings">
         <AccordionTrigger id="preview-settings-trigger">
           View settings
         </AccordionTrigger>
-        <AccordionContent forceMount className="grid gap-3 pb-3">
+        <AccordionContent keepMounted className="grid gap-3 pb-3">
           <VrmAvatarSection />
           <Separator />
           <DisplayControls />

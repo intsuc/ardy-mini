@@ -135,9 +135,10 @@ test("renders the two-pane technical workspace without motion parameters", async
     "data-slot",
     "slider",
   );
-  await expect(page.locator("#button-shortcut")).toHaveAttribute(
-    "data-slot",
-    "kbd",
+  await expect(page.locator("#button-shortcut")).toHaveCount(0);
+  await expect(page.locator("#generate")).toHaveAttribute(
+    "aria-keyshortcuts",
+    "Control+Enter Meta+Enter",
   );
   await openPreviewSettings(page);
   await expect(page.getByText("VRM avatar", { exact: true })).toBeVisible();
@@ -550,8 +551,12 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
     name: "Example prompt",
   });
   await promptExample.click();
-  await expect(page.getByRole("option")).toHaveCount(10);
-  await page.getByRole("option", { name: "Joyful dance" }).click();
+  const promptOptions = page
+    .locator('[data-slot="select-content"]')
+    .getByRole("option");
+  await expect(promptOptions).toHaveCount(10);
+  await promptOptions.filter({ hasText: "Joyful dance" }).click();
+  await expect(promptExample).toContainText("Joyful dance");
   await expect(prompt).toHaveValue("A person performs a joyful dance.");
 
   const validation = await page.evaluate(async () => {
@@ -594,21 +599,35 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   await expect(page.locator(".skip-link")).toBeFocused();
 
   const previewSettingsTrigger = page.locator("#preview-settings-trigger");
+  const previewSettingsContent = page.locator(
+    '[data-slot="accordion-content"]',
+  );
+  await expect(previewSettingsContent).toHaveCount(1);
+  await expect(previewSettingsContent).toBeHidden();
   await previewSettingsTrigger.focus();
   await page.keyboard.press("Space");
   await expect(previewSettingsTrigger).toHaveAttribute(
     "aria-expanded",
     "true",
   );
+  await expect(previewSettingsContent).toBeVisible();
+  await page.keyboard.press("Space");
+  await expect(previewSettingsTrigger).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
+  await expect(previewSettingsContent).toBeHidden();
 
   for (const label of [
     "Motion description",
-    "Duration",
     "Seed",
     "Backend",
   ]) {
     await expect(page.getByLabel(label, { exact: true })).toHaveCount(1);
   }
+  await expect(
+    page.getByRole("slider", { name: "Duration", exact: true }),
+  ).toHaveCount(1);
 
   await expect(page.locator("#model-state")).toHaveText("Not loaded");
   const canvas = page.locator("#motion-canvas");
@@ -757,6 +776,20 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
         .evaluate((element) => getComputedStyle(element).transitionDuration),
     )
     .toBe("0s");
+  const importModel = page.locator("#import-model");
+  const importModelBox = await importModel.boundingBox();
+  expect(importModelBox).not.toBeNull();
+  await page.mouse.move(
+    importModelBox!.x + importModelBox!.width / 2,
+    importModelBox!.y + importModelBox!.height / 2,
+  );
+  await page.mouse.down();
+  await expect
+    .poll(() =>
+      importModel.evaluate((element) => getComputedStyle(element).translate),
+    )
+    .toBe("none");
+  await page.mouse.up();
 
   await expect(page.locator("#generation-progress")).toBeVisible();
   await expect(page.locator("#generation-progress")).not.toHaveAttribute(
@@ -969,13 +1002,36 @@ test("returns focus to model selection after saved pack removal", async ({
     (element as HTMLButtonElement).hidden = false;
   });
   await removeModel.click();
-  await expect(
-    page.getByRole("alertdialog", {
-      name: "Remove the saved model pack?",
-    }),
-  ).toBeVisible();
+  const dialog = page.getByRole("alertdialog", {
+    name: "Remove the saved model pack?",
+  });
+  const cancel = page.getByRole("button", { name: "Cancel", exact: true });
+  const confirm = page.locator("#confirm-remove-model");
 
-  await page.locator("#confirm-remove-model").click();
+  await expect(dialog).toBeVisible();
+  await expect(cancel).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(confirm).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(cancel).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(removeModel).toBeFocused();
+
+  await removeModel.click();
+  await expect(cancel).toBeFocused();
+  await cancel.click();
+  await expect(dialog).toBeHidden();
+  await expect(removeModel).toBeFocused();
+
+  await removeModel.click();
+  await expect(cancel).toBeFocused();
+  await page.mouse.click(2, 2);
+  await expect(dialog).toBeVisible();
+
+  await confirm.click();
+  await expect(dialog).toBeHidden();
   await expect(page.locator("#import-model")).toBeFocused();
   await expect(removeModel).toBeHidden();
 });

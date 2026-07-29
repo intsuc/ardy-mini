@@ -8,12 +8,18 @@ export async function setSliderValue(
   selector: string,
   value: number
 ): Promise<void> {
-  const thumb = page.locator(`${selector} [role="slider"]`)
+  const thumb = page.locator(selector).getByRole("slider")
   await expect(thumb).toBeEnabled()
   await thumb.focus()
 
-  const minimum = Number(await thumb.getAttribute("aria-valuemin"))
-  const maximum = Number(await thumb.getAttribute("aria-valuemax"))
+  const minimum = Number(
+    (await thumb.getAttribute("aria-valuemin")) ??
+      (await thumb.getAttribute("min"))
+  )
+  const maximum = Number(
+    (await thumb.getAttribute("aria-valuemax")) ??
+      (await thumb.getAttribute("max"))
+  )
   if (
     !Number.isFinite(minimum) ||
     !Number.isFinite(maximum) ||

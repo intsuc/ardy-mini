@@ -174,11 +174,12 @@ test.describe("real browser model-pack", () => {
     ]) {
       expect(joinedLoadStages).toContain(graph);
     }
-    if (configuredBackend === "wasm") {
-      await expect(page.locator("#model-detail")).toContainText("WebAssembly");
-    } else if (configuredBackend === "webgpu") {
-      await expect(page.locator("#model-detail")).toContainText("WebGPU");
-    }
+    await expect(page.locator("#model-detail")).toHaveText(
+      "ardy-minilm-core40-browser-v1",
+    );
+    await expect(page.locator("#model-detail")).not.toContainText(
+      /WebGPU|WebAssembly|FPS/,
+    );
     const prompt = page.getByLabel("Motion description");
     const seed = page.getByRole("spinbutton", { name: "Seed" });
     await prompt.fill("人物が歩く。");
@@ -317,7 +318,7 @@ test.describe("real browser model-pack", () => {
     await expect(playPause).toHaveAttribute("aria-label", "Play motion");
 
     await setSliderValue(page, "#timeline", 18);
-    await expect(page.locator("#timeline [role=slider]")).toHaveAttribute(
+    await expect(page.locator("#timeline").getByRole("slider")).toHaveAttribute(
       "aria-valuenow",
       "18",
     );
@@ -349,7 +350,7 @@ test.describe("real browser model-pack", () => {
         "aria-pressed",
         "false",
       );
-      await expect(page.locator("#timeline [role=slider]")).toHaveAttribute(
+      await expect(page.locator("#timeline").getByRole("slider")).toHaveAttribute(
         "aria-valuenow",
         "0",
       );

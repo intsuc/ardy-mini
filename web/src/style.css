@@ -245,5 +245,6 @@ body {
 
   [data-slot="button"]:not(:disabled):active {
     transform: none;
+    translate: none;
   }
 }

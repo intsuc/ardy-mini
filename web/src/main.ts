@@ -43,7 +43,9 @@ import { PROMPT_EXAMPLE_EVENT } from "./prompt-examples";
 import {
   continuousGenerationControl,
   durationControl,
+  generationProgressControl,
   loopControl,
+  modelProgressControl,
   previewSettingsControl,
   removeSavedModelAction,
   showContactsControl,
@@ -803,12 +805,6 @@ export function bootstrap(): () => void {
   const modelSetupHelp = requiredElement<HTMLElement>("model-setup-help");
   const modelState = requiredElement<HTMLElement>("model-state");
   const modelProgress = requiredElement<HTMLElement>("model-progress");
-  const modelProgressbar = requiredElement<HTMLElement>("model-progressbar");
-  const modelProgressFill = requiredDescendant<HTMLElement>(
-    modelProgressbar,
-    '[data-slot="progress-indicator"]',
-    "model progress indicator",
-  );
   const modelProgressLabel = requiredElement<HTMLElement>("model-progress-label");
   const modelErrorBanner = requiredElement<HTMLElement>("model-error-banner");
   const modelErrorTitle = requiredElement<HTMLElement>("model-error-title");
@@ -820,7 +816,6 @@ export function bootstrap(): () => void {
     requiredElement<SVGSVGElement>("generate-spinner");
   const generateLabel = requiredElement<HTMLElement>("generate-label");
   const generateHelp = requiredElement<HTMLElement>("generate-help");
-  const buttonShortcut = requiredElement<HTMLElement>("button-shortcut");
   const restartGeneration =
     requiredElement<HTMLButtonElement>("restart-generation");
   const restartFromNow =
@@ -834,14 +829,6 @@ export function bootstrap(): () => void {
     requiredElement<HTMLElement>("generation-progress");
   const generationStage = requiredElement<HTMLElement>("generation-stage");
   const generationPercent = requiredElement<HTMLElement>("generation-percent");
-  const generationProgressbar =
-    requiredElement<HTMLElement>("generation-progressbar");
-  const generationProgressFill =
-    requiredDescendant<HTMLElement>(
-      generationProgressbar,
-      '[data-slot="progress-indicator"]',
-      "generation progress indicator",
-    );
   const errorBanner = requiredElement<HTMLElement>("error-banner");
   const errorTitle = requiredElement<HTMLElement>("error-title");
   const errorMessage = requiredElement<HTMLElement>("error-message");
@@ -893,9 +880,6 @@ export function bootstrap(): () => void {
     backend.querySelector<HTMLOptionElement>('option[value="webgpu"]');
   if (webGpuOption) webGpuOption.disabled = !hasWebGpu;
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-  buttonShortcut.textContent = /Mac|iPhone|iPad|iPod/.test(navigator.platform)
-    ? "⌘ ↵"
-    : "Ctrl ↵";
   gpuDot.dataset.state = hasWebGpu ? "available" : "unavailable";
   gpuLabel.textContent = hasWebGpu
     ? "WebGPU available"
@@ -967,14 +951,12 @@ export function bootstrap(): () => void {
   }
 
   function setProgress(
-    fill: HTMLElement,
-    progressbar: HTMLElement,
+    control: typeof modelProgressControl,
     fraction: number,
   ): number {
     const safeFraction = Math.max(0, Math.min(1, fraction));
     const percent = Math.round(safeFraction * 100);
-    fill.style.transform = `translateX(-${100 - percent}%)`;
-    progressbar.setAttribute("aria-valuenow", String(percent));
+    control.commit(percent);
     return percent;
   }
 
@@ -1301,7 +1283,6 @@ export function bootstrap(): () => void {
         : "Generating motion"
       : "Generate motion";
     generateSpinner.classList.toggle("hidden", !active);
-    buttonShortcut.hidden = active;
     generate.setAttribute("aria-busy", String(active));
     updateGenerateAvailability();
     if (!active) {
@@ -1416,7 +1397,7 @@ export function bootstrap(): () => void {
           : "Selecting runtime";
     modelProgress.hidden = false;
     modelProgressValue = 0;
-    setProgress(modelProgressFill, modelProgressbar, 0);
+    setProgress(modelProgressControl, 0);
     modelProgressLabel.textContent = "0%";
     setModelStatus(
       "loading",
@@ -1440,7 +1421,7 @@ export function bootstrap(): () => void {
 
   async function persistLoadedPack(files: File[]): Promise<void> {
     if (!supportsPersistentPackCache()) {
-      modelDetail.textContent = `${modelLabel} · ${modelBackend} · ready for this tab`;
+      modelDetail.textContent = modelInfo?.id ?? modelLabel;
       return;
     }
     modelCaching = true;
@@ -1449,7 +1430,7 @@ export function bootstrap(): () => void {
     modelState.textContent = "Saving";
     modelProgress.hidden = false;
     modelProgressValue = 0;
-    setProgress(modelProgressFill, modelProgressbar, 0);
+    setProgress(modelProgressControl, 0);
     modelProgressLabel.textContent = "Caching";
     updateGenerateAvailability();
     try {
@@ -1457,20 +1438,16 @@ export function bootstrap(): () => void {
         const percent =
           total > 0 ? Math.round((completed / total) * 100) : 0;
         modelProgressValue = Math.max(modelProgressValue, percent / 100);
-        setProgress(
-          modelProgressFill,
-          modelProgressbar,
-          modelProgressValue,
-        );
+        setProgress(modelProgressControl, modelProgressValue);
         modelProgressLabel.textContent = `Saving ${percent}%`;
       });
       cachedPack = true;
       removeModel.hidden = false;
-      modelDetail.textContent = `${modelLabel} · ${modelBackend} · saved on this device`;
+      modelDetail.textContent = modelInfo?.id ?? modelLabel;
     } catch (error) {
       cachedPack = false;
       removeModel.hidden = true;
-      modelDetail.textContent = `${modelLabel} · ${modelBackend} · ready for this tab`;
+      modelDetail.textContent = modelInfo?.id ?? modelLabel;
       showModelError(
         "Model loaded, but not cached",
         error instanceof Error
@@ -1495,8 +1472,7 @@ export function bootstrap(): () => void {
         modelLoadProgress(event),
       );
       const percent = setProgress(
-        modelProgressFill,
-        modelProgressbar,
+        modelProgressControl,
         modelProgressValue,
       );
       modelProgress.hidden = false;
@@ -1510,8 +1486,7 @@ export function bootstrap(): () => void {
         generationProgress(event),
       );
       const percent = setProgress(
-        generationProgressFill,
-        generationProgressbar,
+        generationProgressControl,
         generationProgressValue,
       );
       generationStage.textContent =
@@ -1563,7 +1538,7 @@ export function bootstrap(): () => void {
     setModelStatus(
       "ready",
       event.model.variant || "ARDY Mini Core40",
-      `${event.model.id} · ${modelBackend} · ${event.model.fps} FPS`,
+      event.model.id,
       "Ready",
     );
     const incompatibleContinuation =
@@ -1691,7 +1666,7 @@ export function bootstrap(): () => void {
       );
       generationProgressValue = 1;
       generationPercent.textContent = "100%";
-      setProgress(generationProgressFill, generationProgressbar, 1);
+      setProgress(generationProgressControl, 1);
       runtimeMetric.hidden = false;
       runtimeValue.textContent =
         event.result.timingsMs.total >= 1000
@@ -1793,7 +1768,7 @@ export function bootstrap(): () => void {
       ),
     };
     generationProgressValue = 0;
-    setProgress(generationProgressFill, generationProgressbar, 0);
+    setProgress(generationProgressControl, 0);
     generationPercent.textContent = "0%";
     generationStage.textContent =
       mode === "append"

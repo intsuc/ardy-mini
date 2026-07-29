@@ -4,16 +4,19 @@
 import * as React from "react"
 
 import { Checkbox } from "@/components/ui/checkbox"
+import { Progress } from "@/components/ui/progress"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
 import {
   type CheckedControlState,
   type ExternalControl,
+  type ProgressControlState,
   type SliderControlState,
   useControlState,
 } from "@/ui-control-store"
 
 type CheckedControl = ExternalControl<CheckedControlState, boolean>
+type ProgressControl = ExternalControl<ProgressControlState, number>
 type SliderControl = ExternalControl<SliderControlState, number>
 
 type BoundCheckboxProps = Omit<
@@ -35,7 +38,7 @@ function BoundCheckbox({
       id={control.id}
       checked={state.checked}
       disabled={state.disabled}
-      onCheckedChange={(checked) => control.commit(checked === true)}
+      onCheckedChange={control.commit}
     />
   )
 }
@@ -60,6 +63,28 @@ function BoundSwitch({
       checked={state.checked}
       disabled={state.disabled}
       onCheckedChange={control.commit}
+    />
+  )
+}
+
+type BoundProgressProps = Omit<
+  React.ComponentProps<typeof Progress>,
+  "id" | "value"
+> & {
+  control: ProgressControl
+}
+
+function BoundProgress({
+  control,
+  ...props
+}: BoundProgressProps) {
+  const state = useControlState(control)
+
+  return (
+    <Progress
+      {...props}
+      id={control.id}
+      value={state.value}
     />
   )
 }
@@ -89,18 +114,17 @@ function BoundSlider({
     <Slider
       {...props}
       id={control.id}
-      value={[state.value]}
+      value={state.value}
       min={state.min}
       max={state.max}
       step={state.step}
       disabled={state.disabled}
       aria-valuetext={state.ariaValueText}
       onValueChange={(value) => {
-        const nextValue = value[0]
-        if (nextValue !== undefined) control.commit(nextValue)
+        if (typeof value === "number") control.commit(value)
       }}
     />
   )
 }
 
-export { BoundCheckbox, BoundSlider, BoundSwitch }
+export { BoundCheckbox, BoundProgress, BoundSlider, BoundSwitch }
