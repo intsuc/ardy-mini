@@ -344,6 +344,7 @@ input[role="switch"]:checked::before {
   }
 
   [data-slot="input"],
+  [data-slot="input-group-control"],
   [data-slot="textarea"],
   [data-slot="native-select"],
   [data-slot="select-trigger"] {
@@ -388,12 +389,12 @@ input[role="switch"]:checked::before {
   .skip-link,
   [data-slot="button"],
   [data-slot="input"],
+  [data-slot="input-group-control"],
   [data-slot="textarea"],
   [data-slot="native-select"],
   [data-slot="select-trigger"],
   [data-slot="select-content"],
-  #model-progress-fill,
-  #generation-progress-fill,
+  [data-slot="progress-indicator"],
   input[type="range"],
   input[type="checkbox"] {
     transition: none;

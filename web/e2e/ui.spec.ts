@@ -348,6 +348,14 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
   await page.goto("/");
 
   const prompt = page.getByLabel("Motion description");
+  await expect(prompt.locator("xpath=..")).toHaveAttribute(
+    "data-slot",
+    "input-group",
+  );
+  await expect(page.locator("#seed").locator("xpath=..")).toHaveAttribute(
+    "data-slot",
+    "input-group",
+  );
   await prompt.fill("A person walks forward confidently.");
   await expect(page.locator("#prompt-count")).toHaveText("35 / 280");
 
@@ -512,7 +520,7 @@ test("stacks the workspace before the two-pane layout can overflow", async ({
     .toBe(true);
 });
 
-test("honors reduced motion and remains touch-safe without mobile overflow", async ({
+test("honors reduced motion and keeps native shadcn controls usable on mobile", async ({
   page,
 }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
@@ -595,7 +603,7 @@ test("honors reduced motion and remains touch-safe without mobile overflow", asy
   );
   expect(mobileFormFontSizes).toEqual(["16px", "16px", "16px", "16px"]);
 
-  const tapTargetSelectors = [
+  const controlSelectors = [
     "#new-session",
     "#import-session",
     "#export-session",
@@ -610,12 +618,12 @@ test("honors reduced motion and remains touch-safe without mobile overflow", asy
     "#import-vrm",
   ];
   const boxes = await Promise.all(
-    tapTargetSelectors.map((selector) => page.locator(selector).boundingBox()),
+    controlSelectors.map((selector) => page.locator(selector).boundingBox()),
   );
   for (const box of boxes) {
     expect(box).not.toBeNull();
-    expect(box!.width).toBeGreaterThanOrEqual(44);
-    expect(box!.height).toBeGreaterThanOrEqual(44);
+    expect(box!.width).toBeGreaterThanOrEqual(28);
+    expect(box!.height).toBeGreaterThanOrEqual(28);
   }
 
   const playbackBoxes = await Promise.all(
@@ -626,7 +634,7 @@ test("honors reduced motion and remains touch-safe without mobile overflow", asy
   expect(
     Math.max(...playbackBoxes.map((box) => box!.y)) -
       Math.min(...playbackBoxes.map((box) => box!.y)),
-  ).toBeLessThan(2);
+  ).toBeLessThanOrEqual(2);
   await expect
     .poll(() =>
       page.evaluate(

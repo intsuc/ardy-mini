@@ -43,7 +43,14 @@ import {
   FieldGroup,
   FieldLabel,
 } from "@/components/ui/field"
-import { Input } from "@/components/ui/input"
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+  InputGroupText,
+  InputGroupTextarea,
+} from "@/components/ui/input-group"
 import {
   NativeSelect,
   NativeSelectOption,
@@ -57,9 +64,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { Progress } from "@/components/ui/progress"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
-import { Textarea } from "@/components/ui/textarea"
 import {
   PROMPT_EXAMPLES,
   PROMPT_EXAMPLE_EVENT,
@@ -95,7 +102,7 @@ function PromptExampleSelect() {
       <Select onValueChange={selectPrompt}>
         <SelectTrigger
           id="prompt-example"
-          className="min-h-11 w-full min-w-0"
+          className="w-full min-w-0"
           aria-labelledby="prompt-example-label"
         >
           <SelectValue placeholder="Choose an example" />
@@ -106,7 +113,6 @@ function PromptExampleSelect() {
             {PROMPT_EXAMPLES.map((example) => (
               <SelectItem
                 key={example.label}
-                className="min-h-11"
                 value={example.prompt}
               >
                 {example.label}
@@ -122,27 +128,9 @@ function PromptExampleSelect() {
 function AppHeader() {
   return (
     <header className="relative z-10 grid min-h-15 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-4 border-b bg-background px-3 py-2 max-[760px]:grid-cols-[minmax(0,1fr)_auto] max-[520px]:gap-2 max-[520px]:px-2.5">
-      <a
-        className="inline-flex min-h-11 items-center gap-2.5 text-foreground no-underline"
-        href="./"
-        aria-label="Reload ARDY Mini"
-      >
-        <Badge
-          variant="outline"
-          className="size-8 p-0"
-          aria-hidden="true"
-        >
-          A
-        </Badge>
-        <span>
-          <strong className="block text-sm leading-tight">
-            ARDY Mini
-          </strong>
-          <small className="mt-0.5 block text-xs leading-none text-muted-foreground max-[520px]:hidden">
-            Core40 browser runtime
-          </small>
-        </span>
-      </a>
+      <strong className="text-sm leading-tight">
+        ARDY Mini
+      </strong>
 
       <div
         className="flex min-w-0 items-center justify-center gap-1.5 overflow-hidden max-[760px]:col-span-full max-[760px]:row-start-2 max-[760px]:justify-start max-[760px]:overflow-x-auto"
@@ -191,7 +179,6 @@ function AppHeader() {
       >
         <Button
           id="new-session"
-          className="min-h-11"
           variant="ghost"
           size="sm"
           type="button"
@@ -200,7 +187,6 @@ function AppHeader() {
         </Button>
         <Button
           id="import-session"
-          className="min-h-11"
           variant="ghost"
           size="sm"
           type="button"
@@ -216,7 +202,6 @@ function AppHeader() {
         />
         <Button
           id="export-session"
-          className="min-h-11"
           variant="ghost"
           size="sm"
           type="button"
@@ -274,27 +259,18 @@ function ModelSection() {
             id="model-progress"
             hidden
           >
-            <div
-              className="h-1 w-full overflow-hidden bg-secondary"
+            <Progress
               id="model-progressbar"
-              role="progressbar"
+              value={0}
               aria-label="Model loading progress"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={0}
-            >
-              <span
-                className="block h-full w-full origin-left scale-x-[0.001] bg-primary transition-transform"
-                id="model-progress-fill"
-              />
-            </div>
+            />
             <span
               className="text-xs text-muted-foreground"
               id="model-progress-label"
             />
           </div>
         </CardHeader>
-        <CardFooter>
+        <CardFooter id="model-setup-help">
           <p className="setup-note">
             Select <code>artifacts/browser/core40</code> (about 1.4 GiB,
             four ONNX graphs). The pack is stored only in this browser.{" "}
@@ -312,8 +288,9 @@ function ModelSection() {
       <div className="grid min-w-0 gap-1.5 min-[360px]:grid-cols-[minmax(0,1fr)_auto]">
         <Button
           id="import-model"
-          className="min-h-11 w-full min-w-0"
+          className="w-full min-w-0"
           variant="secondary"
+          size="lg"
           type="button"
         >
           <span id="import-model-label">Choose model pack</span>
@@ -327,8 +304,9 @@ function ModelSection() {
         />
         <Button
           id="remove-model"
-          className="min-h-11 w-full min-w-0"
+          className="w-full min-w-0"
           variant="destructive"
+          size="lg"
           type="button"
           hidden
         >
@@ -349,9 +327,8 @@ function ModelSection() {
         <AlertAction>
           <Button
             id="dismiss-model-error"
-            className="min-h-11 min-w-11"
             variant="ghost"
-            size="icon-sm"
+            size="icon-lg"
             type="button"
             aria-label="Dismiss model error"
           >
@@ -376,13 +353,6 @@ function PromptSection() {
         >
           Prompt
         </h2>
-        <Badge
-          id="prompt-count"
-          variant="outline"
-          aria-hidden="true"
-        >
-          0 / 280
-        </Badge>
       </div>
 
       <FieldGroup>
@@ -390,17 +360,24 @@ function PromptSection() {
           <FieldLabel htmlFor="prompt">
             Motion description
           </FieldLabel>
-          <Textarea
-            id="prompt"
-            name="prompt"
-            rows={3}
-            maxLength={280}
-            spellCheck
-            autoComplete="off"
-            placeholder="A person walks forward, then waves with their right hand."
-            aria-describedby="prompt-error"
-            required
-          />
+          <InputGroup>
+            <InputGroupTextarea
+              id="prompt"
+              name="prompt"
+              rows={3}
+              maxLength={280}
+              spellCheck
+              autoComplete="off"
+              placeholder="A person walks forward, then waves with their right hand."
+              aria-describedby="prompt-count prompt-error"
+              required
+            />
+            <InputGroupAddon align="block-end">
+              <InputGroupText id="prompt-count">
+                0 / 280
+              </InputGroupText>
+            </InputGroupAddon>
+          </InputGroup>
           <EmptyFieldError id="prompt-error" />
         </Field>
       </FieldGroup>
@@ -409,7 +386,6 @@ function PromptSection() {
         <PromptExampleSelect />
         <Button
           id="apply-prompt"
-          className="min-h-11"
           variant="secondary"
           type="button"
         >
@@ -468,8 +444,8 @@ function ClipSection() {
         <FieldGroup className="grid grid-cols-2 gap-2.5 max-[520px]:grid-cols-1">
           <Field className="field-group">
             <FieldLabel htmlFor="seed">Seed</FieldLabel>
-            <div className="grid grid-cols-[minmax(0,1fr)_2.75rem] gap-1.5">
-              <Input
+            <InputGroup>
+              <InputGroupInput
                 id="seed"
                 name="seed"
                 type="number"
@@ -480,21 +456,20 @@ function ClipSection() {
                 defaultValue="2"
                 aria-describedby="seed-error"
               />
-              <Button
-                id="randomize-seed"
-                type="button"
-                className="min-h-11 min-w-11"
-                variant="outline"
-                size="icon"
-                aria-label="Choose a random seed"
-                title="Random seed"
-              >
-                <IconRefresh
-                  data-icon="inline-start"
-                  aria-hidden="true"
-                />
-              </Button>
-            </div>
+              <InputGroupAddon align="inline-end">
+                <InputGroupButton
+                  id="randomize-seed"
+                  size="icon-xs"
+                  aria-label="Choose a random seed"
+                  title="Random seed"
+                >
+                  <IconRefresh
+                    data-icon="inline-start"
+                    aria-hidden="true"
+                  />
+                </InputGroupButton>
+              </InputGroupAddon>
+            </InputGroup>
             <EmptyFieldError id="seed-error" />
           </Field>
 
@@ -526,16 +501,11 @@ function ClipSection() {
         </FieldGroup>
 
         <label
-          className="flex min-h-11 items-center justify-between gap-2.5"
+          className="flex items-center justify-between gap-2.5"
           htmlFor="stream-generation"
         >
-          <span>
-            <span className="block text-xs font-medium">
-              Continuous generation
-            </span>
-            <small className="mt-0.5 block text-xs text-muted-foreground">
-              Keep the target buffer filled during playback.
-            </small>
+          <span className="text-xs font-medium">
+            Continuous generation
           </span>
           <input
             id="stream-generation"
@@ -587,23 +557,21 @@ function GenerationActionsSection() {
     >
       <Card
         id="generation-progress"
-        className="gap-1.5 py-2"
         size="sm"
         data-state="idle"
       >
-        <CardHeader className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-2 px-3">
-          <CardTitle
-            className="truncate text-xs"
-            id="generation-stage"
-          >
+        <CardHeader>
+          <CardTitle className="truncate" id="generation-stage">
             Waiting for model
           </CardTitle>
-          <span
-            className="text-xs text-muted-foreground tabular-nums"
-            id="generation-percent"
-          >
-            —
-          </span>
+          <CardAction>
+            <span
+              className="text-xs text-muted-foreground tabular-nums"
+              id="generation-percent"
+            >
+              —
+            </span>
+          </CardAction>
           <CardDescription
             className="sr-only"
             id="generate-help"
@@ -611,21 +579,12 @@ function GenerationActionsSection() {
             Load a model pack to enable generation.
           </CardDescription>
         </CardHeader>
-        <CardContent className="px-3">
-          <div
-            className="h-1 w-full overflow-hidden bg-secondary"
-            role="progressbar"
+        <CardContent>
+          <Progress
             aria-label="Generation progress"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={0}
             id="generation-progressbar"
-          >
-            <span
-              className="block h-full w-full origin-left scale-x-[0.001] bg-primary transition-transform"
-              id="generation-progress-fill"
-            />
-          </div>
+            value={0}
+          />
           <span className="sr-only" id="generation-note">
             The first run may compile GPU pipelines.
           </span>
@@ -634,12 +593,19 @@ function GenerationActionsSection() {
 
       <Button
         id="generate"
-        className="min-h-11 w-full"
+        className="w-full"
+        size="lg"
         type="submit"
         aria-describedby="generate-help"
         aria-keyshortcuts="Control+Enter Meta+Enter"
         disabled
       >
+        <Spinner
+          id="generate-spinner"
+          className="hidden"
+          data-icon="inline-start"
+          aria-hidden="true"
+        />
         <span id="generate-label">
           Generate motion
         </span>
@@ -655,7 +621,6 @@ function GenerationActionsSection() {
       <div className="flex flex-wrap items-center gap-1.5 [&>*]:flex-auto">
         <Button
           id="restart-generation"
-          className="min-h-11"
           variant="secondary"
           type="button"
         >
@@ -663,7 +628,6 @@ function GenerationActionsSection() {
         </Button>
         <Button
           id="restart-from-now"
-          className="min-h-11"
           variant="secondary"
           type="button"
         >
@@ -671,7 +635,7 @@ function GenerationActionsSection() {
         </Button>
         <Button
           id="cancel-generation"
-          className="invisible min-h-11 data-[state=active]:visible"
+          className="invisible data-[state=active]:visible"
           variant="destructive"
           type="button"
           data-state="idle"
@@ -701,9 +665,8 @@ function GenerationMessages() {
         <AlertAction>
           <Button
             id="dismiss-error"
-            className="min-h-11 min-w-11"
             variant="ghost"
-            size="icon-sm"
+            size="icon-lg"
             type="button"
             aria-label="Dismiss generation error"
           >
@@ -762,7 +725,6 @@ function ViewportPanel() {
           </Badge>
           <Button
             id="export-motion"
-            className="min-h-11"
             variant="secondary"
             type="button"
           >
@@ -840,8 +802,8 @@ function ViewportPanel() {
       >
         <Button
           id="play-pause"
-          className="group/play min-h-11 min-w-11"
-          size="icon"
+          className="group/play"
+          size="icon-lg"
           type="button"
           aria-label="Play motion"
           disabled
@@ -883,7 +845,6 @@ function ViewportPanel() {
         <label className="speed-control">
           <span className="sr-only">Playback speed</span>
           <NativeSelect
-            className="[&_select]:min-h-11"
             id="playback-speed"
             aria-label="Playback speed"
             defaultValue="1"
@@ -896,9 +857,9 @@ function ViewportPanel() {
         </label>
         <Button
           id="loop-toggle"
-          className="is-active min-h-11 min-w-11 aria-pressed:bg-accent aria-pressed:text-accent-foreground"
+          className="aria-pressed:bg-accent aria-pressed:text-accent-foreground"
           variant="outline"
-          size="icon"
+          size="icon-lg"
           type="button"
           aria-pressed="true"
           aria-label="Loop playback"
@@ -908,9 +869,8 @@ function ViewportPanel() {
         </Button>
         <Button
           id="reset-camera"
-          className="min-h-11 min-w-11"
           variant="ghost"
-          size="icon"
+          size="icon-lg"
           type="button"
           aria-label="Reset camera"
         >
@@ -951,10 +911,9 @@ function VrmAvatarSection() {
             Load a VRM 0.x or 1.0 file for local preview.
           </CardDescription>
         </CardHeader>
-        <CardFooter className="flex-wrap gap-1.5">
+        <CardFooter className="grid grid-cols-2 gap-1.5">
           <Button
             id="import-vrm"
-            className="min-h-11 flex-1"
             variant="secondary"
             type="button"
           >
@@ -970,7 +929,6 @@ function VrmAvatarSection() {
           />
           <Button
             id="remove-vrm"
-            className="min-h-11 flex-1"
             variant="destructive"
             type="button"
             disabled
@@ -981,7 +939,7 @@ function VrmAvatarSection() {
       </Card>
 
       <label
-        className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
+        className="flex items-center gap-2.5 text-xs font-medium"
         htmlFor="show-vrm"
       >
         <input id="show-vrm" type="checkbox" defaultChecked disabled />
@@ -999,9 +957,8 @@ function VrmAvatarSection() {
         <AlertAction>
           <Button
             id="dismiss-vrm-error"
-            className="min-h-11 min-w-11"
             variant="ghost"
-            size="icon-sm"
+            size="icon-lg"
             type="button"
             aria-label="Dismiss VRM error"
           >
@@ -1024,42 +981,42 @@ function DisplayControls() {
       </h3>
       <div className="grid grid-cols-2 max-[520px]:grid-cols-1">
         <label
-          className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
+          className="flex items-center gap-2.5 text-xs font-medium"
           htmlFor="show-skeleton"
         >
           <input id="show-skeleton" type="checkbox" defaultChecked />
           <span>Skeleton</span>
         </label>
         <label
-          className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
+          className="flex items-center gap-2.5 text-xs font-medium"
           htmlFor="show-contacts"
         >
           <input id="show-contacts" type="checkbox" defaultChecked />
           <span>Foot contacts</span>
         </label>
         <label
-          className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
+          className="flex items-center gap-2.5 text-xs font-medium"
           htmlFor="show-orientations"
         >
           <input id="show-orientations" type="checkbox" />
           <span>Orientations</span>
         </label>
         <label
-          className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
+          className="flex items-center gap-2.5 text-xs font-medium"
           htmlFor="show-trajectory"
         >
           <input id="show-trajectory" type="checkbox" defaultChecked />
           <span>Root trajectory</span>
         </label>
         <label
-          className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
+          className="flex items-center gap-2.5 text-xs font-medium"
           htmlFor="show-mesh"
         >
           <input id="show-mesh" type="checkbox" />
           <span>Body proxy</span>
         </label>
         <label
-          className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
+          className="flex items-center gap-2.5 text-xs font-medium"
           htmlFor="show-reference"
         >
           <input id="show-reference" type="checkbox" />
@@ -1067,7 +1024,7 @@ function DisplayControls() {
         </label>
         <Button
           id="import-reference"
-          className="col-span-full min-h-11 w-full max-[520px]:col-span-1"
+          className="col-span-full w-full max-[520px]:col-span-1"
           variant="secondary"
           type="button"
         >

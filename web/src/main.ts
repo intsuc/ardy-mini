@@ -251,6 +251,16 @@ function requiredElement<T extends Element>(id: string): T {
   return element as unknown as T;
 }
 
+function requiredDescendant<T extends Element>(
+  root: Element,
+  selector: string,
+  label: string,
+): T {
+  const element = root.querySelector(selector);
+  if (!element) throw new Error(`Missing required UI element ${label}.`);
+  return element as T;
+}
+
 function requestId(prefix: string): string {
   const suffix =
     typeof crypto.randomUUID === "function"
@@ -794,10 +804,15 @@ export function bootstrap(): () => void {
   const modelCard = requiredElement<HTMLElement>("model-card");
   const modelTitle = requiredElement<HTMLElement>("model-title");
   const modelDetail = requiredElement<HTMLElement>("model-detail");
+  const modelSetupHelp = requiredElement<HTMLElement>("model-setup-help");
   const modelState = requiredElement<HTMLElement>("model-state");
   const modelProgress = requiredElement<HTMLElement>("model-progress");
   const modelProgressbar = requiredElement<HTMLElement>("model-progressbar");
-  const modelProgressFill = requiredElement<HTMLElement>("model-progress-fill");
+  const modelProgressFill = requiredDescendant<HTMLElement>(
+    modelProgressbar,
+    '[data-slot="progress-indicator"]',
+    "model progress indicator",
+  );
   const modelProgressLabel = requiredElement<HTMLElement>("model-progress-label");
   const modelErrorBanner = requiredElement<HTMLElement>("model-error-banner");
   const modelErrorTitle = requiredElement<HTMLElement>("model-error-title");
@@ -805,6 +820,8 @@ export function bootstrap(): () => void {
   const dismissModelError =
     requiredElement<HTMLButtonElement>("dismiss-model-error");
   const generate = requiredElement<HTMLButtonElement>("generate");
+  const generateSpinner =
+    requiredElement<SVGSVGElement>("generate-spinner");
   const generateLabel = requiredElement<HTMLElement>("generate-label");
   const generateHelp = requiredElement<HTMLElement>("generate-help");
   const buttonShortcut = requiredElement<HTMLElement>("button-shortcut");
@@ -825,7 +842,11 @@ export function bootstrap(): () => void {
   const generationProgressbar =
     requiredElement<HTMLElement>("generation-progressbar");
   const generationProgressFill =
-    requiredElement<HTMLElement>("generation-progress-fill");
+    requiredDescendant<HTMLElement>(
+      generationProgressbar,
+      '[data-slot="progress-indicator"]',
+      "generation progress indicator",
+    );
   const errorBanner = requiredElement<HTMLElement>("error-banner");
   const errorTitle = requiredElement<HTMLElement>("error-title");
   const errorMessage = requiredElement<HTMLElement>("error-message");
@@ -987,9 +1008,27 @@ export function bootstrap(): () => void {
   ): number {
     const safeFraction = Math.max(0, Math.min(1, fraction));
     const percent = Math.round(safeFraction * 100);
-    fill.style.transform = `scaleX(${Math.max(0.001, safeFraction)})`;
+    fill.style.transform = `translateX(-${100 - percent}%)`;
     progressbar.setAttribute("aria-valuenow", String(percent));
     return percent;
+  }
+
+  function setFieldInvalid(
+    control: HTMLInputElement | HTMLTextAreaElement,
+    invalid: boolean,
+  ): void {
+    if (invalid) {
+      control.setAttribute("aria-invalid", "true");
+    } else {
+      control.removeAttribute("aria-invalid");
+    }
+    const field = control.closest<HTMLElement>('[data-slot="field"]');
+    if (!field) return;
+    if (invalid) {
+      field.setAttribute("data-invalid", "true");
+    } else {
+      field.removeAttribute("data-invalid");
+    }
   }
 
   function finiteInput(
@@ -1024,6 +1063,9 @@ export function bootstrap(): () => void {
     modelTitle.textContent = title;
     modelDetail.textContent = detail;
     modelState.textContent = label;
+    modelSetupHelp.hidden = state === "ready";
+    importModelLabel.textContent =
+      state === "ready" ? "Replace model pack" : "Choose model pack";
     form.dataset.modelState = state;
     modelRuntimeStatus.dataset.state = state;
     modelRuntimeDetail.textContent = `${title}. ${detail}`;
@@ -1148,14 +1190,14 @@ export function bootstrap(): () => void {
 
   function updatePrompt(): void {
     promptCount.textContent = `${prompt.value.length} / 280`;
-    if (prompt.getAttribute("aria-invalid") === "true") {
+    if (prompt.hasAttribute("aria-invalid")) {
       const validation = validateGenerationForm(
         prompt.value,
         duration.value,
         seed.value,
       );
       promptError.textContent = validation.promptError ?? "";
-      prompt.toggleAttribute("aria-invalid", Boolean(validation.promptError));
+      setFieldInvalid(prompt, Boolean(validation.promptError));
     }
     updateGenerateAvailability();
   }
@@ -1168,14 +1210,14 @@ export function bootstrap(): () => void {
   }
 
   function updateSeed(): void {
-    if (seed.getAttribute("aria-invalid") === "true") {
+    if (seed.hasAttribute("aria-invalid")) {
       const validation = validateGenerationForm(
         prompt.value,
         duration.value,
         seed.value,
       );
       seedError.textContent = validation.seedError ?? "";
-      seed.toggleAttribute("aria-invalid", Boolean(validation.seedError));
+      setFieldInvalid(seed, Boolean(validation.seedError));
     }
   }
 
@@ -1217,6 +1259,8 @@ export function bootstrap(): () => void {
     streamGeneration.disabled =
       generationBusy ||
       (currentMotion !== null && currentContinuation === null);
+    importModel.disabled = modelLoading || modelCaching;
+    removeModel.disabled = modelLoading || modelCaching;
     exportSession.disabled = currentMotion === null;
     exportMotion.disabled = currentMotion === null;
 
@@ -1282,6 +1326,8 @@ export function bootstrap(): () => void {
         ? "Extending motion"
         : "Generating motion"
       : "Generate motion";
+    generateSpinner.classList.toggle("hidden", !active);
+    buttonShortcut.hidden = active;
     generate.setAttribute("aria-busy", String(active));
     if (loadingOverlayTimer) {
       window.clearTimeout(loadingOverlayTimer);
@@ -1517,9 +1563,6 @@ export function bootstrap(): () => void {
       generationStage.textContent =
         event.message || humanizeStage(event.stage);
       generationPercent.textContent = `${percent}%`;
-      generateLabel.textContent = activeGeneration.background
-        ? `Extending · ${percent}%`
-        : `Generating · ${percent}%`;
       loadingDetail.textContent =
         event.message || humanizeStage(event.stage);
     }
@@ -1736,8 +1779,8 @@ export function bootstrap(): () => void {
     );
     promptError.textContent = validation.promptError ?? "";
     seedError.textContent = validation.seedError ?? "";
-    prompt.toggleAttribute("aria-invalid", Boolean(validation.promptError));
-    seed.toggleAttribute("aria-invalid", Boolean(validation.seedError));
+    setFieldInvalid(prompt, Boolean(validation.promptError));
+    setFieldInvalid(seed, Boolean(validation.seedError));
     if (!validation.values) {
       if (validation.promptError) {
         prompt.focus();

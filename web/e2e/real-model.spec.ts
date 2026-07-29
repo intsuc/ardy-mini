@@ -41,6 +41,7 @@ async function runGeneration(
   const started = performance.now();
   await trigger();
   await expect(page.locator("#generate")).toHaveAttribute("aria-busy", "true");
+  await expect(page.locator("#generate-label")).not.toContainText("%");
   await expect(page.locator("#generate")).toHaveAttribute("aria-busy", "false", {
     timeout: operationTimeout,
   });
@@ -159,6 +160,10 @@ test.describe("real browser model-pack", () => {
     await expect(page.locator("#model-state")).toHaveText("Ready", {
       timeout: operationTimeout,
     });
+    await expect(page.locator("#model-setup-help")).toBeHidden();
+    await expect(page.locator("#import-model-label")).toHaveText(
+      "Replace model pack",
+    );
     const loadWallMs = performance.now() - loadStart;
     const modelLoadStages = await page.evaluate(
       () =>
@@ -191,10 +196,21 @@ test.describe("real browser model-pack", () => {
     await expect(page.locator("#seed-error")).toContainText(
       "whole-number seed",
     );
+    await expect(seed).toHaveAttribute("aria-invalid", "true");
+    await expect(seed.locator("xpath=ancestor::*[@data-slot='field']")).toHaveAttribute(
+      "data-invalid",
+      "true",
+    );
     await expect(seed).toBeFocused();
 
     await prompt.fill("A person walks forward confidently.");
     await seed.fill("2");
+    await expect(page.locator("#seed-error")).toBeEmpty();
+    await expect(seed).not.toHaveAttribute("aria-invalid", "true");
+    await expect(seed.locator("xpath=ancestor::*[@data-slot='field']")).not.toHaveAttribute(
+      "data-invalid",
+      "true",
+    );
 
     await setRange(page, "#duration", 2);
     await page.locator("#stream-generation").uncheck();
