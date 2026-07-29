@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
+import type { MotionConstraint } from "./constraints";
+import { buildConstraintWindowBuffers } from "./constraints";
+import { applyDdimStepInPlace, ddimStepForIndex } from "./ddim";
 import type { BrowserModelPackManifest } from "./manifest";
 import type { ModelPack } from "./model-pack";
 import type {
@@ -8,8 +11,10 @@ import type {
   RuntimeBackendPreference,
   RuntimeProgressStage,
 } from "./protocol";
-import { applyDdimStepInPlace, ddimStepForIndex } from "./ddim";
-import { PortableRandom } from "./random";
+import {
+  PortableRandom,
+  type PortableRandomState,
+} from "./random";
 import {
   createRuntimeSessions,
   disposeRuntimeSessions,
@@ -18,11 +23,12 @@ import {
 } from "./sessions";
 import { LocalTokenizer } from "./tokenizer";
 import {
-  copyTailHistory,
   createArWindow,
+  createConditionedArWindow,
   createMotionPadMask,
-  decoderValidTokensForFrames,
   recenterAndRequantize,
+  type ArWindow,
+  type ConditionedArWindow,
 } from "./windows";
 
 export class RuntimeCancelledError extends Error {
@@ -52,26 +58,112 @@ export interface RuntimeGenerateOptions {
   durationFrames?: number;
   durationSeconds?: number;
   cfgWeight?: number;
+  textCfgWeight?: number;
+  constraintCfgWeight?: number;
+  historyFrames?: number;
+  futureFrames?: number;
+  constraints?: readonly MotionConstraint[];
+  initialTranslation?: readonly [number, number, number] | Float32Array;
+  initialHeading?: number;
   signal?: AbortSignal;
   onProgress?: (progress: RuntimeProgress) => void;
+  onChunk?: (chunk: RuntimeGenerationChunk) => void | Promise<void>;
 }
 
-export interface RuntimeGenerationResult {
+export interface RuntimeSessionOptions {
+  seed: number | string;
+  initialTranslation?: readonly [number, number, number] | Float32Array;
+  initialHeading?: number;
+}
+
+export interface RuntimeSessionGenerateOptions {
+  prompt: string;
+  durationFrames: number;
+  textCfgWeight?: number;
+  constraintCfgWeight?: number;
+  historyFrames?: number;
+  futureFrames?: number;
+  constraints?: readonly MotionConstraint[];
+  signal?: AbortSignal;
+  onProgress?: (progress: RuntimeProgress) => void;
+  onChunk?: (chunk: RuntimeGenerationChunk) => void | Promise<void>;
+}
+
+export interface RuntimeTimings {
+  total: number;
+  text: number;
+  denoising: number;
+  decoding: number;
+}
+
+export interface RuntimeMotionArrays {
+  motion: Float32Array;
+  motionShape: [1, number, number];
+  joints: Float32Array;
+  jointsShape: [1, number, number, 3];
+  localRotations?: Float32Array;
+  localRotationsShape?: [1, number, number, 3, 3];
+  globalRotations?: Float32Array;
+  globalRotationsShape?: [1, number, number, 3, 3];
+  rootPositions?: Float32Array;
+  rootPositionsShape?: [1, number, 3];
+  footContacts?: Uint8Array;
+  footContactsShape?: [1, number, number];
+  globalRootHeading?: Float32Array;
+  globalRootHeadingShape?: [1, number, 2];
+}
+
+export interface RuntimeGenerationChunk extends RuntimeMotionArrays {
+  seed: number;
+  prompt: string;
+  backend: RuntimeBackend;
+  fps: number;
+  startFrame: number;
+  frameCount: number;
+  hybridTokens: Float32Array;
+  hybridShape: [number, number];
+  appliedConstraintIds: string[];
+  timingsMs: RuntimeTimings;
+}
+
+export interface RuntimeContinuationState {
+  frameCount: number;
+  hybridTokens: Float32Array;
+  hybridDim: number;
+  random: PortableRandomState;
+  initialTranslation: [number, number, number];
+  initialHeading: number;
+}
+
+export interface RuntimeGenerationResult extends RuntimeMotionArrays {
   seed: number;
   prompt: string;
   backend: RuntimeBackend;
   fps: number;
   frameCount: number;
+  startFrame: number;
+  chunks: number;
+  continuation: RuntimeContinuationState;
+  timingsMs: RuntimeTimings;
+}
+
+interface PreparedHistory {
+  history?: Float32Array;
+  historyTokens: number;
+  historyFrames: number;
+  windowStartFrame: number;
+  globalTranslation: Float32Array;
+  firstHeadingAngle: number;
+}
+
+interface DecodedWindow {
   motion: Float32Array;
-  motionShape: [1, number, number];
   joints: Float32Array;
-  jointsShape: [1, number, number, 3];
-  timingsMs: {
-    total: number;
-    text: number;
-    denoising: number;
-    decoding: number;
-  };
+  localRotations?: Float32Array;
+  globalRotations?: Float32Array;
+  rootPositions?: Float32Array;
+  footContacts?: Uint8Array;
+  globalRootHeading?: Float32Array;
 }
 
 function now(): number {
@@ -108,12 +200,65 @@ function floatData(tensor: ort.Tensor, name: string): Float32Array {
   return tensor.data;
 }
 
+function boolData(tensor: ort.Tensor, name: string): Uint8Array {
+  const data = tensor.data as unknown;
+  if (!ArrayBuffer.isView(data) && !Array.isArray(data)) {
+    throw new TypeError(`ONNX output ${name} must contain boolean data`);
+  }
+  const values = data as ArrayLike<number | bigint | boolean>;
+  const result = new Uint8Array(values.length);
+  for (let index = 0; index < values.length; index += 1) {
+    result[index] = values[index] ? 1 : 0;
+  }
+  return result;
+}
+
 function int64Scalar(value: number): ort.Tensor {
   return new ort.Tensor("int64", BigInt64Array.of(BigInt(value)), [1]);
 }
 
 function floatScalar(value: number): ort.Tensor {
-  return new ort.Tensor("float32", Float32Array.of(value), [1]);
+  return new ort.Tensor("float32", Float32Array.of(Math.fround(value)), [1]);
+}
+
+function finiteCfgWeight(value: number | undefined, fallback: number, name: string): number {
+  const resolved = value ?? fallback;
+  if (!Number.isFinite(resolved) || resolved < 0 || resolved > 100) {
+    throw new RangeError(`${name} must be finite and between 0 and 100`);
+  }
+  return resolved;
+}
+
+function finiteTransform(
+  translation: readonly [number, number, number] | Float32Array | undefined,
+  heading: number | undefined,
+): { translation: [number, number, number]; heading: number } {
+  const resolved = translation ?? [0, 0, 0];
+  if (
+    resolved.length !== 3 ||
+    resolved.some((value) => !Number.isFinite(value)) ||
+    (heading !== undefined && !Number.isFinite(heading))
+  ) {
+    throw new TypeError("Initial root transform must contain finite values");
+  }
+  const roundedTranslation: [number, number, number] = [
+    Math.fround(resolved[0]),
+    Math.fround(resolved[1]),
+    Math.fround(resolved[2]),
+  ];
+  if (roundedTranslation.some((value) => !Number.isFinite(value))) {
+    throw new RangeError(
+      "Initial root translation must be representable as float32",
+    );
+  }
+  const normalizedHeading =
+    heading === undefined
+      ? 0
+      : Math.atan2(Math.sin(heading), Math.cos(heading));
+  return {
+    translation: roundedTranslation,
+    heading: normalizedHeading,
+  };
 }
 
 function resolveFrameCount(
@@ -138,6 +283,965 @@ function resolveFrameCount(
     );
   }
   return frames;
+}
+
+function sliceFrames(
+  source: Float32Array,
+  sourceFrame: number,
+  frameCount: number,
+  stride: number,
+): Float32Array {
+  return source.slice(sourceFrame * stride, (sourceFrame + frameCount) * stride);
+}
+
+function sliceBoolFrames(
+  source: Uint8Array,
+  sourceFrame: number,
+  frameCount: number,
+  stride: number,
+): Uint8Array {
+  return source.slice(sourceFrame * stride, (sourceFrame + frameCount) * stride);
+}
+
+function concatFloat(chunks: readonly Float32Array[]): Float32Array {
+  const result = new Float32Array(
+    chunks.reduce((total, chunk) => total + chunk.length, 0),
+  );
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return result;
+}
+
+function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
+  const result = new Uint8Array(
+    chunks.reduce((total, chunk) => total + chunk.length, 0),
+  );
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return result;
+}
+
+function optionalFloatOutput(
+  outputs: ort.InferenceSession.OnnxValueMapType,
+  name: string | undefined,
+  expectedLength: number,
+): Float32Array | undefined {
+  return name === undefined
+    ? undefined
+    : floatData(tensorFrom(outputs, name, expectedLength), name);
+}
+
+function optionalBoolOutput(
+  outputs: ort.InferenceSession.OnnxValueMapType,
+  name: string | undefined,
+  expectedLength: number,
+): Uint8Array | undefined {
+  if (name === undefined) {
+    return undefined;
+  }
+  const tensor = tensorFrom(outputs, name, expectedLength);
+  return boolData(tensor, name);
+}
+
+function buildGlobalHybridTokens(
+  decodedMotion: Float32Array,
+  decoderHybrid: Float32Array,
+  generatedFrameOffset: number,
+  generationTokenOffset: number,
+  tokenCount: number,
+  dimensions: BrowserModelPackManifest["dimensions"],
+): Float32Array {
+  const result = new Float32Array(tokenCount * dimensions.hybrid_dim);
+  for (let token = 0; token < tokenCount; token += 1) {
+    const destinationToken = token * dimensions.hybrid_dim;
+    const sourceToken =
+      (generationTokenOffset + token) * dimensions.hybrid_dim;
+    for (
+      let frameInToken = 0;
+      frameInToken < dimensions.num_frames_per_token;
+      frameInToken += 1
+    ) {
+      const sourceFrame =
+        generatedFrameOffset +
+        token * dimensions.num_frames_per_token +
+        frameInToken;
+      const destinationRoot =
+        destinationToken +
+        frameInToken * dimensions.root_features_per_frame;
+      const sourceMotion = sourceFrame * dimensions.motion_dim;
+      result.set(
+        decodedMotion.subarray(
+          sourceMotion,
+          sourceMotion + dimensions.root_features_per_frame,
+        ),
+        destinationRoot,
+      );
+    }
+    result.set(
+      decoderHybrid.subarray(
+        sourceToken + dimensions.nframe_root_dim,
+        sourceToken + dimensions.hybrid_dim,
+      ),
+      destinationToken + dimensions.nframe_root_dim,
+    );
+  }
+  return result;
+}
+
+export class BrowserArdyGenerationSession {
+  readonly manifest: BrowserModelPackManifest;
+  readonly backend: RuntimeBackend;
+  readonly #tokenizer: LocalTokenizer;
+  readonly #sessions: RuntimeSessions;
+  #random: PortableRandom;
+  #globalHybrid = new Float32Array();
+  #frameCount = 0;
+  #initialTranslation: [number, number, number];
+  #initialHeading: number;
+
+  constructor(
+    manifest: BrowserModelPackManifest,
+    backend: RuntimeBackend,
+    tokenizer: LocalTokenizer,
+    sessions: RuntimeSessions,
+    options: RuntimeSessionOptions,
+  ) {
+    const transform = finiteTransform(
+      options.initialTranslation,
+      options.initialHeading,
+    );
+    this.manifest = manifest;
+    this.backend = backend;
+    this.#tokenizer = tokenizer;
+    this.#sessions = sessions;
+    this.#random = new PortableRandom(options.seed);
+    this.#initialTranslation = transform.translation;
+    this.#initialHeading = transform.heading;
+  }
+
+  get frameCount(): number {
+    return this.#frameCount;
+  }
+
+  get seed(): number {
+    return this.#random.seed;
+  }
+
+  reset(options: RuntimeSessionOptions): void {
+    const transform = finiteTransform(
+      options.initialTranslation,
+      options.initialHeading,
+    );
+    this.#random = new PortableRandom(options.seed);
+    this.#globalHybrid = new Float32Array();
+    this.#frameCount = 0;
+    this.#initialTranslation = transform.translation;
+    this.#initialHeading = transform.heading;
+  }
+
+  /**
+   * Crop to the nearest complete four-frame token at or before `frame`.
+   * The returned value is the actual branch frame and is safe for continuation.
+   */
+  branch(frame: number): number {
+    if (!Number.isSafeInteger(frame) || frame < 0 || frame > this.#frameCount) {
+      throw new RangeError("Branch frame is outside the generated session");
+    }
+    const { num_frames_per_token: framesPerToken, hybrid_dim: hybridDim } =
+      this.manifest.dimensions;
+    const tokenCount = Math.floor(frame / framesPerToken);
+    this.#globalHybrid = this.#globalHybrid.slice(0, tokenCount * hybridDim);
+    this.#frameCount = tokenCount * framesPerToken;
+    return this.#frameCount;
+  }
+
+  continuation(): RuntimeContinuationState {
+    return {
+      frameCount: this.#frameCount,
+      hybridTokens: this.#globalHybrid.slice(),
+      hybridDim: this.manifest.dimensions.hybrid_dim,
+      random: this.#random.snapshot(),
+      initialTranslation: [...this.#initialTranslation],
+      initialHeading: this.#initialHeading,
+    };
+  }
+
+  restore(state: RuntimeContinuationState): void {
+    const { dimensions } = this.manifest;
+    const transform = finiteTransform(
+      state.initialTranslation,
+      state.initialHeading,
+    );
+    const tokenCount = state.hybridTokens.length / dimensions.hybrid_dim;
+    const expectedTokenCount = Math.ceil(
+      state.frameCount / dimensions.num_frames_per_token,
+    );
+    if (
+      state.hybridDim !== dimensions.hybrid_dim ||
+      state.hybridTokens.length % dimensions.hybrid_dim !== 0 ||
+      !Number.isSafeInteger(state.frameCount) ||
+      state.frameCount < 0 ||
+      tokenCount !== expectedTokenCount
+    ) {
+      throw new RangeError("Continuation state does not match this model pack");
+    }
+    for (const value of state.hybridTokens) {
+      if (!Number.isFinite(value)) {
+        throw new TypeError("Continuation contains non-finite hybrid tokens");
+      }
+    }
+    this.#random = new PortableRandom(state.random.seed);
+    this.#random.restore(state.random);
+    this.#globalHybrid = state.hybridTokens.slice();
+    this.#frameCount = state.frameCount;
+    this.#initialTranslation = transform.translation;
+    this.#initialHeading = transform.heading;
+  }
+
+  #prepareHistory(requestedFrames: number): PreparedHistory {
+    const { dimensions, recenter } = this.manifest;
+    const framesPerToken = dimensions.num_frames_per_token;
+    const availableTokens = Math.min(
+      Math.floor(this.#frameCount / framesPerToken),
+      this.#globalHybrid.length / dimensions.hybrid_dim,
+    );
+    const requestedTokens = Math.min(
+      dimensions.history_tokens,
+      Math.floor(requestedFrames / framesPerToken),
+      availableTokens,
+    );
+    if (requestedTokens === 0) {
+      if (availableTokens > 0) {
+        const lastFrame = availableTokens * framesPerToken - 1;
+        const token = Math.floor(lastFrame / framesPerToken);
+        const frameInToken = lastFrame % framesPerToken;
+        const offset =
+          token * dimensions.hybrid_dim +
+          frameInToken * dimensions.root_features_per_frame;
+        const rawRoot = (feature: number): number =>
+          this.#globalHybrid[offset + feature] *
+            recenter.root_std[feature] +
+          recenter.root_mean[feature];
+        const [positionX, , positionZ] = recenter.position_indices;
+        const [headingCos, headingSin] = recenter.heading_indices;
+        return {
+          historyTokens: 0,
+          historyFrames: 0,
+          windowStartFrame: this.#frameCount,
+          globalTranslation: new Float32Array([
+            rawRoot(positionX),
+            this.#initialTranslation[1],
+            rawRoot(positionZ),
+          ]),
+          firstHeadingAngle: Math.atan2(
+            rawRoot(headingSin),
+            rawRoot(headingCos),
+          ),
+        };
+      }
+      return {
+        historyTokens: 0,
+        historyFrames: 0,
+        windowStartFrame: this.#frameCount,
+        globalTranslation: new Float32Array(this.#initialTranslation),
+        firstHeadingAngle: this.#initialHeading,
+      };
+    }
+
+    const firstToken = availableTokens - requestedTokens;
+    const history = this.#globalHybrid.slice(
+      firstToken * dimensions.hybrid_dim,
+      availableTokens * dimensions.hybrid_dim,
+    );
+    const rootOffset = (frame: number, feature: number): number => {
+      const token = Math.floor(frame / framesPerToken);
+      const frameInToken = frame % framesPerToken;
+      return (
+        token * dimensions.hybrid_dim +
+        frameInToken * dimensions.root_features_per_frame +
+        feature
+      );
+    };
+    const rawRoot = (frame: number, feature: number): number =>
+      history[rootOffset(frame, feature)] * recenter.root_std[feature] +
+      recenter.root_mean[feature];
+    const historyFrames = requestedTokens * framesPerToken;
+    const lastFrame = historyFrames - 1;
+    const [positionX, positionY, positionZ] = recenter.position_indices;
+    const [headingCos, headingSin] = recenter.heading_indices;
+    const centerX = rawRoot(lastFrame, positionX);
+    const centerZ = rawRoot(lastFrame, positionZ);
+    const firstCos = rawRoot(0, headingCos);
+    const firstSin = rawRoot(0, headingSin);
+
+    for (let frame = 0; frame < historyFrames; frame += 1) {
+      for (const [feature, center] of [
+        [positionX, centerX],
+        // ARDY's native recentering only removes x/z because its external
+        // translation is constrained to y=0. The browser contract permits an
+        // external y offset, so remove that offset from stored world-space
+        // history before feeding the model. The decoder adds it back once.
+        [positionY, this.#initialTranslation[1]],
+        [positionZ, centerZ],
+      ] as const) {
+        const translated = rawRoot(frame, feature) - center;
+        history[rootOffset(frame, feature)] = Math.fround(
+          (translated - recenter.root_mean[feature]) /
+            recenter.root_std[feature],
+        );
+      }
+    }
+    return {
+      history,
+      historyTokens: requestedTokens,
+      historyFrames,
+      windowStartFrame: this.#frameCount - historyFrames,
+      // The decoder applies this world transform after model-local history has
+      // been reconstructed above.
+      globalTranslation: new Float32Array([
+        centerX,
+        this.#initialTranslation[1],
+        centerZ,
+      ]),
+      firstHeadingAngle: Math.atan2(firstSin, firstCos),
+    };
+  }
+
+  async #encodeText(
+    prompt: string,
+    signal: AbortSignal | undefined,
+    onProgress: RuntimeSessionGenerateOptions["onProgress"],
+  ): Promise<{ tensor: ort.Tensor; elapsed: number }> {
+    throwIfCancelled(signal);
+    onProgress?.({ stage: "encoding-text", completed: 0, total: 1 });
+    const started = now();
+    const encoded = await this.#tokenizer.encode(prompt);
+    throwIfCancelled(signal);
+    const inputs = this.manifest.graphs.text_encoder.inputs;
+    const outputs = await this.#sessions.textEncoder.run({
+      [inputs.inputIds]: new ort.Tensor(
+        "int64",
+        encoded.inputIds,
+        [1, encoded.sequenceLength],
+      ),
+      [inputs.attentionMask]: new ort.Tensor(
+        "int64",
+        encoded.attentionMask,
+        [1, encoded.sequenceLength],
+      ),
+      [inputs.tokenTypeIds]: new ort.Tensor(
+        "int64",
+        encoded.tokenTypeIds,
+        [1, encoded.sequenceLength],
+      ),
+    });
+    throwIfCancelled(signal);
+    const name = this.manifest.graphs.text_encoder.outputs.textConditions;
+    const tensor = tensorFrom(
+      outputs,
+      name,
+      this.manifest.dimensions.text_condition_dim,
+    );
+    onProgress?.({ stage: "encoding-text", completed: 1, total: 1 });
+    return { tensor, elapsed: now() - started };
+  }
+
+  async #denoise(
+    window: ArWindow | ConditionedArWindow,
+    textConditions: ort.Tensor,
+    prepared: PreparedHistory,
+    textCfgWeight: number,
+    constraintCfgWeight: number,
+    useConstraints: boolean,
+    signal: AbortSignal | undefined,
+    onProgress: RuntimeSessionGenerateOptions["onProgress"],
+    progressOffset: number,
+    progressTotal: number,
+  ): Promise<number> {
+    const { dimensions, diffusion, graphs } = this.manifest;
+    const generationStart =
+      window.generationTokenOffset * dimensions.hybrid_dim;
+    const generationEnd =
+      (window.generationTokenOffset + window.generationTokens) *
+      dimensions.hybrid_dim;
+    const timestepData = BigInt64Array.of(0n);
+    let feeds: Record<string, ort.Tensor>;
+    let session: ort.InferenceSession;
+    let predictionName: string;
+
+    if (useConstraints) {
+      if (
+        graphs.constraint_denoiser === undefined ||
+        this.#sessions.constraintDenoiser === undefined ||
+        !("futureMask" in window)
+      ) {
+        throw new Error("This model pack does not support kinematic constraints");
+      }
+      const inputs = graphs.constraint_denoiser.inputs;
+      const constraintTokens =
+        dimensions.constraint_max_tokens ?? dimensions.max_tokens;
+      const constraintFrames =
+        dimensions.constraint_max_frames ?? dimensions.max_frames;
+      feeds = {
+        [inputs.textCfgWeight]: floatScalar(textCfgWeight),
+        [inputs.constraintCfgWeight]: floatScalar(constraintCfgWeight),
+        [inputs.x]: new ort.Tensor(
+          "float32",
+          window.x,
+          [1, constraintTokens, dimensions.hybrid_dim],
+        ),
+        [inputs.historyLength]: int64Scalar(window.historyFrames),
+        [inputs.generationLength]: int64Scalar(window.generationFrames),
+        [inputs.futureLength]: int64Scalar(window.futureFrames),
+        [inputs.historyMask]: new ort.Tensor(
+          "float32",
+          window.historyMask,
+          [1, constraintFrames],
+        ),
+        [inputs.generationMask]: new ort.Tensor(
+          "float32",
+          window.generationMask,
+          [1, constraintFrames],
+        ),
+        [inputs.futureMask]: new ort.Tensor(
+          "float32",
+          window.futureMask,
+          [1, constraintFrames],
+        ),
+        [inputs.historyTokenMask]: new ort.Tensor(
+          "float32",
+          window.historyTokenMask,
+          [1, constraintTokens],
+        ),
+        [inputs.generationTokenMask]: new ort.Tensor(
+          "float32",
+          window.generationTokenMask,
+          [1, constraintTokens],
+        ),
+        [inputs.futureTokenMask]: new ort.Tensor(
+          "float32",
+          window.futureTokenMask,
+          [1, constraintTokens],
+        ),
+        [inputs.textConditions]: textConditions,
+        [inputs.textConditionMask]: new ort.Tensor(
+          "float32",
+          Float32Array.of(1),
+          [1, 1],
+        ),
+        [inputs.timestep]: new ort.Tensor("int64", timestepData, [1]),
+        [inputs.firstHeadingAngle]: floatScalar(prepared.firstHeadingAngle),
+        [inputs.motionMask]: new ort.Tensor(
+          "float32",
+          window.motionMask,
+          [1, constraintFrames, dimensions.motion_dim],
+        ),
+        [inputs.observedMotion]: new ort.Tensor(
+          "float32",
+          window.observedMotion,
+          [1, constraintFrames, dimensions.motion_dim],
+        ),
+      };
+      session = this.#sessions.constraintDenoiser;
+      predictionName = graphs.constraint_denoiser.outputs.predX0;
+    } else {
+      const inputs = graphs.denoiser.inputs;
+      feeds = {
+        [inputs.cfgWeight]: floatScalar(textCfgWeight),
+        [inputs.x]: new ort.Tensor(
+          "float32",
+          window.x,
+          [1, dimensions.max_tokens, dimensions.hybrid_dim],
+        ),
+        [inputs.historyLength]: int64Scalar(window.historyFrames),
+        [inputs.generationLength]: int64Scalar(window.generationFrames),
+        [inputs.historyMask]: new ort.Tensor(
+          "float32",
+          window.historyMask,
+          [1, dimensions.max_frames],
+        ),
+        [inputs.generationMask]: new ort.Tensor(
+          "float32",
+          window.generationMask,
+          [1, dimensions.max_frames],
+        ),
+        [inputs.historyTokenMask]: new ort.Tensor(
+          "float32",
+          window.historyTokenMask,
+          [1, dimensions.max_tokens],
+        ),
+        [inputs.generationTokenMask]: new ort.Tensor(
+          "float32",
+          window.generationTokenMask,
+          [1, dimensions.max_tokens],
+        ),
+        [inputs.textConditions]: textConditions,
+        [inputs.timestep]: new ort.Tensor("int64", timestepData, [1]),
+        [inputs.firstHeadingAngle]: floatScalar(prepared.firstHeadingAngle),
+      };
+      session = this.#sessions.denoiser;
+      predictionName = graphs.denoiser.outputs.predX0;
+    }
+
+    let elapsed = 0;
+    for (
+      let inferenceIndex = 0;
+      inferenceIndex < diffusion.timesteps.length;
+      inferenceIndex += 1
+    ) {
+      throwIfCancelled(signal);
+      const step = ddimStepForIndex(
+        diffusion.timesteps,
+        diffusion.alphas_cumprod,
+        diffusion.alphas_cumprod_prev,
+        inferenceIndex,
+      );
+      timestepData[0] = BigInt(step.timestep);
+      const started = now();
+      const outputs = await session.run(feeds);
+      throwIfCancelled(signal);
+      const prediction = floatData(
+        tensorFrom(outputs, predictionName, window.x.length),
+        predictionName,
+      );
+      applyDdimStepInPlace(
+        window.x,
+        prediction,
+        step,
+        generationStart,
+        generationEnd,
+      );
+      elapsed += now() - started;
+      onProgress?.({
+        stage: "denoising",
+        completed: progressOffset + inferenceIndex + 1,
+        total: progressTotal,
+        message: useConstraints ? "constraint window" : "text window",
+      });
+    }
+    return elapsed;
+  }
+
+  async #decode(
+    decoderHybrid: Float32Array,
+    validTokens: number,
+    globalTranslation: Float32Array,
+    signal: AbortSignal | undefined,
+  ): Promise<DecodedWindow> {
+    const { dimensions, graphs } = this.manifest;
+    const inputs = graphs.decoder.inputs;
+    const outputs = await this.#sessions.decoder.run({
+      [inputs.hybridTokens]: new ort.Tensor(
+        "float32",
+        decoderHybrid,
+        [1, dimensions.max_tokens, dimensions.hybrid_dim],
+      ),
+      [inputs.motionPadMask]: new ort.Tensor(
+        "float32",
+        createMotionPadMask(dimensions, validTokens),
+        [1, dimensions.max_frames],
+      ),
+      [inputs.globalTranslation]: new ort.Tensor(
+        "float32",
+        globalTranslation,
+        [1, 3],
+      ),
+    });
+    throwIfCancelled(signal);
+    const names = graphs.decoder.outputs;
+    const frameCount = dimensions.max_frames;
+    const jointCount = dimensions.num_joints;
+    return {
+      motion: floatData(
+        tensorFrom(
+          outputs,
+          names.normalizedMotion,
+          frameCount * dimensions.motion_dim,
+        ),
+        names.normalizedMotion,
+      ),
+      joints: floatData(
+        tensorFrom(
+          outputs,
+          names.posedJoints,
+          frameCount * jointCount * 3,
+        ),
+        names.posedJoints,
+      ),
+      localRotations: optionalFloatOutput(
+        outputs,
+        names.localRotations,
+        frameCount * jointCount * 9,
+      ),
+      globalRotations: optionalFloatOutput(
+        outputs,
+        names.globalRotations,
+        frameCount * jointCount * 9,
+      ),
+      rootPositions: optionalFloatOutput(
+        outputs,
+        names.rootPositions,
+        frameCount * 3,
+      ),
+      footContacts: optionalBoolOutput(
+        outputs,
+        names.footContacts,
+        frameCount * 4,
+      ),
+      globalRootHeading: optionalFloatOutput(
+        outputs,
+        names.globalRootHeading,
+        frameCount * 2,
+      ),
+    };
+  }
+
+  async generate(
+    options: RuntimeSessionGenerateOptions,
+  ): Promise<RuntimeGenerationResult> {
+    if (options.prompt.trim().length === 0) {
+      throw new TypeError("Prompt must not be empty");
+    }
+    const { dimensions, generation } = this.manifest;
+    if (
+      !Number.isSafeInteger(options.durationFrames) ||
+      options.durationFrames <= 0 ||
+      options.durationFrames > generation.max_frames
+    ) {
+      throw new RangeError(
+        `Session generation must be 1–${generation.max_frames} frames`,
+      );
+    }
+    const textCfgWeight = finiteCfgWeight(
+      options.textCfgWeight,
+      generation.default_text_cfg_weight ?? generation.default_cfg_weight,
+      "Text CFG weight",
+    );
+    const constraintCfgWeight = finiteCfgWeight(
+      options.constraintCfgWeight,
+      generation.default_constraint_cfg_weight ?? generation.default_cfg_weight,
+      "Constraint CFG weight",
+    );
+    const requestedHistoryFrames = options.historyFrames ?? dimensions.history_frames;
+    const requestedFutureFrames =
+      options.futureFrames ??
+      Math.max(
+        0,
+        (dimensions.constraint_max_frames ?? dimensions.max_frames) -
+          dimensions.history_frames -
+          dimensions.generation_frames,
+      );
+    if (
+      !Number.isSafeInteger(requestedHistoryFrames) ||
+      requestedHistoryFrames < 0 ||
+      requestedHistoryFrames > dimensions.history_frames ||
+      !Number.isSafeInteger(requestedFutureFrames) ||
+      requestedFutureFrames < 0
+    ) {
+      throw new RangeError("History and future frame counts are invalid");
+    }
+
+    // A partial token cannot be encoded back into a continuation without the
+    // browser motion encoder. Crop it before extending the session.
+    if (this.#frameCount % dimensions.num_frames_per_token !== 0) {
+      this.branch(this.#frameCount);
+    }
+
+    const totalStart = now();
+    const startFrame = this.#frameCount;
+    const windowCount = Math.ceil(
+      options.durationFrames / dimensions.generation_frames,
+    );
+    const encoded = await this.#encodeText(
+      options.prompt,
+      options.signal,
+      options.onProgress,
+    );
+    const chunks: RuntimeGenerationChunk[] = [];
+    let writtenFrames = 0;
+    let denoisingMs = 0;
+    let decodingMs = 0;
+
+    for (let windowIndex = 0; windowIndex < windowCount; windowIndex += 1) {
+      throwIfCancelled(options.signal);
+      const prepared = this.#prepareHistory(requestedHistoryFrames);
+      const constraints = options.constraints ?? [];
+      const constraintBuffers =
+        constraints.length === 0
+          ? undefined
+          : buildConstraintWindowBuffers(
+              this.manifest,
+              constraints,
+              prepared.windowStartFrame,
+              prepared.historyFrames,
+              requestedFutureFrames,
+              prepared.globalTranslation,
+            );
+      const useConstraints =
+        constraintBuffers !== undefined &&
+        constraintBuffers.appliedConstraintIds.length > 0;
+      let window: ArWindow | ConditionedArWindow;
+      if (useConstraints) {
+        window = createConditionedArWindow(
+          dimensions,
+          this.#random,
+          prepared.history,
+          constraintBuffers.futureFrames,
+          constraintBuffers.motionMask,
+          constraintBuffers.observedMotion,
+        );
+      } else {
+        window = createArWindow(dimensions, this.#random, prepared.history);
+      }
+
+      denoisingMs += await this.#denoise(
+        window,
+        encoded.tensor,
+        prepared,
+        textCfgWeight,
+        constraintCfgWeight,
+        useConstraints,
+        options.signal,
+        options.onProgress,
+        windowIndex * this.manifest.diffusion.timesteps.length,
+        windowCount * this.manifest.diffusion.timesteps.length,
+      );
+
+      const validTokens = window.historyTokens + window.generationTokens;
+      const decoderHybrid = new Float32Array(
+        dimensions.max_tokens * dimensions.hybrid_dim,
+      );
+      decoderHybrid.set(
+        window.x.subarray(0, validTokens * dimensions.hybrid_dim),
+      );
+      const nextHistoryStart = Math.max(
+        0,
+        validTokens - dimensions.history_tokens,
+      );
+      const recentered = recenterAndRequantize(
+        decoderHybrid,
+        validTokens,
+        dimensions,
+        this.manifest.recenter,
+        this.manifest.latent_quantization,
+        prepared.globalTranslation,
+        nextHistoryStart,
+      );
+
+      const decodeStart = now();
+      const decoded = await this.#decode(
+        decoderHybrid,
+        validTokens,
+        recentered.globalTranslation,
+        options.signal,
+      );
+      const thisDecodingMs = now() - decodeStart;
+      decodingMs += thisDecodingMs;
+
+      const framesToCopy = Math.min(
+        dimensions.generation_frames,
+        options.durationFrames - writtenFrames,
+      );
+      const generatedFrameOffset = window.historyFrames;
+      const generatedTokens = Math.ceil(
+        framesToCopy / dimensions.num_frames_per_token,
+      );
+      const hybridTokens = buildGlobalHybridTokens(
+        decoded.motion,
+        decoderHybrid,
+        generatedFrameOffset,
+        window.generationTokenOffset,
+        generatedTokens,
+        dimensions,
+      );
+      const oldLength = this.#globalHybrid.length;
+      const combined = new Float32Array(oldLength + hybridTokens.length);
+      combined.set(this.#globalHybrid);
+      combined.set(hybridTokens, oldLength);
+      this.#globalHybrid = combined;
+
+      const jointStride = dimensions.num_joints * 3;
+      const rotationStride = dimensions.num_joints * 9;
+      const chunkStartFrame = this.#frameCount;
+      const chunk: RuntimeGenerationChunk = {
+        seed: this.#random.seed,
+        prompt: options.prompt,
+        backend: this.backend,
+        fps: dimensions.fps,
+        startFrame: chunkStartFrame,
+        frameCount: framesToCopy,
+        motion: sliceFrames(
+          decoded.motion,
+          generatedFrameOffset,
+          framesToCopy,
+          dimensions.motion_dim,
+        ),
+        motionShape: [1, framesToCopy, dimensions.motion_dim],
+        joints: sliceFrames(
+          decoded.joints,
+          generatedFrameOffset,
+          framesToCopy,
+          jointStride,
+        ),
+        jointsShape: [1, framesToCopy, dimensions.num_joints, 3],
+        hybridTokens: hybridTokens.slice(),
+        hybridShape: [generatedTokens, dimensions.hybrid_dim],
+        appliedConstraintIds:
+          constraintBuffers?.appliedConstraintIds ?? [],
+        timingsMs: {
+          total: 0,
+          text: windowIndex === 0 ? encoded.elapsed : 0,
+          denoising: denoisingMs,
+          decoding: thisDecodingMs,
+        },
+      };
+      if (decoded.localRotations !== undefined) {
+        chunk.localRotations = sliceFrames(
+          decoded.localRotations,
+          generatedFrameOffset,
+          framesToCopy,
+          rotationStride,
+        );
+        chunk.localRotationsShape = [
+          1,
+          framesToCopy,
+          dimensions.num_joints,
+          3,
+          3,
+        ];
+      }
+      if (decoded.globalRotations !== undefined) {
+        chunk.globalRotations = sliceFrames(
+          decoded.globalRotations,
+          generatedFrameOffset,
+          framesToCopy,
+          rotationStride,
+        );
+        chunk.globalRotationsShape = [
+          1,
+          framesToCopy,
+          dimensions.num_joints,
+          3,
+          3,
+        ];
+      }
+      if (decoded.rootPositions !== undefined) {
+        chunk.rootPositions = sliceFrames(
+          decoded.rootPositions,
+          generatedFrameOffset,
+          framesToCopy,
+          3,
+        );
+        chunk.rootPositionsShape = [1, framesToCopy, 3];
+      }
+      if (decoded.footContacts !== undefined) {
+        chunk.footContacts = sliceBoolFrames(
+          decoded.footContacts,
+          generatedFrameOffset,
+          framesToCopy,
+          4,
+        );
+        chunk.footContactsShape = [1, framesToCopy, 4];
+      }
+      if (decoded.globalRootHeading !== undefined) {
+        chunk.globalRootHeading = sliceFrames(
+          decoded.globalRootHeading,
+          generatedFrameOffset,
+          framesToCopy,
+          2,
+        );
+        chunk.globalRootHeadingShape = [1, framesToCopy, 2];
+      }
+      this.#frameCount += framesToCopy;
+      writtenFrames += framesToCopy;
+      chunk.timingsMs.total = now() - totalStart;
+      chunks.push(chunk);
+      await options.onChunk?.(chunk);
+      options.onProgress?.({
+        stage: "decoding",
+        completed: windowIndex + 1,
+        total: windowCount,
+        message: `${this.#frameCount} session frames`,
+      });
+    }
+
+    const motion = concatFloat(chunks.map((chunk) => chunk.motion));
+    const joints = concatFloat(chunks.map((chunk) => chunk.joints));
+    const localRotationChunks = chunks.flatMap((chunk) =>
+      chunk.localRotations === undefined ? [] : [chunk.localRotations],
+    );
+    const globalRotationChunks = chunks.flatMap((chunk) =>
+      chunk.globalRotations === undefined ? [] : [chunk.globalRotations],
+    );
+    const rootChunks = chunks.flatMap((chunk) =>
+      chunk.rootPositions === undefined ? [] : [chunk.rootPositions],
+    );
+    const contactChunks = chunks.flatMap((chunk) =>
+      chunk.footContacts === undefined ? [] : [chunk.footContacts],
+    );
+    const headingChunks = chunks.flatMap((chunk) =>
+      chunk.globalRootHeading === undefined ? [] : [chunk.globalRootHeading],
+    );
+    const result: RuntimeGenerationResult = {
+      seed: this.#random.seed,
+      prompt: options.prompt,
+      backend: this.backend,
+      fps: dimensions.fps,
+      startFrame,
+      frameCount: writtenFrames,
+      chunks: chunks.length,
+      motion,
+      motionShape: [1, writtenFrames, dimensions.motion_dim],
+      joints,
+      jointsShape: [1, writtenFrames, dimensions.num_joints, 3],
+      continuation: this.continuation(),
+      timingsMs: {
+        total: now() - totalStart,
+        text: encoded.elapsed,
+        denoising: denoisingMs,
+        decoding: decodingMs,
+      },
+    };
+    if (localRotationChunks.length === chunks.length) {
+      result.localRotations = concatFloat(localRotationChunks);
+      result.localRotationsShape = [
+        1,
+        writtenFrames,
+        dimensions.num_joints,
+        3,
+        3,
+      ];
+    }
+    if (globalRotationChunks.length === chunks.length) {
+      result.globalRotations = concatFloat(globalRotationChunks);
+      result.globalRotationsShape = [
+        1,
+        writtenFrames,
+        dimensions.num_joints,
+        3,
+        3,
+      ];
+    }
+    if (rootChunks.length === chunks.length) {
+      result.rootPositions = concatFloat(rootChunks);
+      result.rootPositionsShape = [1, writtenFrames, 3];
+    }
+    if (contactChunks.length === chunks.length) {
+      result.footContacts = concatBytes(contactChunks);
+      result.footContactsShape = [1, writtenFrames, 4];
+    }
+    if (headingChunks.length === chunks.length) {
+      result.globalRootHeading = concatFloat(headingChunks);
+      result.globalRootHeadingShape = [1, writtenFrames, 2];
+    }
+    return result;
+  }
 }
 
 export class BrowserArdyRuntime {
@@ -201,276 +1305,40 @@ export class BrowserArdyRuntime {
     }
   }
 
-  async generate(options: RuntimeGenerateOptions): Promise<RuntimeGenerationResult> {
+  createGenerationSession(
+    options: RuntimeSessionOptions,
+  ): BrowserArdyGenerationSession {
     if (this.#disposed) {
       throw new Error("Runtime has been disposed");
     }
-    if (options.prompt.trim().length === 0) {
-      throw new TypeError("Prompt must not be empty");
-    }
-    if (
-      options.cfgWeight !== undefined &&
-      (!Number.isFinite(options.cfgWeight) || options.cfgWeight <= 0)
-    ) {
-      throw new RangeError("CFG weight must be positive and finite");
-    }
-    if (
-      typeof options.seed === "number" &&
-      !Number.isFinite(options.seed)
-    ) {
-      throw new RangeError("Numeric seed must be finite");
-    }
+    return new BrowserArdyGenerationSession(
+      this.manifest,
+      this.backend,
+      this.#tokenizer,
+      this.#sessions,
+      options,
+    );
+  }
+
+  async generate(options: RuntimeGenerateOptions): Promise<RuntimeGenerationResult> {
     const frameCount = resolveFrameCount(this.manifest, options);
-    const { dimensions, graphs, diffusion, generation } = this.manifest;
-    const windowCount = Math.ceil(frameCount / dimensions.generation_frames);
-    const totalStart = now();
-
-    throwIfCancelled(options.signal);
-    options.onProgress?.({
-      stage: "encoding-text",
-      completed: 0,
-      total: 1,
+    const session = this.createGenerationSession({
+      seed: options.seed,
+      initialTranslation: options.initialTranslation,
+      initialHeading: options.initialHeading,
     });
-    const textStart = now();
-    const encoded = await this.#tokenizer.encode(options.prompt);
-    throwIfCancelled(options.signal);
-    const textInputs = graphs.text_encoder.inputs;
-    const textOutputs = await this.#sessions.textEncoder.run({
-      [textInputs.inputIds]: new ort.Tensor(
-        "int64",
-        encoded.inputIds,
-        [1, encoded.sequenceLength],
-      ),
-      [textInputs.attentionMask]: new ort.Tensor(
-        "int64",
-        encoded.attentionMask,
-        [1, encoded.sequenceLength],
-      ),
-      [textInputs.tokenTypeIds]: new ort.Tensor(
-        "int64",
-        encoded.tokenTypeIds,
-        [1, encoded.sequenceLength],
-      ),
-    });
-    throwIfCancelled(options.signal);
-    const textConditions = tensorFrom(
-      textOutputs,
-      graphs.text_encoder.outputs.textConditions,
-      dimensions.text_condition_dim,
-    );
-    const textMs = now() - textStart;
-    options.onProgress?.({
-      stage: "encoding-text",
-      completed: 1,
-      total: 1,
-    });
-
-    const random = new PortableRandom(options.seed);
-    const motion = new Float32Array(frameCount * dimensions.motion_dim);
-    const joints = new Float32Array(
-      frameCount * dimensions.num_joints * 3,
-    );
-    let history: Float32Array | undefined;
-    let globalTranslation: Float32Array = new Float32Array(3);
-    let firstHeadingAngle = 0;
-    let writtenFrames = 0;
-    let denoisingMs = 0;
-    let decodingMs = 0;
-
-    for (let windowIndex = 0; windowIndex < windowCount; windowIndex += 1) {
-      throwIfCancelled(options.signal);
-      const window = createArWindow(dimensions, random, history);
-      const framesToCopy = Math.min(
-        dimensions.generation_frames,
-        frameCount - writtenFrames,
-      );
-      const generationStart =
-        window.generationTokenOffset * dimensions.hybrid_dim;
-      const generationEnd =
-        (window.generationTokenOffset + window.generationTokens) *
-        dimensions.hybrid_dim;
-      const denoiserInputs = graphs.denoiser.inputs;
-      const timestepData = BigInt64Array.of(0n);
-      const denoiserFeeds: Record<string, ort.Tensor> = {
-        [denoiserInputs.cfgWeight]: floatScalar(
-          options.cfgWeight ?? generation.default_cfg_weight,
-        ),
-        [denoiserInputs.x]: new ort.Tensor(
-          "float32",
-          window.x,
-          [1, dimensions.max_tokens, dimensions.hybrid_dim],
-        ),
-        [denoiserInputs.historyLength]: int64Scalar(window.historyFrames),
-        [denoiserInputs.generationLength]: int64Scalar(window.generationFrames),
-        [denoiserInputs.historyMask]: new ort.Tensor(
-          "float32",
-          window.historyMask,
-          [1, dimensions.max_frames],
-        ),
-        [denoiserInputs.generationMask]: new ort.Tensor(
-          "float32",
-          window.generationMask,
-          [1, dimensions.max_frames],
-        ),
-        [denoiserInputs.historyTokenMask]: new ort.Tensor(
-          "float32",
-          window.historyTokenMask,
-          [1, dimensions.max_tokens],
-        ),
-        [denoiserInputs.generationTokenMask]: new ort.Tensor(
-          "float32",
-          window.generationTokenMask,
-          [1, dimensions.max_tokens],
-        ),
-        [denoiserInputs.textConditions]: textConditions,
-        [denoiserInputs.timestep]: new ort.Tensor(
-          "int64",
-          timestepData,
-          [1],
-        ),
-        [denoiserInputs.firstHeadingAngle]: floatScalar(firstHeadingAngle),
-      };
-
-      for (
-        let inferenceIndex = 0;
-        inferenceIndex < diffusion.timesteps.length;
-        inferenceIndex += 1
-      ) {
-        throwIfCancelled(options.signal);
-        const step = ddimStepForIndex(
-          diffusion.timesteps,
-          diffusion.alphas_cumprod,
-          diffusion.alphas_cumprod_prev,
-          inferenceIndex,
-        );
-        timestepData[0] = BigInt(step.timestep);
-        const denoisingStart = now();
-        const outputs = await this.#sessions.denoiser.run(denoiserFeeds);
-        throwIfCancelled(options.signal);
-        const predictionName = graphs.denoiser.outputs.predX0;
-        const prediction = floatData(
-          tensorFrom(outputs, predictionName, window.x.length),
-          predictionName,
-        );
-        applyDdimStepInPlace(
-          window.x,
-          prediction,
-          step,
-          generationStart,
-          generationEnd,
-        );
-        denoisingMs += now() - denoisingStart;
-        options.onProgress?.({
-          stage: "denoising",
-          completed:
-            windowIndex * diffusion.timesteps.length + inferenceIndex + 1,
-          total: windowCount * diffusion.timesteps.length,
-          message: `window ${windowIndex + 1}/${windowCount}`,
-        });
-      }
-
-      const validTokens = window.historyTokens + window.generationTokens;
-      const nextHistoryStart = validTokens - dimensions.history_tokens;
-      const recentered = recenterAndRequantize(
-        window.x,
-        validTokens,
-        dimensions,
-        this.manifest.recenter,
-        this.manifest.latent_quantization,
-        globalTranslation,
-        nextHistoryStart,
-      );
-      globalTranslation = recentered.globalTranslation;
-      firstHeadingAngle = recentered.firstHeadingAngle;
-
-      throwIfCancelled(options.signal);
-      const decodingStart = now();
-      const decoderInputs = graphs.decoder.inputs;
-      const decoderValidTokens = decoderValidTokensForFrames(
-        dimensions,
-        window.historyTokens,
-        framesToCopy,
-      );
-      const decoded = await this.#sessions.decoder.run({
-        [decoderInputs.hybridTokens]: new ort.Tensor(
-          "float32",
-          window.x,
-          [1, dimensions.max_tokens, dimensions.hybrid_dim],
-        ),
-        [decoderInputs.motionPadMask]: new ort.Tensor(
-          "float32",
-          createMotionPadMask(dimensions, decoderValidTokens),
-          [1, dimensions.max_frames],
-        ),
-        [decoderInputs.globalTranslation]: new ort.Tensor(
-          "float32",
-          globalTranslation,
-          [1, 3],
-        ),
-      });
-      throwIfCancelled(options.signal);
-      const motionName = graphs.decoder.outputs.normalizedMotion;
-      const jointsName = graphs.decoder.outputs.posedJoints;
-      const decodedMotion = floatData(
-        tensorFrom(
-          decoded,
-          motionName,
-          dimensions.max_frames * dimensions.motion_dim,
-        ),
-        motionName,
-      );
-      const decodedJoints = floatData(
-        tensorFrom(
-          decoded,
-          jointsName,
-          dimensions.max_frames * dimensions.num_joints * 3,
-        ),
-        jointsName,
-      );
-      decodingMs += now() - decodingStart;
-
-      const generatedFrameOffset = window.historyFrames;
-      const motionSourceStart =
-        generatedFrameOffset * dimensions.motion_dim;
-      const motionSourceEnd =
-        motionSourceStart + framesToCopy * dimensions.motion_dim;
-      motion.set(
-        decodedMotion.subarray(motionSourceStart, motionSourceEnd),
-        writtenFrames * dimensions.motion_dim,
-      );
-      const jointStride = dimensions.num_joints * 3;
-      const jointsSourceStart = generatedFrameOffset * jointStride;
-      const jointsSourceEnd = jointsSourceStart + framesToCopy * jointStride;
-      joints.set(
-        decodedJoints.subarray(jointsSourceStart, jointsSourceEnd),
-        writtenFrames * jointStride,
-      );
-      writtenFrames += framesToCopy;
-      history = copyTailHistory(window.x, validTokens, dimensions);
-      options.onProgress?.({
-        stage: "decoding",
-        completed: windowIndex + 1,
-        total: windowCount,
-      });
-    }
-
-    return {
-      seed: random.seed,
+    return session.generate({
       prompt: options.prompt,
-      backend: this.backend,
-      fps: dimensions.fps,
-      frameCount,
-      motion,
-      motionShape: [1, frameCount, dimensions.motion_dim],
-      joints,
-      jointsShape: [1, frameCount, dimensions.num_joints, 3],
-      timingsMs: {
-        total: now() - totalStart,
-        text: textMs,
-        denoising: denoisingMs,
-        decoding: decodingMs,
-      },
-    };
+      durationFrames: frameCount,
+      textCfgWeight: options.textCfgWeight ?? options.cfgWeight,
+      constraintCfgWeight: options.constraintCfgWeight,
+      historyFrames: options.historyFrames,
+      futureFrames: options.futureFrames,
+      constraints: options.constraints,
+      signal: options.signal,
+      onProgress: options.onProgress,
+      onChunk: options.onChunk,
+    });
   }
 
   async dispose(): Promise<void> {

@@ -172,4 +172,77 @@ describe("model-pack validation", () => {
       }),
     ).toThrow(/browser Core40 v1 runtime/);
   });
+
+  it("accepts the revision-2 constraint and structured-output extension", async () => {
+    const { manifest } = await fixture();
+    const extended = {
+      ...manifest,
+      graphs: {
+        ...manifest.graphs,
+        constraint_denoiser: {
+          model: "graphs.onnx",
+          inputs: {
+            textCfgWeight: "text_cfg_weight",
+            constraintCfgWeight: "constraint_cfg_weight",
+            x: "x",
+            historyLength: "history_len",
+            generationLength: "generation_len",
+            futureLength: "future_len",
+            historyMask: "history_mask",
+            generationMask: "generation_mask",
+            futureMask: "future_mask",
+            historyTokenMask: "history_token_mask",
+            generationTokenMask: "generation_token_mask",
+            futureTokenMask: "future_token_mask",
+            textConditions: "text_conditions",
+            textConditionMask: "text_condition_mask",
+            timestep: "timestep",
+            firstHeadingAngle: "first_heading_angle",
+            motionMask: "motion_mask",
+            observedMotion: "observed_motion",
+          },
+          outputs: { predX0: "pred_x0" },
+        },
+        decoder: {
+          ...manifest.graphs.decoder,
+          outputs: {
+            ...manifest.graphs.decoder.outputs,
+            localRotations: "local_rotations",
+            globalRotations: "global_rotations",
+            rootPositions: "root_positions",
+            footContacts: "foot_contacts",
+            globalRootHeading: "global_root_heading",
+          },
+        },
+      },
+      dimensions: {
+        ...manifest.dimensions,
+        constraint_max_tokens: 50,
+        constraint_max_frames: 200,
+      },
+      generation: {
+        ...manifest.generation,
+        default_text_cfg_weight: 2,
+        default_constraint_cfg_weight: 2,
+      },
+      capabilities: {
+        text_conditioning: true,
+        kinematic_constraints: true,
+        detailed_motion_outputs: true,
+      },
+      runtime: {
+        contract_revision: 2,
+        onnx_opset: 18,
+        batch_size: 1,
+        constraints_supported: true,
+        separated_cfg: true,
+        future_constraints_supported: true,
+        detailed_motion_outputs: true,
+      },
+    };
+    expect(validateModelPackManifest(extended).runtime?.contract_revision).toBe(2);
+    expect(
+      validateModelPackManifest(extended).graphs.decoder.outputs.footContacts,
+    ).toBe("foot_contacts");
+  });
 });

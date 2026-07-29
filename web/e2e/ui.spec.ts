@@ -4,77 +4,178 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
-test("renders the model-gated motion studio and reports runtime capabilities", async ({ page }) => {
+async function setRange(page: Page, selector: string, value: number): Promise<void> {
+  await page.locator(selector).evaluate((element, nextValue) => {
+    const input = element as HTMLInputElement;
+    input.value = String(nextValue);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, value);
+}
+
+test("renders the three-pane technical workspace with model-gated controls", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
 
-  await expect
-    .poll(() => page.evaluate(() => globalThis.crossOriginIsolated))
-    .toBe(true);
-  await expect(page.getByRole("heading", { name: /Describe a motion/i })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Load the local model" })).toBeVisible();
-  await expect(page.getByLabel("Motion prompt")).toBeEditable();
-  await expect(page.getByRole("button", { name: "Generate motion" })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Choose model-pack folder" })).toBeVisible();
-  await expect(page.getByText(/artifacts\/browser\/core40/)).toBeVisible();
-  await expect(page.getByText(/about 798 MiB/)).toBeVisible();
-  await expect(page.getByText(/WASM (threads ready|single-thread)/)).toBeVisible();
-  await expect(page.locator("#model-state")).toHaveText(/Checking|Not loaded/);
   await expect
     .poll(() =>
-      page.evaluate(() => {
-        const setup = document.querySelector(".model-setup");
-        const prompt = document.querySelector("#prompt");
-        return Boolean(setup && prompt && setup.compareDocumentPosition(prompt) & Node.DOCUMENT_POSITION_FOLLOWING);
-      }),
+      page
+        .evaluate(() => globalThis.crossOriginIsolated)
+        .catch(() => false),
     )
     .toBe(true);
+  await expect(page.locator("#model-state")).toHaveText("Not loaded");
+  await expect(page.locator("#generator-panel")).toBeVisible();
+  await expect(page.locator("#viewport-panel")).toBeVisible();
+  await expect(page.locator(".inspector-panel")).toBeVisible();
+
+  const panePositions = await Promise.all(
+    ["#generator-panel", "#viewport-panel", ".inspector-panel"].map((selector) =>
+      page.locator(selector).boundingBox(),
+    ),
+  );
+  expect(panePositions.every(Boolean)).toBe(true);
+  expect(panePositions[0]!.x).toBeLessThan(panePositions[1]!.x);
+  expect(panePositions[1]!.x).toBeLessThan(panePositions[2]!.x);
+
+  await expect(page.getByLabel("Motion description")).toBeEditable();
+  await expect(page.locator(".setup-note")).toContainText(
+    "about 1.4 GiB, four ONNX graphs",
+  );
+  await expect(page.locator("#privacy-badge")).toContainText("Local");
+  await expect(page.locator("#isolation-label")).toContainText(
+    /WASM (threads ready|single-thread)/,
+  );
+  await expect(page.locator("#import-model")).toContainText("Choose model pack");
+
+  for (const selector of [
+    "#generate",
+    "#apply-prompt",
+    "#restart-generation",
+    "#restart-from-now",
+    "#add-constraint",
+    "#add-waypoint",
+    "#apply-target-velocity",
+    "#export-session",
+    "#export-motion",
+  ]) {
+    await expect(page.locator(selector)).toBeDisabled();
+  }
+  await expect(page.locator("#new-session")).toBeEnabled();
+  await expect(page.locator("#import-session")).toBeEnabled();
+
+  await expect(
+    page.getByRole("group", { name: "Constraint timeline tracks" }),
+  ).toBeVisible();
+  await expect(page.locator(".constraint-track")).toHaveCount(6);
+  await expect(page.getByLabel("Text CFG")).toHaveValue("3.5");
+  await expect(page.getByLabel("Constraint CFG")).toHaveValue("1");
+  await expect(page.getByText("Root control", { exact: true })).toBeVisible();
+  await expect(page.getByText("Foot contacts", { exact: true })).toBeVisible();
+  await expect(page.getByText("Orientations", { exact: true })).toBeVisible();
+  await expect(page.getByText("Body proxy", { exact: true })).toBeVisible();
 });
 
-test("validates prompt and exposes deterministic controls without model weights", async ({ page }) => {
+test("exposes deterministic inputs and enforces the prompt contract", async ({
+  page,
+}) => {
   await page.goto("/");
 
-  const prompt = page.getByLabel("Motion prompt");
+  const prompt = page.getByLabel("Motion description");
   await prompt.fill("A person walks forward confidently.");
   await expect(page.locator("#prompt-count")).toHaveText("35 / 280");
 
-  await page.getByLabel("Duration").fill("8");
+  await setRange(page, "#duration", 8);
   await expect(page.locator("#duration-output")).toHaveText("8 seconds");
-  await expect(page.getByRole("spinbutton", { name: "Seed" })).toBeHidden();
-  await page.getByText("Runtime settings").click();
   await expect(page.getByRole("spinbutton", { name: "Seed" })).toHaveValue("2");
-  await expect(page.getByLabel("Inference backend")).toHaveValue("auto");
+  await expect(page.getByLabel("Backend")).toHaveValue("auto");
 
   await page.getByRole("button", { name: "Dance" }).click();
   await expect(prompt).toHaveValue("A person performs a joyful dance.");
+
+  const validation = await page.evaluate(async () => {
+    const { validateGenerationForm } = await import("/src/main.ts");
+    return {
+      empty: validateGenerationForm("", "2", "2").promptError,
+      nonEnglish: validateGenerationForm("人物が歩く。", "2", "2").promptError,
+      long: validateGenerationForm("a".repeat(281), "2", "2").promptError,
+      seed: validateGenerationForm("A person walks.", "2", "-1").seedError,
+      duration: validateGenerationForm("A person walks.", "3", "2").promptError,
+      valid: validateGenerationForm(
+        "A person walks forward.",
+        "10",
+        "4294967295",
+      ).values,
+    };
+  });
+  expect(validation.empty).toContain("Describe the motion");
+  expect(validation.nonEnglish).toContain("typo-free English");
+  expect(validation.long).toContain("280 characters");
+  expect(validation.seed).toContain("whole-number seed");
+  expect(validation.duration).toContain("2 to 10 seconds");
+  expect(validation.valid).toEqual({
+    prompt: "A person walks forward.",
+    durationSeconds: 10,
+    seed: 4_294_967_295,
+  });
 });
 
-test("keeps keyboard semantics and focus indication intact", async ({ page }) => {
+test("keeps labels, keyboard focus, and canvas controls accessible", async ({
+  page,
+}) => {
   await page.goto("/");
 
-  const settings = page.locator("summary");
-  await settings.focus();
+  await page.keyboard.press("Tab");
+  await expect(page.locator(".skip-link")).toBeFocused();
+
+  const runtimeNotes = page.locator("#runtime-settings");
+  const summary = runtimeNotes.locator("summary");
+  await summary.focus();
   await page.keyboard.press("Space");
-  await expect(page.locator(".advanced-settings")).toHaveAttribute("open", "");
+  await expect(runtimeNotes).toHaveAttribute("open", "");
+
+  for (const label of [
+    "Motion description",
+    "Duration",
+    "Seed",
+    "Backend",
+    "Text CFG",
+    "Constraint CFG",
+    "History frames",
+    "Future crop",
+    "Start",
+    "End",
+  ]) {
+    await expect(page.getByLabel(label, { exact: true })).toHaveCount(1);
+  }
 
   const canvas = page.locator("#motion-canvas");
   await canvas.focus();
   await expect(canvas).toBeFocused();
   await expect
-    .poll(() => canvas.evaluate((element) => getComputedStyle(element).outlineStyle))
+    .poll(() =>
+      canvas.evaluate((element) => getComputedStyle(element).outlineStyle),
+    )
     .not.toBe("none");
   await page.keyboard.press("Shift+ArrowLeft");
   await page.keyboard.press("=");
   await page.keyboard.press("Home");
 });
 
-test("keeps model import errors beside the model setup action", async ({ page }, testInfo) => {
+test("keeps invalid model-pack errors beside the model setup action", async ({
+  page,
+}, testInfo) => {
   await page.goto("/");
 
   const invalidPack = testInfo.outputPath("invalid-pack");
   await mkdir(invalidPack, { recursive: true });
-  await writeFile(path.join(invalidPack, "not-a-model-pack.txt"), "not a model pack");
+  await writeFile(
+    path.join(invalidPack, "not-a-model-pack.txt"),
+    "not a model pack",
+  );
   await page.locator("#model-file-input").setInputFiles(invalidPack);
 
   const modelError = page.locator("#model-error-banner");
@@ -93,31 +194,74 @@ test("keeps model import errors beside the model setup action", async ({ page },
     .toBe(true);
 });
 
-test("honors reduced motion in CSS and keeps mobile playback controls on one row", async ({ page }) => {
+test("honors reduced motion and remains touch-safe without mobile overflow", async ({
+  page,
+}) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
 
   await expect
-    .poll(() => page.locator(".loading-orbit").evaluate((element) => getComputedStyle(element).animationName))
+    .poll(() =>
+      page
+        .locator(".loading-indicator")
+        .evaluate((element) => getComputedStyle(element).animationName),
+    )
     .toBe("none");
-  await expect(page.locator("#privacy-badge")).toBeVisible();
-  await expect(page.locator("#gpu-badge")).toBeHidden();
+  await expect
+    .poll(() =>
+      page
+        .locator("#generate")
+        .evaluate((element) => getComputedStyle(element).transitionDuration),
+    )
+    .toBe("0s");
 
-  const controls = [
-    page.locator("#play-pause"),
-    page.locator("#playback-speed"),
-    page.locator("#loop-toggle"),
-    page.locator("#reset-camera"),
+  const panes = await Promise.all(
+    ["#generator-panel", "#viewport-panel", ".inspector-panel"].map((selector) =>
+      page.locator(selector).boundingBox(),
+    ),
+  );
+  expect(panes.every(Boolean)).toBe(true);
+  expect(panes[0]!.y).toBeLessThan(panes[1]!.y);
+  expect(panes[1]!.y).toBeLessThan(panes[2]!.y);
+
+  const tapTargetSelectors = [
+    "#new-session",
+    "#import-session",
+    "#export-session",
+    "#import-model",
+    ".preset-chip:first-of-type",
+    "#apply-prompt",
+    "#generate",
+    "#play-pause",
+    "#playback-speed",
+    "#loop-toggle",
+    "#reset-camera",
+    "#constraint-track-root",
   ];
-  const boxes = await Promise.all(controls.map((control) => control.boundingBox()));
+  const boxes = await Promise.all(
+    tapTargetSelectors.map((selector) => page.locator(selector).boundingBox()),
+  );
   for (const box of boxes) {
     expect(box).not.toBeNull();
-    expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
-    expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+    expect(box!.width).toBeGreaterThanOrEqual(44);
+    expect(box!.height).toBeGreaterThanOrEqual(44);
   }
-  expect(Math.max(...boxes.map((box) => box?.y ?? 0)) - Math.min(...boxes.map((box) => box?.y ?? 0))).toBeLessThan(2);
+
+  const playbackBoxes = await Promise.all(
+    ["#play-pause", "#playback-speed", "#loop-toggle", "#reset-camera"].map(
+      (selector) => page.locator(selector).boundingBox(),
+    ),
+  );
+  expect(
+    Math.max(...playbackBoxes.map((box) => box!.y)) -
+      Math.min(...playbackBoxes.map((box) => box!.y)),
+  ).toBeLessThan(2);
   await expect
-    .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+    .poll(() =>
+      page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    )
     .toBe(true);
 });

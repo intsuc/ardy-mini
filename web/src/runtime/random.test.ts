@@ -28,4 +28,16 @@ describe("PortableRandom", () => {
     expect([...left].every(Number.isFinite)).toBe(true);
     expect(new Set(left).size).toBeGreaterThan(20);
   });
+
+  it("restores a stream including the cached Gaussian sample", () => {
+    const first = new PortableRandom(42);
+    first.nextNormal();
+    const snapshot = first.snapshot();
+    const expected = Array.from({ length: 8 }, () => first.nextNormal());
+    const restored = new PortableRandom(42);
+    restored.restore(snapshot);
+    expect(Array.from({ length: 8 }, () => restored.nextNormal())).toEqual(
+      expected,
+    );
+  });
 });

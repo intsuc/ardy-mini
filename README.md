@@ -149,15 +149,38 @@ measurements from the completed run are in
 
 ### Fully in-browser MiniLM demo
 
-The Core40 MiniLM path can also run end to end in a browser. A dedicated Web
-Worker uses ONNX Runtime Web with WebGPU first and WebAssembly as a fallback;
-tokenization, text conditioning, diffusion, autoregressive recentering, motion
-decoding, forward kinematics, and three.js playback stay on the user's device.
+The Core40 MiniLM path runs end to end in the browser. A dedicated Web Worker
+uses ONNX Runtime Web with WebGPU first and WebAssembly (WASM) as a fallback.
+WordPiece tokenization, text conditioning, DDIM diffusion, constraint
+conditioning, autoregressive recentering/requantization, structured motion
+decoding, optional JavaScript postprocessing, and three.js playback all remain
+on the user's device. The app is deliberately presented as a simple technical
+demo: generation controls, the 3D preview/timeline, and advanced planning tools
+are kept in separate, compact panels.
 
-Export a local, hash-verified model pack and start the static app:
+The browser runtime provides:
+
+- stateful 40-frame streaming with replace, append, continuous buffer
+  extension, playhead branching, and live-prompt replanning;
+- root, full-body, left/right hand, and left/right foot constraints, with
+  keyframe intervals, future constraints, smoothed dense root-waypoint paths,
+  and target-velocity waypoints that blend from the current velocity;
+- independent text/constraint CFG weights, history/future planning controls,
+  and initial root translation/heading;
+- a lightweight JavaScript position/contact postprocess, predicted contacts,
+  orientation axes, trajectory and constraint overlays;
+- dynamic skeleton metadata supplied by the model pack rather than a fixed
+  viewer topology, plus a built-in joint-driven body proxy;
+- reference overlays imported from a compatible motion JSON or browser session,
+  structured motion export as both JSON and CSV, and validated binary session
+  import/export with continuation state. These formats are browser data
+  formats, not Python pickle files.
+
+Export the local four-graph pack and start the app:
 
 ```bash
 uv sync --extra browser
+
 uv run --extra browser python scripts/export_browser.py \
   --checkpoints-dir checkpoints \
   --minilm-artifact artifacts/minilm-ardy-core40 \
@@ -169,19 +192,33 @@ npm run dev
 ```
 
 Choose `artifacts/browser/core40` with the demo's **Choose model-pack folder**
-button. The first-run setup names the expected folder and approximate 798 MiB
-pack size; after loading, the header reports the backend actually in use.
-No model weights are committed or copied into the web build. Browser v1 is
-Core40 text-only prompt-to-motion generation for 2–10 second clips; the Python
-interactive demo remains the option for constraints and live control. See the
-[browser demo guide](docs/browser_demo.md) for architecture, browser/hosting
-requirements, validation results, and distribution cautions.
+button. The measured FP32 pack contains four ONNX graphs and is approximately
+1.4 GiB (about 1.5 GB decimal); after loading, the header reports the backend
+actually in use. The static web build contains no model weights, and inference
+does not send prompts, constraints, or motion to a server.
+
+This MiniLM artifact is specific to
+`ARDY-Core-RP-20FPS-Horizon40` and typo-free English motion prompts. Branch
+points are rounded down to complete four-frame tokens. The pack includes
+Core27 skeleton metadata but no character mesh. The optional **Body proxy** is
+the viewer's built-in joint-driven sphere/capsule visualization; it is not
+SMPL, a skinned character mesh, or a scene-mesh importer. A reference overlay
+comes from a compatible motion JSON or browser session and does not require a
+separate rendering asset. The browser demo also does not port the native Viser
+rotation-space IK or scene-mesh import tools. See the
+[browser demo guide](docs/browser_demo.md) for controls, architecture,
+postprocessing differences, hosting requirements, validation, limitations,
+and distribution cautions.
 
 ---
 
-## Interactive Demo
+## Python / Viser Interactive Demo
 
-We provide an interactive demo that enables real-time humanoid character control through a combination of streaming text prompts and interactive spatial constraints. Below are some features of the interactive demo:
+Separately from the browser-only technical demo above, the upstream
+Python/Viser app enables real-time humanoid character control through streaming
+text prompts and interactive spatial constraints. Features and controls in
+this section describe that native app and should not be assumed to exist in the
+browser port.
 
 - Online motion generation visualized in web browser viewport
 - Streaming text-to-motion

@@ -3,6 +3,12 @@
 
 const UINT32_RANGE = 0x1_0000_0000;
 
+export interface PortableRandomState {
+  seed: number;
+  state: number;
+  spareNormal?: number;
+}
+
 export function seedToUint32(seed: number | string): number {
   if (typeof seed === "number") {
     return Math.trunc(seed) >>> 0;
@@ -30,6 +36,31 @@ export class PortableRandom {
   constructor(seed: number | string) {
     this.seed = seedToUint32(seed);
     this.#state = this.seed;
+  }
+
+  snapshot(): PortableRandomState {
+    return {
+      seed: this.seed,
+      state: this.#state,
+      ...(this.#spareNormal === undefined
+        ? {}
+        : { spareNormal: this.#spareNormal }),
+    };
+  }
+
+  restore(snapshot: PortableRandomState): void {
+    if (
+      snapshot.seed !== this.seed ||
+      !Number.isSafeInteger(snapshot.state) ||
+      snapshot.state < 0 ||
+      snapshot.state >= UINT32_RANGE ||
+      (snapshot.spareNormal !== undefined &&
+        !Number.isFinite(snapshot.spareNormal))
+    ) {
+      throw new TypeError("Portable random snapshot is invalid");
+    }
+    this.#state = snapshot.state >>> 0;
+    this.#spareNormal = snapshot.spareNormal;
   }
 
   nextUint32(): number {

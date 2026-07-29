@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   canAttemptGeneration,
+  canContinueGeneration,
   canonicalizePackFiles,
   formatBytes,
   formatTime,
@@ -43,6 +44,13 @@ describe("generation form validation", () => {
     expect(canAttemptGeneration("人物が歩く。", true, true, false, false)).toBe(true);
     expect(canAttemptGeneration("   ", true, true, false, false)).toBe(false);
     expect(canAttemptGeneration("A person walks.", true, false, false, false)).toBe(false);
+  });
+
+  it("only enables append and branch actions for a live continuation", () => {
+    expect(canContinueGeneration(true, false, true, true)).toBe(true);
+    expect(canContinueGeneration(true, false, true, false)).toBe(false);
+    expect(canContinueGeneration(true, true, true, true)).toBe(false);
+    expect(canContinueGeneration(false, false, true, true)).toBe(false);
   });
 });
 

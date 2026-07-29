@@ -22,7 +22,7 @@ export interface ExternalDataSpec {
 
 export interface GraphSpec<
   Inputs extends Record<string, string> = Record<string, string>,
-  Outputs extends Record<string, string> = Record<string, string>,
+  Outputs extends Record<string, string | undefined> = Record<string, string>,
 > {
   model: string;
   external_data?: ExternalDataSpec[];
@@ -58,20 +58,51 @@ export interface DenoiserOutputs extends Record<string, string> {
   predX0: string;
 }
 
+export interface ConstraintDenoiserInputs extends Record<string, string> {
+  textCfgWeight: string;
+  constraintCfgWeight: string;
+  x: string;
+  historyLength: string;
+  generationLength: string;
+  futureLength: string;
+  historyMask: string;
+  generationMask: string;
+  futureMask: string;
+  historyTokenMask: string;
+  generationTokenMask: string;
+  futureTokenMask: string;
+  textConditions: string;
+  textConditionMask: string;
+  timestep: string;
+  firstHeadingAngle: string;
+  motionMask: string;
+  observedMotion: string;
+}
+
 export interface DecoderInputs extends Record<string, string> {
   hybridTokens: string;
   motionPadMask: string;
   globalTranslation: string;
 }
 
-export interface DecoderOutputs extends Record<string, string> {
+export interface DecoderOutputs
+  extends Record<string, string | undefined> {
   normalizedMotion: string;
   posedJoints: string;
+  localRotations?: string;
+  globalRotations?: string;
+  rootPositions?: string;
+  footContacts?: string;
+  globalRootHeading?: string;
 }
 
 export interface BrowserGraphSpecs {
   text_encoder: GraphSpec<TextEncoderInputs, TextEncoderOutputs>;
   denoiser: GraphSpec<DenoiserInputs, DenoiserOutputs>;
+  constraint_denoiser?: GraphSpec<
+    ConstraintDenoiserInputs,
+    DenoiserOutputs
+  >;
   decoder: GraphSpec<DecoderInputs, DecoderOutputs>;
 }
 
@@ -80,6 +111,9 @@ export interface BrowserDimensions {
   num_frames_per_token: number;
   max_tokens: number;
   max_frames: number;
+  /** Fixed window owned by the optional constraint graph. */
+  constraint_max_tokens?: number;
+  constraint_max_frames?: number;
   generation_tokens: number;
   generation_frames: number;
   history_tokens: number;
@@ -98,7 +132,10 @@ export interface BrowserGenerationConfig {
   min_frames: number;
   max_frames: number;
   default_cfg_weight: number;
+  default_text_cfg_weight?: number;
+  default_constraint_cfg_weight?: number;
   denoising_steps: number;
+  window_policy?: string;
 }
 
 export interface BrowserDiffusionSchedule {
@@ -141,6 +178,53 @@ export interface BrowserLicenseNotice {
   notice: string;
 }
 
+export interface BrowserSkeleton {
+  name: string;
+  root_index: number;
+  parents: number[];
+  joint_names: string[];
+  neutral_joints: number[][];
+}
+
+export interface BrowserStatsPayload {
+  mean: number[];
+  std: number[];
+  normalization_denominator: number[];
+}
+
+export interface BrowserStats {
+  motion: BrowserStatsPayload;
+  global_root: BrowserStatsPayload;
+  local_root: BrowserStatsPayload;
+  body: BrowserStatsPayload;
+  post_quantization: BrowserStatsPayload;
+}
+
+export type BrowserMotionLayout = Record<string, [number, number]>;
+
+export interface BrowserRuntimeCapabilities {
+  onnx_opset?: number;
+  contract_revision?: number;
+  batch_size?: number;
+  text_only?: boolean;
+  constraints_supported?: boolean;
+  separated_cfg?: boolean;
+  future_constraints_supported?: boolean;
+  detailed_motion_outputs?: boolean;
+  motion_correction_included?: boolean;
+  global_translation_y_must_be_zero?: boolean;
+}
+
+export interface BrowserCapabilities {
+  text_conditioning?: boolean;
+  kinematic_constraints?: boolean;
+  future_constraints?: boolean;
+  separated_classifier_free_guidance?: boolean;
+  initial_root_transform?: boolean;
+  detailed_motion_outputs?: boolean;
+  motion_correction?: boolean;
+}
+
 export interface BrowserModelPackManifest {
   format: typeof MODEL_PACK_FORMAT;
   schema_version: typeof MODEL_PACK_SCHEMA_VERSION;
@@ -158,9 +242,11 @@ export interface BrowserModelPackManifest {
   latent_quantization: BrowserLatentQuantization;
   notices?: Array<string | BrowserLicenseNotice>;
   license_notices?: BrowserLicenseNotice[];
-  /** Exporter-owned metadata which the runtime deliberately does not interpret. */
-  skeleton?: unknown;
-  stats?: unknown;
+  skeleton?: BrowserSkeleton;
+  stats?: BrowserStats;
+  motion_layout?: BrowserMotionLayout;
+  capabilities?: BrowserCapabilities;
+  runtime?: BrowserRuntimeCapabilities;
 }
 
 export class ManifestValidationError extends Error {
@@ -360,6 +446,18 @@ function validateDimensions(value: unknown): BrowserDimensions {
   ] as const) {
     result[key] = positiveIntegerAt(dimensions[key], `dimensions.${key}`);
   }
+  if (dimensions.constraint_max_tokens !== undefined) {
+    result.constraint_max_tokens = positiveIntegerAt(
+      dimensions.constraint_max_tokens,
+      "dimensions.constraint_max_tokens",
+    );
+  }
+  if (dimensions.constraint_max_frames !== undefined) {
+    result.constraint_max_frames = positiveIntegerAt(
+      dimensions.constraint_max_frames,
+      "dimensions.constraint_max_frames",
+    );
+  }
 
   if (result.max_frames !== result.max_tokens * result.num_frames_per_token) {
     fail("dimensions.max_frames must equal max_tokens * num_frames_per_token");
@@ -377,6 +475,21 @@ function validateDimensions(value: unknown): BrowserDimensions {
   }
   if (result.history_tokens + result.generation_tokens > result.max_tokens) {
     fail("history_tokens + generation_tokens exceeds max_tokens");
+  }
+  const constraintMaxTokens =
+    result.constraint_max_tokens ?? result.max_tokens;
+  const constraintMaxFrames =
+    result.constraint_max_frames ?? result.max_frames;
+  if (
+    constraintMaxFrames !==
+    constraintMaxTokens * result.num_frames_per_token
+  ) {
+    fail(
+      "dimensions.constraint_max_frames must equal constraint_max_tokens * num_frames_per_token",
+    );
+  }
+  if (constraintMaxTokens < result.generation_tokens + 1) {
+    fail("constraint graph must leave room for generation and context");
   }
   if (
     result.nframe_root_dim !==
@@ -520,6 +633,34 @@ export function validateModelPackManifest(value: unknown): BrowserModelPackManif
     ],
     ["predX0"],
   );
+  if (graphs.constraint_denoiser !== undefined) {
+    validateGraph(
+      graphs.constraint_denoiser,
+      "graphs.constraint_denoiser",
+      files,
+      [
+        "textCfgWeight",
+        "constraintCfgWeight",
+        "x",
+        "historyLength",
+        "generationLength",
+        "futureLength",
+        "historyMask",
+        "generationMask",
+        "futureMask",
+        "historyTokenMask",
+        "generationTokenMask",
+        "futureTokenMask",
+        "textConditions",
+        "textConditionMask",
+        "timestep",
+        "firstHeadingAngle",
+        "motionMask",
+        "observedMotion",
+      ],
+      ["predX0"],
+    );
+  }
   validateGraph(
     graphs.decoder,
     "graphs.decoder",
@@ -527,6 +668,35 @@ export function validateModelPackManifest(value: unknown): BrowserModelPackManif
     ["hybridTokens", "motionPadMask", "globalTranslation"],
     ["normalizedMotion", "posedJoints"],
   );
+  const decoder = objectAt(graphs.decoder, "graphs.decoder");
+  const decoderOutputs = objectAt(
+    decoder.outputs,
+    "graphs.decoder.outputs",
+  );
+  const richDecoderOutputs = [
+    "localRotations",
+    "globalRotations",
+    "rootPositions",
+    "footContacts",
+    "globalRootHeading",
+  ] as const;
+  const presentRichOutputs = richDecoderOutputs.filter(
+    (key) => decoderOutputs[key] !== undefined,
+  );
+  if (
+    presentRichOutputs.length !== 0 &&
+    presentRichOutputs.length !== richDecoderOutputs.length
+  ) {
+    fail(
+      "graphs.decoder.outputs must provide either all structured motion outputs or none",
+    );
+  }
+  for (const key of presentRichOutputs) {
+    stringAt(
+      decoderOutputs[key],
+      `graphs.decoder.outputs.${key}`,
+    );
+  }
 
   const dimensions = validateDimensions(manifest.dimensions);
   const generation = objectAt(manifest.generation, "generation");
@@ -539,6 +709,21 @@ export function validateModelPackManifest(value: unknown): BrowserModelPackManif
     fail("generation.max_frames must equal the browser v1 10-second limit");
   }
   positiveAt(generation.default_cfg_weight, "generation.default_cfg_weight");
+  if (generation.default_text_cfg_weight !== undefined) {
+    positiveAt(
+      generation.default_text_cfg_weight,
+      "generation.default_text_cfg_weight",
+    );
+  }
+  if (generation.default_constraint_cfg_weight !== undefined) {
+    positiveAt(
+      generation.default_constraint_cfg_weight,
+      "generation.default_constraint_cfg_weight",
+    );
+  }
+  if (generation.window_policy !== undefined) {
+    stringAt(generation.window_policy, "generation.window_policy");
+  }
   const denoisingSteps = positiveIntegerAt(
     generation.denoising_steps,
     "generation.denoising_steps",
@@ -629,6 +814,140 @@ export function validateModelPackManifest(value: unknown): BrowserModelPackManif
   }
   if (manifest.license_notices !== undefined) {
     validateLicenseNotices(manifest.license_notices, "license_notices");
+  }
+
+  if (manifest.skeleton !== undefined) {
+    const skeleton = objectAt(manifest.skeleton, "skeleton");
+    stringAt(skeleton.name, "skeleton.name");
+    const rootIndex = nonNegativeIntegerAt(
+      skeleton.root_index,
+      "skeleton.root_index",
+    );
+    const parents = integerArrayAt(
+      skeleton.parents,
+      "skeleton.parents",
+      dimensions.num_joints,
+    );
+    if (
+      rootIndex >= dimensions.num_joints ||
+      parents[rootIndex] !== -1 ||
+      parents.filter((parent) => parent === -1).length !== 1
+    ) {
+      fail("skeleton must contain one valid root");
+    }
+    parents.forEach((parent, index) => {
+      if (index !== rootIndex && (parent < 0 || parent >= index)) {
+        fail(`skeleton.parents[${index}] must reference an earlier joint`);
+      }
+    });
+    if (
+      !Array.isArray(skeleton.joint_names) ||
+      skeleton.joint_names.length !== dimensions.num_joints
+    ) {
+      fail(`skeleton.joint_names must contain ${dimensions.num_joints} names`);
+    }
+    skeleton.joint_names.forEach((name, index) =>
+      stringAt(name, `skeleton.joint_names[${index}]`),
+    );
+    if (
+      !Array.isArray(skeleton.neutral_joints) ||
+      skeleton.neutral_joints.length !== dimensions.num_joints
+    ) {
+      fail(
+        `skeleton.neutral_joints must contain ${dimensions.num_joints} joints`,
+      );
+    }
+    skeleton.neutral_joints.forEach((joint, index) =>
+      numberArrayAt(joint, `skeleton.neutral_joints[${index}]`, 3),
+    );
+  }
+
+  if (manifest.stats !== undefined) {
+    const stats = objectAt(manifest.stats, "stats");
+    for (const key of [
+      "motion",
+      "global_root",
+      "local_root",
+      "body",
+      "post_quantization",
+    ]) {
+      const payload = objectAt(stats[key], `stats.${key}`);
+      if (
+        !Array.isArray(payload.mean) ||
+        !Array.isArray(payload.std) ||
+        !Array.isArray(payload.normalization_denominator) ||
+        payload.mean.length === 0 ||
+        payload.mean.length !== payload.std.length ||
+        payload.mean.length !== payload.normalization_denominator.length
+      ) {
+        fail(`stats.${key} arrays must have the same non-zero length`);
+      }
+      numberArrayAt(payload.mean, `stats.${key}.mean`, payload.mean.length);
+      numberArrayAt(payload.std, `stats.${key}.std`, payload.mean.length);
+      const denominators = numberArrayAt(
+        payload.normalization_denominator,
+        `stats.${key}.normalization_denominator`,
+        payload.mean.length,
+      );
+      if (denominators.some((value) => !(value > 0))) {
+        fail(`stats.${key}.normalization_denominator must be positive`);
+      }
+    }
+  }
+
+  if (manifest.motion_layout !== undefined) {
+    const layout = objectAt(manifest.motion_layout, "motion_layout");
+    for (const [name, value] of Object.entries(layout)) {
+      const [start, stop] = integerArrayAt(
+        value,
+        `motion_layout.${name}`,
+        2,
+      );
+      if (start < 0 || stop <= start || stop > dimensions.motion_dim) {
+        fail(`motion_layout.${name} must be a valid motion feature slice`);
+      }
+    }
+  }
+
+  if (manifest.runtime !== undefined) {
+    const runtime = objectAt(manifest.runtime, "runtime");
+    if (runtime.onnx_opset !== undefined) {
+      positiveIntegerAt(runtime.onnx_opset, "runtime.onnx_opset");
+    }
+    if (runtime.contract_revision !== undefined) {
+      positiveIntegerAt(runtime.contract_revision, "runtime.contract_revision");
+    }
+    for (const key of [
+      "text_only",
+      "constraints_supported",
+      "separated_cfg",
+      "future_constraints_supported",
+      "detailed_motion_outputs",
+      "motion_correction_included",
+      "global_translation_y_must_be_zero",
+    ]) {
+      if (runtime[key] !== undefined && typeof runtime[key] !== "boolean") {
+        fail(`runtime.${key} must be a boolean`);
+      }
+    }
+    if (runtime.batch_size !== undefined) {
+      positiveIntegerAt(runtime.batch_size, "runtime.batch_size");
+    }
+    if (
+      runtime.constraints_supported === true &&
+      graphs.constraint_denoiser === undefined
+    ) {
+      fail("runtime declares constraints without a constraint_denoiser graph");
+    }
+  }
+
+  if (manifest.capabilities !== undefined) {
+    const capabilities = objectAt(manifest.capabilities, "capabilities");
+    for (const [key, enabled] of Object.entries(capabilities)) {
+      if (typeof enabled !== "boolean") {
+        fail(`capabilities.${key} must be a boolean`);
+      }
+    }
   }
 
   return manifest as unknown as BrowserModelPackManifest;
