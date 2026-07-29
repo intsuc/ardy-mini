@@ -20,9 +20,11 @@ import torch
 from ardy.minilm_teacher_cache import load_teacher_cache, sha256_file
 from scripts.minilm import evaluate_conditions
 from scripts.minilm.train import (
+    CachedExamples,
     distillation_loss,
     load_cached_examples,
     resolve_and_validate_teacher_checkpoint,
+    validate_frozen_evaluation_cache,
     validate_training_args,
 )
 
@@ -226,6 +228,7 @@ class TrainingValidationTests(unittest.TestCase):
     def valid_args() -> argparse.Namespace:
         return argparse.Namespace(
             cache_dir="cache",
+            eval_cache_dir=None,
             output_dir="artifact",
             base_model="sentence-transformers/all-MiniLM-L6-v2",
             ardy_model="core",
@@ -247,6 +250,72 @@ class TrainingValidationTests(unittest.TestCase):
             device="cpu",
             no_bf16=True,
         )
+
+    def test_frozen_evaluation_cache_requires_matching_identity_and_text(self) -> None:
+        training = CachedExamples(
+            texts=["new train", "validation", "test"],
+            splits=["train", "val", "test"],
+            targets=torch.zeros(3, 2048),
+        )
+        evaluation = CachedExamples(
+            texts=["old train", "validation", "test"],
+            splits=["train", "val", "test"],
+            targets=torch.zeros(3, 2048),
+        )
+        metadata = {
+            "base_model_name_or_path": "teacher-base",
+            "peft_model_name_or_path": "teacher-adapter",
+            "checkpoint_sha256": "a" * 64,
+            "target_keys": ["root", "body"],
+            "target_order": ["root", "body"],
+            "bias_applied": False,
+            "teacher_dim": 4096,
+            "target_dim": 2048,
+            "dtype": {"targets": "float32"},
+            "model_revisions": {"base": "revision"},
+        }
+
+        validate_frozen_evaluation_cache(
+            training,
+            metadata,
+            evaluation,
+            dict(metadata),
+        )
+
+        changed_identity = dict(metadata, checkpoint_sha256="b" * 64)
+        with self.assertRaisesRegex(ValueError, "different teacher identities"):
+            validate_frozen_evaluation_cache(
+                training,
+                metadata,
+                evaluation,
+                changed_identity,
+            )
+
+        changed_evaluation = CachedExamples(
+            texts=["old train", "different validation", "test"],
+            splits=["train", "val", "test"],
+            targets=torch.zeros(3, 2048),
+        )
+        with self.assertRaisesRegex(ValueError, "val prompt text/order"):
+            validate_frozen_evaluation_cache(
+                training,
+                metadata,
+                changed_evaluation,
+                dict(metadata),
+            )
+
+        leaked_training = CachedExamples(
+            texts=["validation", "validation", "test"],
+            splits=["train", "val", "test"],
+            targets=torch.zeros(3, 2048),
+        )
+        with self.assertRaisesRegex(ValueError, "overlap frozen-evaluation val"):
+            validate_frozen_evaluation_cache(
+                leaked_training,
+                metadata,
+                evaluation,
+                dict(metadata),
+            )
 
     def test_training_arguments_are_validated(self) -> None:
         validate_training_args(self.valid_args())

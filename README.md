@@ -98,7 +98,8 @@ ARDY checkpoints are available trained on various skeletons with differing FPS a
 
 ### [Optional] Dataset
 
-Downloading data is only required for running the kinematically constrained generation demos.
+Downloading data is required only for the kinematically constrained
+generation demos and for reproducing the specialized MiniLM training.
 
 **Bones SEED motion data**:
 The kinematically constrained generation demo samples constraints from motion sequences in the [Bones SEED](https://huggingface.co/datasets/bones-studio/seed) dataset. The motion data are provided in CSV format for G1. Corresponding text descriptions are retrieved from the metadata CSV during sampling.
@@ -140,7 +141,9 @@ uv run python scripts/generate.py "A person walks forward." --model core
 ```
 
 An artifact produced by the documented recipe is compatible only with
-`ARDY-Core-RP-20FPS-Horizon40`. See
+`ARDY-Core-RP-20FPS-Horizon40`. The adopted recipe uses 40,433 unique training
+prompts while preserving the original validation and test sets. It uses no
+external motion-caption dataset. See
 [the MiniLM encoder guide](docs/minilm_encoder.md) for the design, complete
 `uv` training/evaluation pipeline, and local result layout. Aggregate
 measurements from the completed run are in
@@ -207,8 +210,8 @@ npm run dev
 Choose `artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz` with the demo's
 **Choose model pack** button. The browser accepts this single `.tar.gz` format
 only; it streams the archive through gzip/ustar validation before creating
-three ONNX sessions. The verified export in this environment is 718,180,222
-bytes (684.91 MiB), down from 1,488,867,166 bytes for the former four-graph
+three ONNX sessions. The verified export in this environment is 718,137,762
+bytes (684.87 MiB), down from 1,488,867,166 bytes for the former four-graph
 directory. The static web build contains no model weights, and inference does
 not send prompts, model-pack files, VRM files, generation state, or motion to a
 server.

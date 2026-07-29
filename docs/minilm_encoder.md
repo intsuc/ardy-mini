@@ -17,6 +17,9 @@ before obtaining inputs or redistributing a locally produced artifact.
 Training data includes [Motion Data by Bones Studio](https://bones.studio/).
 Use of the underlying dataset is subject to the
 [BONES Motion Capture Dataset License Agreement](https://bones.studio/info/seed-license).
+The adopted corpus expansion uses only previously unused BONES-SEED training
+descriptions. External motion-caption datasets were not mixed into this run,
+which keeps both the license chain and the controlled comparison narrow.
 
 ## Design
 
@@ -104,7 +107,11 @@ uv run hf auth login
 [`prepare_prompts.py`](../scripts/minilm/prepare_prompts.py) normalizes and
 globally deduplicates the seven BONES-SEED description columns. It assigns
 whole content families to deterministic train/validation/test splits, so
-mirrored or related descriptions do not leak across splits.
+records sharing `content_name`, including mirrored variants, do not cross
+splits.
+
+First create the 16,384-prompt evaluation anchor used by the original
+experiment:
 
 ```bash
 uv run python scripts/minilm/prepare_prompts.py \
@@ -114,6 +121,26 @@ uv run python scripts/minilm/prepare_prompts.py \
   --split-ratios 0.8 0.1 0.1 \
   --seed 20260726
 ```
+
+Then retain every eligible training prompt while freezing the anchor's
+validation and test records byte-for-byte:
+
+```bash
+uv run python scripts/minilm/prepare_prompts.py \
+  --input datasets/bones-seed/metadata/seed_metadata_v004.csv \
+  --output artifacts/data/prompts-core40-expanded-frozen-eval.jsonl \
+  --sample-size 0 \
+  --freeze-eval-from artifacts/data/prompts-core40-16384.jsonl \
+  --split-ratios 0.8 0.1 0.1 \
+  --seed 20260726
+```
+
+This produces 43,666 records across 3,807 content-family groups: 40,433
+training prompts, up from 13,151, plus the unchanged 1,641 validation and
+1,592 test prompts. Its manifest SHA-256 in the completed run is
+`2402968157a94caee0e21e6d904029be6d2355bfb1397dca5c5a2e068c8d6069`.
+`--freeze-eval-from` requires the current source records to match every frozen
+record in all four manifest fields and requires `--sample-size 0`.
 
 ### 2. Cache teacher targets
 
@@ -133,6 +160,21 @@ uv run python scripts/minilm/cache_teacher.py \
   --device cuda
 ```
 
+Cache the expanded training manifest separately:
+
+```bash
+uv run python scripts/minilm/cache_teacher.py \
+  --input artifacts/data/prompts-core40-expanded-frozen-eval.jsonl \
+  --output-dir artifacts/teacher-core40-expanded-frozen-eval \
+  --checkpoint checkpoints/ARDY-Core-RP-20FPS-Horizon40/denoiser.safetensors \
+  --shard-size 256 \
+  --device cuda
+```
+
+The completed expanded cache contains 43,666 rows in 171 shards and took
+3,755.58 seconds on the machine recorded in the results report. The smaller
+cache remains the frozen source for validation and test targets.
+
 Do not combine shards created with another checkpoint, teacher revision, or
 prompt manifest. Use a new output directory for a different target.
 
@@ -146,7 +188,8 @@ metadata, and training report.
 
 ```bash
 uv run python scripts/minilm/train.py \
-  --cache-dir artifacts/teacher-core40-16384 \
+  --cache-dir artifacts/teacher-core40-expanded-frozen-eval \
+  --eval-cache-dir artifacts/teacher-core40-16384 \
   --output-dir artifacts/minilm-ardy-core40 \
   --ardy-model ARDY-Core-RP-20FPS-Horizon40 \
   --pooling-mode mean_cls_max_std \
@@ -161,6 +204,19 @@ uv run python scripts/minilm/train.py \
   --seed 20260726 \
   --device cuda
 ```
+
+The separate evaluation cache supplies the original float32 targets as well
+as the original prompt order. This avoids small target-rounding differences
+that can arise when the same LLM2Vec embeddings are projected in a new cache
+run. Training fails closed if the two caches disagree on teacher identity or
+validation/test text.
+
+The corpus-size control used the same command with `--epochs 16` and output
+`artifacts/minilm-ardy-core40-expanded-16e`. It performed 5,056 optimizer
+updates, versus 5,150 for the original 16,384-prompt, 50-epoch baseline. That
+run isolates corpus diversity at nearly equal optimization compute. The
+adopted 50-epoch run performs 15,800 updates and tests whether the larger
+corpus also benefits from additional training.
 
 The artifact layout is:
 
@@ -193,7 +249,7 @@ uv run python scripts/minilm/evaluate_conditions.py \
   --batch-size 64 \
   --device cuda \
   --dtype bfloat16 \
-  --output artifacts/evaluation/conditions.json
+  --output artifacts/evaluation/conditions-expanded-50e-frozen-test.json
 ```
 
 ### 5. Evaluate paired motion fidelity
@@ -214,9 +270,10 @@ uv run python scripts/minilm/evaluate_motion.py \
   --num-prompts 64 \
   --seeds 0 1 2 \
   --duration 4 \
+  --diffusion-steps 10 \
   --device cuda \
-  --output artifacts/evaluation/motion_metrics_clean_english.json \
-  --sample-dir outputs/minilm-motion-comparison-clean
+  --output artifacts/evaluation/motion_metrics_expanded_50e_clean_english.json \
+  --sample-dir outputs/minilm-motion-comparison-expanded-50e-clean
 ```
 
 The report includes root ADE/FDE, global and root-aligned MPJPE, joint velocity
@@ -226,6 +283,9 @@ normalized by the original encoder's different-seed diversity. A few paired
 filter bind this run to the four natural-description columns; omit
 `--prompt-manifest` and `--sources` to evaluate every held-out description
 type in cache order.
+
+The baseline, compute-matched, and adopted reports use this same frozen
+teacher cache, prompt manifest, 64-prompt selection, and seed list.
 
 ### 6. Benchmark memory and latency
 

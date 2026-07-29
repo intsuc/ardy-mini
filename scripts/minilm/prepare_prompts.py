@@ -18,6 +18,9 @@ Example:
 
 Each output line is a JSON object with ``text``, ``split``, ``group``, and
 ``source`` keys.  ``--sample-size 0`` (the default) keeps all unique prompts.
+For a controlled corpus-size experiment, ``--freeze-eval-from`` keeps the
+validation and test records from an earlier manifest while adding every
+available training record from the source CSV.
 """
 
 from __future__ import annotations
@@ -207,6 +210,73 @@ def deterministic_sample(
     return [record for index, record in enumerate(records) if index in selected_indices]
 
 
+def read_prompt_manifest(path: Path) -> list[PromptRecord]:
+    """Read and strictly validate a prompt JSONL produced by this script."""
+
+    records: list[PromptRecord] = []
+    seen_texts: set[str] = set()
+    with path.open("r", encoding="utf-8") as input_file:
+        for line_number, line in enumerate(input_file, start=1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"{path}:{line_number}: invalid JSON: {error}") from error
+            if not isinstance(value, dict):
+                raise TypeError(f"{path}:{line_number}: expected a JSON object")
+            unknown_keys = set(value) - {"text", "split", "group", "source"}
+            missing_keys = {"text", "split", "group", "source"} - set(value)
+            if unknown_keys or missing_keys:
+                raise ValueError(
+                    f"{path}:{line_number}: expected exactly text/split/group/source; "
+                    f"missing={sorted(missing_keys)}, unknown={sorted(unknown_keys)}"
+                )
+            if not all(isinstance(value[key], str) and value[key] for key in ("text", "group", "source")):
+                raise ValueError(f"{path}:{line_number}: text/group/source must be non-empty strings")
+            if value["split"] not in SPLIT_NAMES:
+                raise ValueError(f"{path}:{line_number}: invalid split {value['split']!r}")
+            record = PromptRecord(**value)
+            if record.text in seen_texts:
+                raise ValueError(f"{path}:{line_number}: duplicate prompt text {record.text!r}")
+            seen_texts.add(record.text)
+            records.append(record)
+    if not records:
+        raise ValueError(f"{path} contains no prompt records")
+    return records
+
+
+def freeze_evaluation_records(
+    records: Sequence[PromptRecord],
+    reference_records: Sequence[PromptRecord],
+) -> list[PromptRecord]:
+    """Keep all current train rows and the reference manifest's val/test rows.
+
+    Matching all four fields fails closed when the source CSV, split seed, or
+    grouping logic differs from the reference experiment.
+    """
+
+    available = {record.text: record for record in records}
+    frozen_evaluation = [record for record in reference_records if record.split in {"val", "test"}]
+    missing_splits = [
+        split for split in ("val", "test") if not any(record.split == split for record in frozen_evaluation)
+    ]
+    if missing_splits:
+        raise ValueError(f"reference manifest must contain both validation and test records; missing={missing_splits}")
+    for reference in frozen_evaluation:
+        current = available.get(reference.text)
+        if current is None:
+            raise ValueError(f"frozen evaluation prompt is absent from the source corpus: {reference.text!r}")
+        if current != reference:
+            raise ValueError(
+                "frozen evaluation record no longer matches the source corpus: "
+                f"reference={reference!r}, current={current!r}"
+            )
+
+    training = [record for record in records if record.split == "train"]
+    return [*training, *frozen_evaluation]
+
+
 def write_jsonl(records: Sequence[PromptRecord], output_path: Path) -> None:
     """Atomically write ``records`` as UTF-8 JSONL."""
 
@@ -247,6 +317,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="number of unique prompts to retain; zero keeps all",
     )
+    parser.add_argument(
+        "--freeze-eval-from",
+        type=Path,
+        default=None,
+        help=(
+            "reference prompt JSONL whose validation/test rows remain fixed "
+            "while every available training row is retained"
+        ),
+    )
     return parser
 
 
@@ -256,7 +335,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         ratios = _validate_ratios(args.split_ratios)
         records = extract_prompts(args.input, seed=args.seed, split_ratios=ratios)
         unique_count = len(records)
-        records = deterministic_sample(records, sample_size=args.sample_size, seed=args.seed)
+        if args.freeze_eval_from is not None:
+            if args.sample_size != 0:
+                raise ValueError("--freeze-eval-from requires --sample-size 0")
+            reference_records = read_prompt_manifest(args.freeze_eval_from)
+            records = freeze_evaluation_records(records, reference_records)
+        else:
+            records = deterministic_sample(records, sample_size=args.sample_size, seed=args.seed)
         missing_splits = [split for split in SPLIT_NAMES if not any(record.split == split for record in records)]
         if missing_splits:
             raise ValueError(
@@ -286,6 +371,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "groups": len(group_splits),
                 "splits": split_counts,
                 "seed": args.seed,
+                "frozen_evaluation_manifest": (None if args.freeze_eval_from is None else str(args.freeze_eval_from)),
             },
             indent=2,
         )

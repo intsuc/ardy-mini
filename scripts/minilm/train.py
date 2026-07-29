@@ -89,6 +89,14 @@ class TokenizingCollator:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache-dir", required=True, help="Teacher-cache directory")
+    parser.add_argument(
+        "--eval-cache-dir",
+        default=None,
+        help=(
+            "optional teacher cache supplying byte-for-byte frozen validation "
+            "and test targets while --cache-dir supplies training examples"
+        ),
+    )
     parser.add_argument("--output-dir", default="artifacts/minilm-ardy-core40")
     parser.add_argument("--base-model", default=DEFAULT_BASE_MODEL)
     parser.add_argument("--ardy-model", default=DEFAULT_ARDY_MODEL)
@@ -189,6 +197,10 @@ def validate_training_args(args: argparse.Namespace) -> None:
         value = getattr(args, field)
         if not isinstance(value, (str, Path)) or not str(value).strip():
             raise ValueError(f"--{field.replace('_', '-')} must be a non-empty path")
+    if args.eval_cache_dir is not None and (
+        not isinstance(args.eval_cache_dir, (str, Path)) or not str(args.eval_cache_dir).strip()
+    ):
+        raise ValueError("--eval-cache-dir must be a non-empty path when provided")
     if args.pooling_mode not in POOLING_MODES:
         raise ValueError(f"--pooling-mode must be one of {POOLING_MODES}")
     torch.device(args.device)
@@ -218,6 +230,69 @@ def resolve_and_validate_teacher_checkpoint(
             f"metadata={checkpoint_hash}, actual={actual_hash}"
         )
     return resolved_model, checkpoint_path
+
+
+def validate_frozen_evaluation_cache(
+    training_examples: CachedExamples,
+    training_metadata: dict,
+    evaluation_examples: CachedExamples,
+    evaluation_metadata: dict,
+) -> None:
+    """Require an evaluation cache with identical teacher identity and val/test text."""
+
+    identity_fields = (
+        "base_model_name_or_path",
+        "peft_model_name_or_path",
+        "checkpoint_sha256",
+        "target_keys",
+        "target_order",
+        "bias_applied",
+        "teacher_dim",
+        "target_dim",
+        "dtype",
+        "model_revisions",
+    )
+    mismatches = [field for field in identity_fields if training_metadata.get(field) != evaluation_metadata.get(field)]
+    if mismatches:
+        raise ValueError(
+            f"training and frozen-evaluation teacher caches have different teacher identities: {mismatches}"
+        )
+
+    training_prompt_texts = {
+        text
+        for text, split in zip(
+            training_examples.texts,
+            training_examples.splits,
+            strict=True,
+        )
+        if split == "train"
+    }
+    for split in ("val", "test"):
+        training_texts = [
+            text
+            for text, row_split in zip(
+                training_examples.texts,
+                training_examples.splits,
+                strict=True,
+            )
+            if row_split == split
+        ]
+        evaluation_texts = [
+            text
+            for text, row_split in zip(
+                evaluation_examples.texts,
+                evaluation_examples.splits,
+                strict=True,
+            )
+            if row_split == split
+        ]
+        if training_texts != evaluation_texts:
+            raise ValueError(f"frozen-evaluation {split} prompt text/order does not match the training cache manifest")
+        if len(evaluation_texts) != len(set(evaluation_texts)):
+            raise ValueError(f"frozen-evaluation {split} contains duplicate prompt text")
+        overlap = training_prompt_texts.intersection(evaluation_texts)
+        if overlap:
+            raise ValueError(f"training prompts overlap frozen-evaluation {split}: {len(overlap)} prompt(s)")
 
 
 def make_loader(
@@ -357,13 +432,23 @@ def train(args: argparse.Namespace) -> dict:
     use_bf16 = device.type == "cuda" and not args.no_bf16
 
     examples, teacher_metadata = load_cached_examples(args.cache_dir)
+    evaluation_examples = examples
+    evaluation_metadata = teacher_metadata
+    if args.eval_cache_dir is not None:
+        evaluation_examples, evaluation_metadata = load_cached_examples(args.eval_cache_dir)
+        validate_frozen_evaluation_cache(
+            examples,
+            teacher_metadata,
+            evaluation_examples,
+            evaluation_metadata,
+        )
     resolved_ardy_model, teacher_checkpoint = resolve_and_validate_teacher_checkpoint(
         args.ardy_model,
         teacher_metadata,
     )
     train_dataset = ConditionDataset(examples, "train")
-    val_dataset = ConditionDataset(examples, "val")
-    test_dataset = ConditionDataset(examples, "test")
+    val_dataset = ConditionDataset(evaluation_examples, "val")
+    test_dataset = ConditionDataset(evaluation_examples, "test")
     print(
         f"Loaded teacher cache: train={len(train_dataset)}, val={len(val_dataset)}, test={len(test_dataset)}",
         flush=True,
@@ -504,8 +589,10 @@ def train(args: argparse.Namespace) -> dict:
     metadata = {
         "target_definition": "[W_root @ LLM2Vec(prompt), W_body @ LLM2Vec(prompt)] (bias excluded)",
         "teacher_cache": str(Path(args.cache_dir).resolve()),
+        "evaluation_teacher_cache": (None if args.eval_cache_dir is None else str(Path(args.eval_cache_dir).resolve())),
         "teacher_checkpoint": str(teacher_checkpoint),
         "teacher_metadata": teacher_metadata,
+        "evaluation_teacher_metadata": evaluation_metadata,
         "training": {
             "seed": args.seed,
             "train_examples": len(train_dataset),
@@ -518,8 +605,17 @@ def train(args: argparse.Namespace) -> dict:
             "pooling_mode": args.pooling_mode,
             "backbone_lr": args.backbone_lr,
             "head_lr": args.head_lr,
+            "weight_decay": args.weight_decay,
+            "warmup_ratio": args.warmup_ratio,
+            "cosine_weight": args.cosine_weight,
+            "relational_weight": args.relational_weight,
             "train_max_length": args.train_max_length,
+            "runtime_max_length": args.runtime_max_length,
+            "num_workers": args.num_workers,
+            "device": str(device),
             "bf16_autocast": use_bf16,
+            "train_batches_per_epoch": len(train_loader),
+            "optimizer_updates": total_steps,
             "elapsed_seconds": elapsed,
             "base_model": args.base_model,
             "ardy_model": resolved_ardy_model,

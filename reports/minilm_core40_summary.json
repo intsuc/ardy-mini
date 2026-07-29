@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "report_kind": "aggregate_only",
   "distribution": {
     "contains_model_weights": false,
@@ -19,8 +19,8 @@
     "ardy_model": "ARDY-Core-RP-20FPS-Horizon40",
     "ardy_checkpoint_sha256": "1019d0bf269cf8d1b3e3e9b4a384a58c112672959b071279ddb65814d77660cd",
     "student_base": "sentence-transformers/all-MiniLM-L6-v2",
-    "student_artifact_fingerprint": "04d94fa2b8e122ac2f8397c65f22adff00d6e8936813b94180360b6599e014b9",
-    "student_artifact_size_bytes": 113689186,
+    "adopted_student_artifact_fingerprint": "b2e4af890d4a733049a377b96355eb1f3a5716378f9304010906823cf6af7fcb",
+    "adopted_student_artifact_size_bytes": 113713137,
     "machine": "NVIDIA GB10, aarch64 Linux, unified memory",
     "runtime": {
       "python": "3.11.15",
@@ -30,43 +30,188 @@
       "ardy_model_dtype": "float32"
     }
   },
-  "training": {
-    "unique_prompts_before_sampling": 50246,
-    "sampled_prompts": 16384,
-    "train_prompts": 13151,
-    "validation_prompts": 1641,
-    "test_prompts": 1592,
-    "content_family_groups": 3768,
-    "teacher_cache_seconds": 1448.49,
-    "student_training_seconds": 215.05,
-    "epochs": 50,
-    "best_validation_root_body_mean_cosine": 0.9529
+  "corpus": {
+    "source_unique_prompts": 50246,
+    "baseline_manifest": {
+      "total_prompts": 16384,
+      "train_prompts": 13151,
+      "validation_prompts": 1641,
+      "test_prompts": 1592,
+      "content_family_groups": 3768,
+      "sha256": "aa8da14f83c09e18015f2c73a067587de0b9c7ae417e01835c1a8bd4511ec163"
+    },
+    "expanded_manifest": {
+      "total_prompts": 43666,
+      "train_prompts": 40433,
+      "validation_prompts": 1641,
+      "test_prompts": 1592,
+      "content_family_groups": 3807,
+      "train_content_family_groups": 3073,
+      "added_train_prompts": 27282,
+      "train_corpus_multiplier": 3.074519,
+      "frozen_evaluation": true,
+      "sha256": "2402968157a94caee0e21e6d904029be6d2355bfb1397dca5c5a2e068c8d6069"
+    },
+    "external_datasets_adopted": [],
+    "expansion_decision": "Adopted previously unused BONES-SEED training descriptions to isolate corpus diversity without adding a new data-license domain.",
+    "future_synthetic_grammar": {
+      "status": "proposed_not_adopted",
+      "dimensions": [
+        "action",
+        "direction",
+        "speed",
+        "style",
+        "posture",
+        "limb",
+        "transition_order"
+      ],
+      "safeguards": [
+        "Generate only from training parents.",
+        "Group surface forms by canonical semantic program.",
+        "Reject contradictions, duplicates, and semantic collisions with frozen evaluation prompts.",
+        "Record template version, seed, and parent provenance."
+      ]
+    }
+  },
+  "teacher_cache": {
+    "baseline_seconds": 1448.4939,
+    "expanded_seconds": 3755.5772,
+    "expanded_rows": 43666,
+    "expanded_shards": 171
+  },
+  "training_runs": {
+    "baseline_16384": {
+      "artifact_fingerprint": "04d94fa2b8e122ac2f8397c65f22adff00d6e8936813b94180360b6599e014b9",
+      "artifact_size_bytes": 113689186,
+      "train_prompts": 13151,
+      "epochs": 50,
+      "optimizer_updates": 5150,
+      "example_exposures": 657550,
+      "training_seconds": 215.0535,
+      "best_epoch": 50,
+      "best_validation_root_body_mean_cosine": 0.95290256
+    },
+    "expanded_compute_matched_16e": {
+      "artifact_fingerprint": "df8b2f5b1c8e35275ca855a524c31f5162c8f9c40224f8efa2f4988c3a3a27da",
+      "artifact_size_bytes": 113687190,
+      "train_prompts": 40433,
+      "epochs": 16,
+      "optimizer_updates": 5056,
+      "example_exposures": 646928,
+      "training_seconds": 202.9671,
+      "best_epoch": 16,
+      "best_validation_root_body_mean_cosine": 0.96055135
+    },
+    "expanded_adopted_50e": {
+      "artifact_fingerprint": "b2e4af890d4a733049a377b96355eb1f3a5716378f9304010906823cf6af7fcb",
+      "artifact_size_bytes": 113713137,
+      "train_prompts": 40433,
+      "epochs": 50,
+      "optimizer_updates": 15800,
+      "example_exposures": 2021650,
+      "training_seconds": 626.0719,
+      "best_epoch": 49,
+      "best_validation_root_body_mean_cosine": 0.96612066
+    }
   },
   "condition_fidelity": {
     "test_examples": 1592,
-    "root": {
-      "cosine_mean": 0.96411,
-      "cosine_p5": 0.89095,
-      "rmse": 1.95419,
-      "nrmse": 0.26401,
-      "mae": 1.40455
+    "frozen_prompt_order_and_teacher_targets": true,
+    "runs": {
+      "baseline_16384": {
+        "root": {
+          "cosine_mean": 0.96411,
+          "cosine_p5": 0.89095,
+          "rmse": 1.95419,
+          "nrmse": 0.26401,
+          "mae": 1.40455
+        },
+        "body": {
+          "cosine_mean": 0.95181,
+          "cosine_p5": 0.84966,
+          "rmse": 1.83318,
+          "nrmse": 0.3014,
+          "mae": 1.30885
+        },
+        "combined": {
+          "cosine_mean": 0.95933,
+          "cosine_p5": 0.87277,
+          "rmse": 1.89465,
+          "nrmse": 0.27968,
+          "mae": 1.3567
+        }
+      },
+      "expanded_compute_matched_16e": {
+        "root": {
+          "cosine_mean": 0.97004,
+          "cosine_p5": 0.9091,
+          "rmse": 1.78121,
+          "nrmse": 0.24064,
+          "mae": 1.2867
+        },
+        "body": {
+          "cosine_mean": 0.95912,
+          "cosine_p5": 0.8757,
+          "rmse": 1.68612,
+          "nrmse": 0.27722,
+          "mae": 1.20807
+        },
+        "combined": {
+          "cosine_mean": 0.96579,
+          "cosine_p5": 0.89964,
+          "rmse": 1.73431,
+          "nrmse": 0.25601,
+          "mae": 1.24738
+        }
+      },
+      "expanded_adopted_50e": {
+        "root": {
+          "cosine_mean": 0.97431,
+          "cosine_p5": 0.91548,
+          "rmse": 1.65038,
+          "nrmse": 0.22296,
+          "mae": 1.16578
+        },
+        "body": {
+          "cosine_mean": 0.96492,
+          "cosine_p5": 0.89122,
+          "rmse": 1.56391,
+          "nrmse": 0.25713,
+          "mae": 1.09829
+        },
+        "combined": {
+          "cosine_mean": 0.97066,
+          "cosine_p5": 0.9047,
+          "rmse": 1.60773,
+          "nrmse": 0.23732,
+          "mae": 1.13203
+        }
+      }
     },
-    "body": {
-      "cosine_mean": 0.95181,
-      "cosine_p5": 0.84966,
-      "rmse": 1.83318,
-      "nrmse": 0.3014,
-      "mae": 1.30885
-    },
-    "combined": {
-      "cosine_mean": 0.95933,
-      "cosine_p5": 0.87277,
-      "rmse": 1.89465,
-      "nrmse": 0.27968,
-      "mae": 1.3567
+    "change": {
+      "baseline_to_compute_matched_16e": {
+        "combined_cosine_absolute_gain": 0.0064593,
+        "combined_rmse_reduction_percent": 8.4628
+      },
+      "baseline_to_adopted_50e": {
+        "combined_cosine_absolute_gain": 0.01133109,
+        "combined_rmse_reduction_percent": 15.1441,
+        "combined_mae_reduction_percent": 16.5596
+      },
+      "compute_matched_16e_to_adopted_50e": {
+        "combined_cosine_absolute_gain": 0.00487178,
+        "combined_rmse_reduction_percent": 7.299
+      }
     }
   },
   "performance": {
+    "architecture_invariance": {
+      "parameter_count": 28227968,
+      "parameter_bytes": 56455936,
+      "cuda_allocated_peak_bytes": 90812928,
+      "baseline_and_expanded_equal": true,
+      "repeated_latency_ranges_overlap": true
+    },
     "full_condition_stack": {
       "operation": "prompt -> encoder -> Core40 root/body projections",
       "warm_runs": 100,
@@ -128,42 +273,85 @@
     "duration_seconds": 4,
     "fps": 20,
     "diffusion_steps": 10,
-    "matched_minilm_vs_llm2vec": {
-      "global_mpjpe_m": 0.1352,
-      "root_ade_m": 0.1087,
-      "root_fde_m": 0.185,
-      "root_aligned_mpjpe_m": 0.0523,
-      "joint_velocity_error_m_per_s": 0.1838,
-      "heading_mae_deg": 7.477,
-      "motion_cosine": 0.98778,
-      "foot_contact_agreement": 0.9491,
-      "foot_contact_macro_f1": 0.94714,
-      "foot_contact_macro_iou": 0.9159
+    "runs": {
+      "baseline_16384": {
+        "global_mpjpe_m": 0.13517,
+        "root_ade_m": 0.10871,
+        "root_fde_m": 0.18495,
+        "root_aligned_mpjpe_m": 0.05227,
+        "joint_velocity_error_m_per_s": 0.18385,
+        "heading_mae_deg": 7.47676,
+        "motion_cosine": 0.98778,
+        "foot_contact_agreement": 0.9491,
+        "foot_contact_macro_f1": 0.94714,
+        "foot_contact_macro_iou": 0.9159,
+        "normalized_five_error_mean": 0.4107692
+      },
+      "expanded_compute_matched_16e": {
+        "global_mpjpe_m": 0.12329,
+        "root_ade_m": 0.09997,
+        "root_fde_m": 0.17643,
+        "root_aligned_mpjpe_m": 0.04582,
+        "joint_velocity_error_m_per_s": 0.17115,
+        "heading_mae_deg": 6.52046,
+        "motion_cosine": 0.98881,
+        "foot_contact_agreement": 0.94521,
+        "foot_contact_macro_f1": 0.9425,
+        "foot_contact_macro_iou": 0.91089,
+        "normalized_five_error_mean": 0.37691994
+      },
+      "expanded_adopted_50e": {
+        "global_mpjpe_m": 0.11748,
+        "root_ade_m": 0.09242,
+        "root_fde_m": 0.1747,
+        "root_aligned_mpjpe_m": 0.04724,
+        "joint_velocity_error_m_per_s": 0.15615,
+        "heading_mae_deg": 6.41535,
+        "motion_cosine": 0.9883,
+        "foot_contact_agreement": 0.95122,
+        "foot_contact_macro_f1": 0.94773,
+        "foot_contact_macro_iou": 0.91972,
+        "normalized_five_error_mean": 0.36364403
+      }
     },
     "original_llm2vec_different_seed_diversity": {
       "global_mpjpe_m": 0.3366,
-      "root_ade_m": 0.2884,
-      "root_fde_m": 0.438,
-      "root_aligned_mpjpe_m": 0.1125,
-      "joint_velocity_error_m_per_s": 0.4735,
-      "heading_mae_deg": 13.734,
+      "root_ade_m": 0.28836,
+      "root_fde_m": 0.43799,
+      "root_aligned_mpjpe_m": 0.11248,
+      "joint_velocity_error_m_per_s": 0.47346,
+      "heading_mae_deg": 13.7339,
       "motion_cosine": 0.94529,
       "foot_contact_agreement": 0.83376,
       "foot_contact_macro_f1": 0.82967,
       "foot_contact_macro_iou": 0.76633
     },
-    "replacement_error_over_teacher_diversity": {
-      "global_mpjpe": 0.402,
-      "root_ade": 0.377,
-      "root_fde": 0.422,
-      "root_aligned_mpjpe": 0.465,
-      "joint_velocity_error": 0.388
+    "change": {
+      "baseline_to_compute_matched_16e": {
+        "normalized_five_error_mean_reduction_percent": 8.2405
+      },
+      "baseline_to_adopted_50e": {
+        "global_mpjpe_reduction_percent": 13.0885,
+        "root_ade_reduction_percent": 14.9844,
+        "joint_velocity_error_reduction_percent": 15.0648,
+        "normalized_five_error_mean_reduction_percent": 11.4724
+      },
+      "compute_matched_16e_to_adopted_50e": {
+        "global_mpjpe_reduction_percent": 4.709,
+        "root_ade_reduction_percent": 7.548,
+        "joint_velocity_error_reduction_percent": 8.7607,
+        "root_aligned_mpjpe_increase_percent": 3.1077,
+        "motion_cosine_absolute_change": -0.00050675
+      }
     }
   },
   "limitations": [
     "Motion metrics measure same-seed replacement fidelity, not ground-truth text semantics.",
     "The proprietary Rigplay test split and TMR evaluator were unavailable, so these are not paper-comparable FID or R-precision results.",
     "The supported deployment domain is well-formed, typo-free English motion prompts.",
+    "The experiment uses one training seed and does not establish statistical significance.",
+    "The held-out prompts come from the same BONES source; cross-dataset language generalization was not measured.",
+    "No external motion-caption dataset was included in the adopted weights.",
     "CUDA allocator figures exclude CUDA driver and context memory.",
     "Encoder timing excludes diffusion, motion decoding, post-processing, and rendering."
   ]

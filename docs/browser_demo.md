@@ -194,8 +194,13 @@ The expected schema/contract revisions are `2` and `3`, and both rotation
 output names must be present. The archive contains exactly one manifest, three
 ONNX graphs, and two tokenizer files.
 
-The verified export produced in this environment is 718,180,222 bytes
-(684.91 MiB, 0.6689 GiB) as `.tar.gz`. Its member payload is 775,577,052 bytes:
+The verified export produced in this environment is 718,137,762 bytes
+(684.87 MiB, 0.6688 GiB) as `.tar.gz`. Its member payload is 775,577,052
+bytes. The archive SHA-256 is
+`4962bc2c3b7135e8181de1229fc816924ebcd60e3d5ff1d9f5cc02b8505e8663`,
+and its manifest identifies MiniLM artifact
+`b2e4af890d4a733049a377b96355eb1f3a5716378f9304010906823cf6af7fcb`.
+The member sizes are:
 
 | Asset | Bytes |
 |---|---:|
@@ -208,7 +213,7 @@ The verified export produced in this environment is 718,180,222 bytes
 The former four-graph directory occupied 1,488,867,166 bytes in the same
 environment. Removing its constraint graph and specializing the remaining
 denoiser saves 713,290,114 bytes (680.25 MiB, 0.6643 GiB) before compression;
-the final gzip file is 770,686,944 bytes (0.7177 GiB) smaller than that
+the final gzip file is 770,729,404 bytes (0.7178 GiB) smaller than that
 directory. Small exporter/version differences can change the exact byte count.
 
 ## Run the app
@@ -327,7 +332,7 @@ CPU errors:
 
 | Output | Maximum absolute error |
 |---|---:|
-| MiniLM text conditions | `1.91e-5` |
+| MiniLM text conditions | `1.14e-5` |
 | Unconstrained denoiser tokens | `9.98e-6` |
 | Normalized motion | `1.51e-3` |
 | Posed joints | `1.23e-4 m` |
