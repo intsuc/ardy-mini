@@ -36,6 +36,7 @@ import {
   CORE27_VRM_BINDINGS,
   createVrmRetargetPlan,
   retargetMotionFrame,
+  toVrmPosition,
   type VrmRetargetFrame,
   type VrmRetargetPlan,
 } from "./vrm-retarget";
@@ -303,6 +304,20 @@ export class SkeletonViewer {
   private readonly initialTransformGroup = new THREE.Group();
   private readonly waypointGroup = new THREE.Group();
   private readonly vrmRoot = new THREE.Group();
+  private readonly shadowRig = new THREE.Group();
+  private readonly shadowLight = new THREE.DirectionalLight(
+    VIEWER_COLORS.primary,
+    4.2,
+  );
+  private readonly shadowLightTarget = new THREE.Object3D();
+  private readonly shadowFloor = new THREE.Mesh(
+    new THREE.PlaneGeometry(80, 80),
+    new THREE.MeshStandardMaterial({
+      color: VIEWER_COLORS.chart5,
+      roughness: 1,
+      metalness: 0,
+    }),
+  );
   private readonly resizeObserver: ResizeObserver;
   private readonly jointTransform = new THREE.Object3D();
   private readonly boneTransform = new THREE.Object3D();
@@ -478,27 +493,36 @@ export class SkeletonViewer {
       2.1,
     );
     this.scene.add(hemisphere);
-    const keyLight = new THREE.DirectionalLight(VIEWER_COLORS.primary, 4.2);
-    keyLight.position.set(-3, 6, 4);
-    keyLight.castShadow = true;
-    keyLight.shadow.mapSize.set(1024, 1024);
-    this.scene.add(keyLight);
+    this.shadowRig.name = "shadow-follow-rig";
+    this.shadowLight.name = "shadow-key-light";
+    this.shadowLightTarget.name = "shadow-key-light-target";
+    this.shadowLight.position.set(-3, 6, 4);
+    this.shadowLightTarget.position.set(0, 0.9, 0);
+    this.shadowLight.target = this.shadowLightTarget;
+    this.shadowLight.castShadow = true;
+    this.shadowLight.shadow.mapSize.set(1024, 1024);
+    this.shadowLight.shadow.bias = -0.0002;
+    this.shadowLight.shadow.normalBias = 0.015;
+    this.shadowLight.shadow.radius = 2;
+    const shadowCamera = this.shadowLight.shadow.camera;
+    shadowCamera.left = -4;
+    shadowCamera.right = 4;
+    shadowCamera.top = 4;
+    shadowCamera.bottom = -4;
+    shadowCamera.near = 0.1;
+    shadowCamera.far = 16;
+    shadowCamera.updateProjectionMatrix();
+    this.shadowRig.add(this.shadowLight, this.shadowLightTarget);
+    this.scene.add(this.shadowRig);
     const rimLight = new THREE.DirectionalLight(VIEWER_COLORS.mutedForeground, 2.2);
     rimLight.position.set(5, 2, -4);
     this.scene.add(rimLight);
 
-    const floor = new THREE.Mesh(
-      new THREE.CircleGeometry(11, 96),
-      new THREE.MeshStandardMaterial({
-        color: VIEWER_COLORS.card,
-        roughness: 0.92,
-        metalness: 0.03,
-      }),
-    );
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.y = -0.006;
-    floor.receiveShadow = true;
-    this.scene.add(floor);
+    this.shadowFloor.name = "shadow-receiving-floor";
+    this.shadowFloor.rotation.x = -Math.PI / 2;
+    this.shadowFloor.position.y = -0.006;
+    this.shadowFloor.receiveShadow = true;
+    this.scene.add(this.shadowFloor);
 
     const grid = new THREE.GridHelper(
       18,
@@ -656,6 +680,7 @@ export class SkeletonViewer {
     this.vrmRoot.position.set(0, 0, 0);
     this.vrmRoot.add(loaded.vrm.scene);
     this.vrmRoot.visible = this.vrmVisible;
+    this.updateShadowAnchorForFrame(this.frameCursor);
     this.invalidate();
     return loaded.info;
   }
@@ -663,6 +688,7 @@ export class SkeletonViewer {
   clearVrm(): void {
     this.vrmLoadRevision += 1;
     this.disposeVrmAvatar();
+    this.updateShadowAnchorForFrame(this.frameCursor);
     this.invalidate();
   }
 
@@ -670,6 +696,7 @@ export class SkeletonViewer {
     this.vrmVisible = visible;
     this.vrmRoot.visible = visible && this.vrm !== null;
     if (this.vrmRoot.visible) this.vrm?.springBoneManager?.reset();
+    this.updateShadowAnchorForFrame(this.frameCursor);
     this.invalidate();
   }
 
@@ -781,6 +808,7 @@ export class SkeletonViewer {
     this.orientationAxesGroup.visible = false;
     this.constraintGroup.visible = false;
     this.resetVrmPose();
+    this.updateShadowAnchor(0, 0);
     this.invalidate();
     this.emitPlaybackState(true);
   }
@@ -1077,6 +1105,10 @@ export class SkeletonViewer {
     this.vrmLoadRevision += 1;
     this.disposeVrmAvatar();
     this.disposeSkeletonMeshes();
+    this.scene.remove(this.shadowFloor, this.shadowRig);
+    this.shadowFloor.geometry.dispose();
+    this.shadowFloor.material.dispose();
+    this.shadowLight.shadow.dispose();
     this.trajectory.geometry.dispose();
     (this.trajectory.material as THREE.Material).dispose();
     [
@@ -1379,7 +1411,51 @@ export class SkeletonViewer {
     this.updateReferencePose(frameCursor);
     this.updateOrientationAxes(frameCursor);
     this.updateConstraintMarkers(frame0);
-    this.updateVrmPose(frameCursor);
+    const vrmFrame = this.updateVrmPose(frameCursor);
+    this.updateShadowAnchorForFrame(frameCursor, vrmFrame);
+  }
+
+  private updateShadowAnchorForFrame(
+    frameCursor: number,
+    updatedVrmFrame?: VrmRetargetFrame | null,
+  ): void {
+    const clip = this.clip;
+    if (!clip) {
+      this.updateShadowAnchor(0, 0);
+      return;
+    }
+    const frame0 = Math.min(Math.floor(frameCursor), clip.frameCount - 1);
+    const frame1 = Math.min(frame0 + 1, clip.frameCount - 1);
+    const alpha = frame1 === frame0 ? 0 : frameCursor - frame0;
+    this.pointAt(
+      this.currentPoint,
+      this.skeleton.rootJointIndex,
+      frame0,
+      frame1,
+      alpha,
+    );
+    let shadowAnchorX = this.currentPoint.x;
+    let shadowAnchorZ = this.currentPoint.z;
+    const vrmFrame =
+      updatedVrmFrame === undefined &&
+      this.vrmRoot.visible &&
+      this.vrmRetargetPlan
+        ? retargetMotionFrame(clip, frameCursor, this.vrmRetargetPlan)
+        : updatedVrmFrame;
+    if (vrmFrame && this.vrmRoot.visible && this.vrmRetargetPlan) {
+      const displayedHips = toVrmPosition(
+        vrmFrame.hipsPosition,
+        this.vrmRetargetPlan.metaVersion,
+      );
+      shadowAnchorX = displayedHips[0];
+      shadowAnchorZ = displayedHips[2];
+    }
+    this.updateShadowAnchor(shadowAnchorX, shadowAnchorZ);
+  }
+
+  private updateShadowAnchor(x: number, z: number): void {
+    this.shadowRig.position.set(x, 0, z);
+    this.shadowFloor.position.set(x, -0.006, z);
   }
 
   private rebuildVrmRetargetPlan(): void {
@@ -1417,13 +1493,14 @@ export class SkeletonViewer {
     vrm.springBoneManager?.reset();
   }
 
-  private updateVrmPose(frameCursor: number): void {
+  private updateVrmPose(frameCursor: number): VrmRetargetFrame | null {
     const vrm = this.vrm;
     const clip = this.clip;
     const plan = this.vrmRetargetPlan;
-    if (!vrm || !clip || !plan) return;
+    if (!vrm || !clip || !plan) return null;
     const frame = retargetMotionFrame(clip, frameCursor, plan);
     this.applyVrmRetargetFrame(vrm, frame);
+    return frame;
   }
 
   private applyVrmRetargetFrame(vrm: VRM, frame: VrmRetargetFrame): void {

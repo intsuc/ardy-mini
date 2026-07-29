@@ -146,6 +146,202 @@ test("retains the square Lyra treatment on standard shadcn surfaces", async ({
   expect(radii).toEqual(["0px", "0px", "0px", "0px", "0px", "0px"]);
 });
 
+test("keeps the shadow light and plane under off-origin motion", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  const shadowState = await page.evaluate(async () => {
+    const viewerModule = await import("/src/viewer.ts");
+    const { createVrmRetargetPlan } = await import("/src/vrm-retarget.ts");
+    const {
+      CORE27_JOINT_COUNT,
+      CORE27_SKELETON,
+      SkeletonViewer,
+    } = viewerModule;
+    const host = document.createElement("div");
+    host.style.width = "320px";
+    host.style.height = "320px";
+    const canvas = document.createElement("canvas");
+    host.append(canvas);
+    document.body.append(host);
+
+    const viewer = new SkeletonViewer(canvas);
+    try {
+      const rootX = 24;
+      const rootZ = -18;
+      const positions = new Float32Array(CORE27_JOINT_COUNT * 3);
+      for (let joint = 0; joint < CORE27_JOINT_COUNT; joint += 1) {
+        const offset = joint * 3;
+        positions[offset] = rootX;
+        positions[offset + 1] = 0.04 * joint;
+        positions[offset + 2] = rootZ;
+      }
+      viewer.setMotion(
+        {
+          skeleton: CORE27_SKELETON,
+          positions,
+          positionsShape: [1, CORE27_JOINT_COUNT, 3],
+          frameCount: 1,
+          fps: 20,
+        },
+        { playing: false, resetCamera: true },
+      );
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+
+      interface DebugObject {
+        readonly name: string;
+        readonly isMesh?: boolean;
+        readonly position: { readonly x: number; readonly z: number };
+        readonly receiveShadow?: boolean;
+        readonly geometry?: {
+          readonly type: string;
+          readonly parameters: { readonly width?: number; readonly height?: number };
+        };
+        readonly material?: {
+          readonly roughness?: number;
+          readonly metalness?: number;
+        };
+        readonly target?: { readonly name: string };
+        readonly shadow?: {
+          readonly camera: {
+            readonly left: number;
+            readonly right: number;
+            readonly top: number;
+            readonly bottom: number;
+          };
+        };
+      }
+      const internal = viewer as unknown as {
+        scene: {
+          getObjectByName(name: string): DebugObject | undefined;
+          traverse(callback: (object: DebugObject) => void): void;
+        };
+        renderer: { shadowMap: { enabled: boolean } };
+        vrm: unknown;
+        vrmRetargetPlan: unknown;
+        vrmRoot: { visible: boolean };
+      };
+      const floor = internal.scene.getObjectByName("shadow-receiving-floor");
+      const rig = internal.scene.getObjectByName("shadow-follow-rig");
+      const light = internal.scene.getObjectByName("shadow-key-light");
+      const currentAnchor = () => ({
+        floor: floor ? { x: floor.position.x, z: floor.position.z } : null,
+        rig: rig ? { x: rig.position.x, z: rig.position.z } : null,
+      });
+      const sourceAnchor = currentAnchor();
+      let scaledVrmAnchor;
+      let hiddenVrmAnchor;
+      let reshownVrmAnchor;
+      const fakeHips = {
+        position: {
+          fromArray(_position: readonly number[]): void {},
+        },
+      };
+      try {
+        internal.vrm = {
+          humanoid: {
+            getNormalizedBoneNode(name: string) {
+              return name === "hips" ? fakeHips : null;
+            },
+          },
+          update(): void {},
+        };
+        internal.vrmRetargetPlan = createVrmRetargetPlan(CORE27_SKELETON, {
+          presentBones: ["hips"],
+          sourceHipsHeight: 1,
+          targetHipsHeight: 0.5,
+          metaVersion: "1",
+        });
+        internal.vrmRoot.visible = true;
+        viewer.seek(0);
+        scaledVrmAnchor = currentAnchor();
+        viewer.setVrmVisible(false);
+        hiddenVrmAnchor = currentAnchor();
+        viewer.setVrmVisible(true);
+        reshownVrmAnchor = currentAnchor();
+      } finally {
+        internal.vrm = null;
+        internal.vrmRetargetPlan = null;
+        internal.vrmRoot.visible = false;
+      }
+      const geometryTypes: string[] = [];
+      internal.scene.traverse((object) => {
+        if (object.isMesh && object.geometry) {
+          geometryTypes.push(object.geometry.type);
+        }
+      });
+
+      return {
+        rendererShadows: internal.renderer.shadowMap.enabled,
+        floor: floor
+          ? {
+              geometry: floor.geometry?.type,
+              width: floor.geometry?.parameters.width,
+              height: floor.geometry?.parameters.height,
+              receiveShadow: floor.receiveShadow,
+              roughness: floor.material?.roughness,
+              metalness: floor.material?.metalness,
+            }
+          : null,
+        sourceAnchor,
+        scaledVrmAnchor,
+        hiddenVrmAnchor,
+        reshownVrmAnchor,
+        light: light
+          ? {
+              target: light.target?.name,
+              left: light.shadow?.camera.left,
+              right: light.shadow?.camera.right,
+              top: light.shadow?.camera.top,
+              bottom: light.shadow?.camera.bottom,
+            }
+          : null,
+        geometryTypes,
+      };
+    } finally {
+      viewer.dispose();
+      host.remove();
+    }
+  });
+
+  expect(shadowState.rendererShadows).toBe(true);
+  expect(shadowState.floor).toEqual({
+    geometry: "PlaneGeometry",
+    width: 80,
+    height: 80,
+    receiveShadow: true,
+    roughness: 1,
+    metalness: 0,
+  });
+  expect(shadowState.sourceAnchor).toEqual({
+    floor: { x: 24, z: -18 },
+    rig: { x: 24, z: -18 },
+  });
+  expect(shadowState.scaledVrmAnchor).toEqual({
+    floor: { x: 12, z: -9 },
+    rig: { x: 12, z: -9 },
+  });
+  expect(shadowState.hiddenVrmAnchor).toEqual({
+    floor: { x: 24, z: -18 },
+    rig: { x: 24, z: -18 },
+  });
+  expect(shadowState.reshownVrmAnchor).toEqual({
+    floor: { x: 12, z: -9 },
+    rig: { x: 12, z: -9 },
+  });
+  expect(shadowState.light).toEqual({
+    target: "shadow-key-light-target",
+    left: -4,
+    right: 4,
+    top: 4,
+    bottom: -4,
+  });
+  expect(shadowState.geometryTypes).not.toContain("CircleGeometry");
+});
+
 test("exposes deterministic inputs and enforces the prompt contract", async ({
   page,
 }) => {
