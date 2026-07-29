@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   canAttemptGeneration,
   canContinueGeneration,
+  cameraMoveForCode,
   canonicalizePackFiles,
   formatBytes,
   formatTime,
@@ -102,6 +103,16 @@ describe("display formatting", () => {
   it("does not autoplay generated motion when reduced motion is requested", () => {
     expect(shouldAutoplayMotion(false)).toBe(true);
     expect(shouldAutoplayMotion(true)).toBe(false);
+  });
+});
+
+describe("camera keyboard mapping", () => {
+  it("maps physical WASD keys to view-relative movement", () => {
+    expect(cameraMoveForCode("KeyW")).toEqual([1, 0]);
+    expect(cameraMoveForCode("KeyA")).toEqual([0, -1]);
+    expect(cameraMoveForCode("KeyS")).toEqual([-1, 0]);
+    expect(cameraMoveForCode("KeyD")).toEqual([0, 1]);
+    expect(cameraMoveForCode("KeyZ")).toBeNull();
   });
 });
 

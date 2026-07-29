@@ -232,7 +232,10 @@ test("keeps the shadow light and plane under off-origin motion", async ({
         renderer: { shadowMap: { enabled: boolean } };
         vrm: unknown;
         vrmRetargetPlan: unknown;
-        vrmRoot: { visible: boolean };
+        vrmRoot: {
+          visible: boolean;
+          position: { readonly x: number; readonly z: number };
+        };
       };
       const floor = internal.scene.getObjectByName("shadow-receiving-floor");
       const rig = internal.scene.getObjectByName("shadow-follow-rig");
@@ -242,7 +245,15 @@ test("keeps the shadow light and plane under off-origin motion", async ({
         rig: rig ? { x: rig.position.x, z: rig.position.z } : null,
       });
       const sourceAnchor = currentAnchor();
-      let scaledVrmAnchor;
+      const currentVrmState = () => ({
+        anchor: currentAnchor(),
+        rootOffset: {
+          x: internal.vrmRoot.position.x,
+          z: internal.vrmRoot.position.z,
+        },
+      });
+      let vrm1State;
+      let vrm0State;
       let hiddenVrmAnchor;
       let reshownVrmAnchor;
       const fakeHips = {
@@ -267,7 +278,15 @@ test("keeps the shadow light and plane under off-origin motion", async ({
         });
         internal.vrmRoot.visible = true;
         viewer.seek(0);
-        scaledVrmAnchor = currentAnchor();
+        vrm1State = currentVrmState();
+        internal.vrmRetargetPlan = createVrmRetargetPlan(CORE27_SKELETON, {
+          presentBones: ["hips"],
+          sourceHipsHeight: 1,
+          targetHipsHeight: 0.5,
+          metaVersion: "0",
+        });
+        viewer.seek(0);
+        vrm0State = currentVrmState();
         viewer.setVrmVisible(false);
         hiddenVrmAnchor = currentAnchor();
         viewer.setVrmVisible(true);
@@ -297,7 +316,8 @@ test("keeps the shadow light and plane under off-origin motion", async ({
             }
           : null,
         sourceAnchor,
-        scaledVrmAnchor,
+        vrm1State,
+        vrm0State,
         hiddenVrmAnchor,
         reshownVrmAnchor,
         light: light
@@ -330,17 +350,27 @@ test("keeps the shadow light and plane under off-origin motion", async ({
     floor: { x: 24, z: -18 },
     rig: { x: 24, z: -18 },
   });
-  expect(shadowState.scaledVrmAnchor).toEqual({
-    floor: { x: 12, z: -9 },
-    rig: { x: 12, z: -9 },
+  expect(shadowState.vrm1State).toEqual({
+    anchor: {
+      floor: { x: 24, z: -18 },
+      rig: { x: 24, z: -18 },
+    },
+    rootOffset: { x: 12, z: -9 },
+  });
+  expect(shadowState.vrm0State).toEqual({
+    anchor: {
+      floor: { x: 24, z: -18 },
+      rig: { x: 24, z: -18 },
+    },
+    rootOffset: { x: 12, z: -9 },
   });
   expect(shadowState.hiddenVrmAnchor).toEqual({
     floor: { x: 24, z: -18 },
     rig: { x: 24, z: -18 },
   });
   expect(shadowState.reshownVrmAnchor).toEqual({
-    floor: { x: 12, z: -9 },
-    rig: { x: 12, z: -9 },
+    floor: { x: 24, z: -18 },
+    rig: { x: 24, z: -18 },
   });
   expect(shadowState.light).toEqual({
     target: "shadow-key-light-target",
@@ -350,6 +380,119 @@ test("keeps the shadow light and plane under off-origin motion", async ({
     bottom: -4,
   });
   expect(shadowState.geometryTypes).not.toContain("CircleGeometry");
+});
+
+test("follows the root while preserving manual camera composition", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  const cameraState = await page.evaluate(async () => {
+    const {
+      CORE27_JOINT_COUNT,
+      CORE27_SKELETON,
+      SkeletonViewer,
+    } = await import("/src/viewer.ts");
+    const host = document.createElement("div");
+    host.style.width = "320px";
+    host.style.height = "320px";
+    const canvas = document.createElement("canvas");
+    host.append(canvas);
+    document.body.append(host);
+    const viewer = new SkeletonViewer(canvas);
+    try {
+      const positions = new Float32Array(
+        2 * CORE27_JOINT_COUNT * 3,
+      );
+      for (let frame = 0; frame < 2; frame += 1) {
+        for (let joint = 0; joint < CORE27_JOINT_COUNT; joint += 1) {
+          const offset = (frame * CORE27_JOINT_COUNT + joint) * 3;
+          positions[offset] = frame * 6;
+          positions[offset + 1] = joint * 0.04;
+          positions[offset + 2] = frame * -4;
+        }
+      }
+      viewer.setMotion(
+        {
+          skeleton: CORE27_SKELETON,
+          positions,
+          positionsShape: [2, CORE27_JOINT_COUNT, 3],
+          frameCount: 2,
+          fps: 20,
+        },
+        { playing: false, resetCamera: true },
+      );
+      const internal = viewer as unknown as {
+        camera: { position: { x: number; y: number; z: number } };
+        controls: { target: { x: number; y: number; z: number } };
+      };
+      const snapshot = () => ({
+        camera: [
+          internal.camera.position.x,
+          internal.camera.position.y,
+          internal.camera.position.z,
+        ],
+        target: [
+          internal.controls.target.x,
+          internal.controls.target.y,
+          internal.controls.target.z,
+        ],
+      });
+      const initial = snapshot();
+      viewer.seek(1);
+      const followed = snapshot();
+      viewer.moveCamera(1, 0);
+      const moved = snapshot();
+      viewer.resetCamera();
+      const reset = snapshot();
+      viewer.setReducedMotion(true);
+      viewer.setPlaying(true);
+      return {
+        initial,
+        followed,
+        moved,
+        reset,
+        playing: viewer.getPlaybackState().playing,
+      };
+    } finally {
+      viewer.dispose();
+      host.remove();
+    }
+  });
+
+  const delta = (
+    after: number[],
+    before: number[],
+  ): number[] => after.map((value, index) => value - before[index]);
+  const relative = (state: {
+    camera: number[];
+    target: number[];
+  }): number[] => delta(state.camera, state.target);
+  expect(delta(cameraState.followed.camera, cameraState.initial.camera)).toEqual(
+    [6, 0, -4],
+  );
+  expect(delta(cameraState.followed.target, cameraState.initial.target)).toEqual(
+    [6, 0, -4],
+  );
+  relative(cameraState.followed).forEach((value, index) => {
+    expect(value).toBeCloseTo(relative(cameraState.initial)[index]);
+  });
+  const manualCameraDelta = delta(
+    cameraState.moved.camera,
+    cameraState.followed.camera,
+  );
+  const manualTargetDelta = delta(
+    cameraState.moved.target,
+    cameraState.followed.target,
+  );
+  expect(manualCameraDelta[1]).toBeCloseTo(0);
+  expect(Math.hypot(manualCameraDelta[0], manualCameraDelta[2])).toBeGreaterThan(
+    0,
+  );
+  expect(manualTargetDelta).toEqual(manualCameraDelta);
+  expect(cameraState.reset.target[0]).toBeCloseTo(6);
+  expect(cameraState.reset.target[2]).toBeCloseTo(-4);
+  expect(cameraState.playing).toBe(false);
 });
 
 test("exposes deterministic inputs and enforces the prompt contract", async ({
@@ -436,7 +579,9 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
     await expect(page.getByLabel(label, { exact: true })).toHaveCount(1);
   }
 
+  await expect(page.locator("#model-state")).toHaveText("Not loaded");
   const canvas = page.locator("#motion-canvas");
+  await expect(canvas).toHaveAttribute("aria-keyshortcuts", /W A S D/);
   await canvas.focus();
   await expect(canvas).toBeFocused();
   await expect
@@ -444,6 +589,32 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
       canvas.evaluate((element) => getComputedStyle(element).outlineStyle),
     )
     .not.toBe("none");
+  const wasdHandled = await canvas.evaluate((element) =>
+    ["KeyW", "KeyA", "KeyS", "KeyD"].map((code, index) => {
+      const event = new KeyboardEvent("keydown", {
+        key: code.at(-1)?.toLowerCase(),
+        code,
+        repeat: index === 0,
+        bubbles: true,
+        cancelable: true,
+      });
+      element.dispatchEvent(event);
+      return event.defaultPrevented;
+    }),
+  );
+  expect(wasdHandled).toEqual([true, true, true, true]);
+  const promptHandled = await page.locator("#prompt").evaluate((element) => {
+    const event = new KeyboardEvent("keydown", {
+      key: "w",
+      code: "KeyW",
+      bubbles: true,
+      cancelable: true,
+    });
+    element.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  expect(promptHandled).toBe(false);
+  await canvas.focus();
   await page.keyboard.press("Shift+ArrowLeft");
   await page.keyboard.press("=");
   await page.keyboard.press("Home");

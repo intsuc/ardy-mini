@@ -297,6 +297,9 @@ export class SkeletonViewer {
   private readonly groundPointer = new THREE.Vector2();
   private readonly groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   private readonly groundIntersection = new THREE.Vector3();
+  private readonly cameraForward = new THREE.Vector3();
+  private readonly cameraRight = new THREE.Vector3();
+  private readonly cameraOffset = new THREE.Vector3();
 
   private skeleton: SkeletonMetadata = CORE27_SKELETON;
   private contactChannelByJoint = new Int32Array();
@@ -322,6 +325,9 @@ export class SkeletonViewer {
   private loop = true;
   private speed = 1;
   private reducedMotion = false;
+  private cameraFollowX = 0;
+  private cameraFollowZ = 0;
+  private hasCameraFollowAnchor = false;
   private lastAnimationTime: number | null = null;
   private lastReportedFrame = -1;
   private animationFrame = 0;
@@ -698,6 +704,7 @@ export class SkeletonViewer {
     this.lastReportedFrame = -1;
     this.buildTrajectory();
     if (!preserveContinuity) {
+      this.hasCameraFollowAnchor = false;
       this.vrm?.humanoid.resetNormalizedPose();
     }
     this.updatePose(nextFrame);
@@ -721,6 +728,8 @@ export class SkeletonViewer {
     this.orientationAxesGroup.visible = false;
     this.constraintGroup.visible = false;
     this.resetVrmPose();
+    this.vrmRoot.position.set(0, 0, 0);
+    this.hasCameraFollowAnchor = false;
     this.updateShadowAnchor(0, 0);
     this.invalidate();
     this.emitPlaybackState(true);
@@ -728,10 +737,15 @@ export class SkeletonViewer {
 
   setPlaying(playing: boolean): void {
     if (!this.clip || this.clip.frameCount < 2) return;
-    if (playing && this.frameCursor >= this.clip.frameCount - 1 && !this.loop) {
+    const nextPlaying = playing && !this.reducedMotion;
+    if (
+      nextPlaying &&
+      this.frameCursor >= this.clip.frameCount - 1 &&
+      !this.loop
+    ) {
       this.frameCursor = 0;
     }
-    this.playing = playing;
+    this.playing = nextPlaying;
     this.lastAnimationTime = null;
     this.invalidate();
     this.emitPlaybackState(true);
@@ -778,6 +792,38 @@ export class SkeletonViewer {
     } else {
       this.controls.dollyOut(scale);
     }
+    this.invalidate();
+  }
+
+  moveCamera(forwardSteps: number, rightSteps: number): void {
+    if (!Number.isFinite(forwardSteps) || !Number.isFinite(rightSteps)) {
+      throw new RangeError("Camera movement steps must be finite.");
+    }
+    if (forwardSteps === 0 && rightSteps === 0) return;
+    this.camera.getWorldDirection(this.cameraForward);
+    this.cameraForward.y = 0;
+    if (this.cameraForward.lengthSq() < 1e-8) {
+      this.cameraForward.set(0, 0, -1);
+    } else {
+      this.cameraForward.normalize();
+    }
+    this.cameraRight
+      .crossVectors(this.cameraForward, this.upAxis)
+      .normalize();
+    const step = THREE.MathUtils.clamp(
+      this.controls.getDistance() * 0.05,
+      0.08,
+      0.4,
+    );
+    this.cameraOffset
+      .copy(this.cameraForward)
+      .multiplyScalar(forwardSteps)
+      .addScaledVector(this.cameraRight, rightSteps);
+    if (this.cameraOffset.lengthSq() === 0) return;
+    this.cameraOffset.normalize().multiplyScalar(step);
+    this.camera.position.add(this.cameraOffset);
+    this.controls.target.add(this.cameraOffset);
+    this.controls.update();
     this.invalidate();
   }
 
@@ -958,6 +1004,7 @@ export class SkeletonViewer {
     if (!this.clip) {
       this.camera.position.set(3.1, 2.15, 3.4);
       this.controls.target.set(0, 0.85, 0);
+      this.hasCameraFollowAnchor = false;
       this.controls.update();
       this.invalidate();
       return;
@@ -965,28 +1012,40 @@ export class SkeletonViewer {
 
     const box = new THREE.Box3();
     const point = new THREE.Vector3();
-    const componentsPerFrame = this.skeleton.jointNames.length * 3;
-    for (
-      let frame = 0;
-      frame < this.clip.frameCount;
-      frame += Math.max(1, Math.floor(this.clip.frameCount / 80))
-    ) {
-      const frameOffset = frame * componentsPerFrame;
-      for (let joint = 0; joint < this.skeleton.jointNames.length; joint += 1) {
-        point.fromArray(this.clip.positions, frameOffset + joint * 3);
-        box.expandByPoint(point);
-      }
+    const frame0 = Math.min(
+      Math.floor(this.frameCursor),
+      this.clip.frameCount - 1,
+    );
+    const frame1 = Math.min(frame0 + 1, this.clip.frameCount - 1);
+    const alpha =
+      frame1 === frame0 ? 0 : this.frameCursor - frame0;
+    this.pointAt(
+      point,
+      this.skeleton.rootJointIndex,
+      frame0,
+      frame1,
+      alpha,
+    );
+    const rootX = point.x;
+    const rootZ = point.z;
+    for (let joint = 0; joint < this.skeleton.jointNames.length; joint += 1) {
+      this.pointAt(point, joint, frame0, frame1, alpha);
+      box.expandByPoint(point);
     }
     if (box.isEmpty()) return;
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const distance = Math.max(2.5, Math.max(size.x, size.y, size.z) * 1.85);
-    this.controls.target.set(center.x, Math.max(0.7, center.y), center.z);
+    const targetY = Math.max(0.7, center.y);
+    this.controls.target.set(rootX, targetY, rootZ);
     this.camera.position.set(
-      center.x + distance * 0.78,
-      center.y + distance * 0.48,
-      center.z + distance,
+      rootX + distance * 0.78,
+      targetY + distance * 0.48,
+      rootZ + distance,
     );
+    this.cameraFollowX = rootX;
+    this.cameraFollowZ = rootZ;
+    this.hasCameraFollowAnchor = true;
     this.camera.near = Math.max(0.01, distance / 200);
     this.camera.far = Math.max(100, distance * 20);
     this.camera.updateProjectionMatrix();
@@ -1244,28 +1303,57 @@ export class SkeletonViewer {
       frame1,
       alpha,
     );
-    let shadowAnchorX = this.currentPoint.x;
-    let shadowAnchorZ = this.currentPoint.z;
+    const rootX = this.currentPoint.x;
+    const rootZ = this.currentPoint.z;
     const vrmFrame =
       updatedVrmFrame === undefined &&
-      this.vrmRoot.visible &&
+      this.vrm &&
       this.vrmRetargetPlan
         ? retargetMotionFrame(clip, frameCursor, this.vrmRetargetPlan)
         : updatedVrmFrame;
-    if (vrmFrame && this.vrmRoot.visible && this.vrmRetargetPlan) {
+    if (vrmFrame && this.vrmRetargetPlan) {
+      this.pointAt(
+        this.parentPoint,
+        this.vrmRetargetPlan.hipsSourceJointIndex,
+        frame0,
+        frame1,
+        alpha,
+      );
       const displayedHips = toVrmPosition(
         vrmFrame.hipsPosition,
         this.vrmRetargetPlan.metaVersion,
       );
-      shadowAnchorX = displayedHips[0];
-      shadowAnchorZ = displayedHips[2];
+      this.vrmRoot.position.set(
+        this.parentPoint.x - displayedHips[0],
+        0,
+        this.parentPoint.z - displayedHips[2],
+      );
     }
-    this.updateShadowAnchor(shadowAnchorX, shadowAnchorZ);
+    this.updateShadowAnchor(rootX, rootZ);
+    this.followCamera(rootX, rootZ);
   }
 
   private updateShadowAnchor(x: number, z: number): void {
     this.shadowRig.position.set(x, 0, z);
     this.shadowFloor.position.set(x, -0.006, z);
+  }
+
+  private followCamera(x: number, z: number): void {
+    if (!this.hasCameraFollowAnchor) {
+      this.cameraFollowX = x;
+      this.cameraFollowZ = z;
+      this.hasCameraFollowAnchor = true;
+      return;
+    }
+    const deltaX = x - this.cameraFollowX;
+    const deltaZ = z - this.cameraFollowZ;
+    this.cameraFollowX = x;
+    this.cameraFollowZ = z;
+    if (deltaX === 0 && deltaZ === 0) return;
+    this.camera.position.x += deltaX;
+    this.camera.position.z += deltaZ;
+    this.controls.target.x += deltaX;
+    this.controls.target.z += deltaZ;
   }
 
   private rebuildVrmRetargetPlan(): void {

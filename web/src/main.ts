@@ -74,6 +74,16 @@ interface FormValidation {
   seedError?: string;
 }
 
+export function cameraMoveForCode(
+  code: string,
+): readonly [forwardSteps: number, rightSteps: number] | null {
+  if (code === "KeyW") return [1, 0];
+  if (code === "KeyA") return [0, -1];
+  if (code === "KeyS") return [-1, 0];
+  if (code === "KeyD") return [0, 1];
+  return null;
+}
+
 interface DirectoryPickerWindow {
   showDirectoryPicker?: (options?: { mode?: "read" }) => Promise<FileSystemDirectoryHandle>;
 }
@@ -2278,7 +2288,21 @@ export function bootstrap(): () => void {
     "keydown",
     (event) => {
       const target = event.target as HTMLElement | null;
-      if (event.isComposing || event.repeat) return;
+      if (event.isComposing) return;
+      const cameraMove =
+        target === canvas &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey
+          ? cameraMoveForCode(event.code)
+          : null;
+      if (cameraMove) {
+        event.preventDefault();
+        viewer?.moveCamera(cameraMove[0], cameraMove[1]);
+        return;
+      }
+      if (event.repeat) return;
       if (
         (event.metaKey || event.ctrlKey) &&
         !event.altKey &&

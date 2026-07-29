@@ -248,9 +248,11 @@ The header reports the backend that actually loaded:
   slower and is not a real-time guarantee for this model size.
 
 The preview supports drag/swipe orbit, wheel/pinch zoom, and keyboard
-operation. With the preview focused, Space toggles playback, Left/Right seeks,
-Shift+Arrow orbits, Plus/Minus zooms, and Home resets the camera. Generate uses
-Command+Enter on Apple platforms and Control+Enter elsewhere.
+operation. The camera follows the generated root position while preserving the
+chosen orbit and distance. With the preview focused, W/A/S/D translates the
+camera, Space toggles playback, Left/Right seeks, Shift+Arrow orbits,
+Plus/Minus zooms, and Home resets the camera around the current pose. Generate
+uses Command+Enter on Apple platforms and Control+Enter elsewhere.
 
 `prefers-reduced-motion: reduce` disables automatic motion playback and
 looping; a new result opens paused at frame zero and remains manually

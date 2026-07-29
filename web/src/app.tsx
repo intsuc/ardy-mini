@@ -693,9 +693,9 @@ function ViewportPanel() {
       <div className="viewport" id="viewport">
         <canvas
           id="motion-canvas"
-          aria-label="Interactive 3D skeleton preview"
+          aria-label="Interactive 3D motion preview"
           aria-describedby="viewer-help"
-          aria-keyshortcuts="Space ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight Shift+ArrowUp Shift+ArrowDown Home"
+          aria-keyshortcuts="W A S D Space ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight Shift+ArrowUp Shift+ArrowDown Home"
           tabIndex={0}
         >
           Interactive Core27 skeleton preview.
@@ -703,8 +703,8 @@ function ViewportPanel() {
         <p className="sr-only" id="viewer-help">
           Drag or swipe to orbit and scroll or pinch to zoom. With the
           preview focused, press Space to play or pause, Left and Right
-          Arrow to seek, Shift plus Arrow keys to orbit, Plus or Minus to
-          zoom, and Home to reset the camera.
+          Arrow to seek, W A S D to move the camera, Shift plus Arrow keys
+          to orbit, Plus or Minus to zoom, and Home to reset the camera.
         </p>
 
         <Empty

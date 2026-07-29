@@ -140,6 +140,7 @@ describe("streaming clip continuity", () => {
       frameCursor: 57.25,
       playing: true,
       reducedMotion: false,
+      hasCameraFollowAnchor: true,
       lastAnimationTime: 1_000,
       lastReportedFrame: 57,
       vrm: {
@@ -166,6 +167,10 @@ describe("streaming clip continuity", () => {
     expect(resetNormalizedPose).not.toHaveBeenCalled();
     expect(resetSpringBones).not.toHaveBeenCalled();
     expect(updatePose).toHaveBeenCalledWith(57.25);
+    expect(
+      (viewer as unknown as { hasCameraFollowAnchor: boolean })
+        .hasCameraFollowAnchor,
+    ).toBe(true);
     expect(
       (viewer as unknown as { lastAnimationTime: number | null })
         .lastAnimationTime,
