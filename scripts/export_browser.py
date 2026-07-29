@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 # SPDX-License-Identifier: Apache-2.0
-"""Export the four-graph MiniLM Core40 model pack used by the browser app."""
+"""Export the compressed MiniLM Core40 model pack used by the browser app."""
 
 from __future__ import annotations
 
@@ -13,9 +13,8 @@ from ardy.browser import BrowserExportConfig, export_browser_model_pack
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Export the MiniLM condition encoder, unconstrained and "
-            "constraint-aware ARDY denoisers, and structured motion decoder "
-            "for ONNX Runtime Web."
+            "Export the MiniLM condition encoder, text-conditioned ARDY "
+            "denoiser, and structured motion decoder for ONNX Runtime Web."
         )
     )
     parser.add_argument(
@@ -31,10 +30,10 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing the separately obtained ARDY-Core-RP-20FPS-Horizon40 checkpoint.",
     )
     parser.add_argument(
-        "--output-dir",
+        "--output",
         type=Path,
-        default=Path("artifacts/browser/core40"),
-        help=("Destination for the roughly 1.4 GiB four-graph pack (kept under ignored artifacts/ by default)."),
+        default=Path("artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz"),
+        help="Destination .tar.gz model-pack file (kept under ignored artifacts/ by default).",
     )
     parser.add_argument(
         "--model",
@@ -61,16 +60,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-verify",
         action="store_true",
-        help="Skip PyTorch-vs-ONNX Runtime CPU comparison for the four graphs (ONNX checker still runs).",
+        help="Skip PyTorch-vs-ONNX Runtime CPU comparison for the three graphs (ONNX checker still runs).",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    manifest_path = export_browser_model_pack(
+    archive_path = export_browser_model_pack(
         BrowserExportConfig(
-            output_dir=args.output_dir,
+            output_path=args.output,
             minilm_artifact=args.minilm_artifact,
             checkpoints_dir=args.checkpoints_dir,
             model=args.model,
@@ -80,7 +79,7 @@ def main() -> None:
             verify=not args.skip_verify,
         )
     )
-    print(f"Browser model pack exported: {manifest_path}")
+    print(f"Browser model pack exported: {archive_path}")
 
 
 if __name__ == "__main__":

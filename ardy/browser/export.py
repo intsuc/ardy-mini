@@ -4,14 +4,17 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import math
+import os
 import shutil
+import tarfile
+import tempfile
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,24 +29,21 @@ from ardy.model.minilm_encoder import (
 from ardy.model.registry import resolve_model_name
 
 from .wrappers import (
-    BrowserConstraintCFGDenoiser,
     BrowserMiniLMEncoder,
     BrowserMotionDecoder,
     BrowserTextCFGDenoiser,
 )
 
 BROWSER_PACK_FORMAT = "ardy-browser-model-pack"
-BROWSER_PACK_SCHEMA_VERSION = 1
+BROWSER_PACK_SCHEMA_VERSION = 2
 DEFAULT_MODEL_ID = "ardy-minilm-core40-browser-v1"
 DEFAULT_MAX_TOKENS = 20
-DEFAULT_CONSTRAINT_MAX_TOKENS = 50
 DEFAULT_MAX_PROMPT_TOKENS = 128
 DEFAULT_MAX_OUTPUT_FRAMES = 200
 _ONNX_EXPORT_LOCK = threading.Lock()
 _NUMERIC_ERROR_LIMITS = {
     "text_encoder": {"text_conditions": 1e-3},
     "denoiser": {"pred_x0": 1e-3},
-    "constraint_denoiser": {"pred_x0": 1e-3},
     "decoder": {
         "normalized_motion": 2e-3,
         "posed_joints": 1e-3,
@@ -84,13 +84,12 @@ def _onnx_export_mode():
 class BrowserExportConfig:
     """Inputs and fixed dimensions for one browser model-pack export."""
 
-    output_dir: Path
+    output_path: Path
     minilm_artifact: Path
     checkpoints_dir: Path | None = None
     model: str = "core"
     model_id: str = DEFAULT_MODEL_ID
     max_tokens: int = DEFAULT_MAX_TOKENS
-    constraint_max_tokens: int = DEFAULT_CONSTRAINT_MAX_TOKENS
     max_prompt_tokens: int = DEFAULT_MAX_PROMPT_TOKENS
     max_output_frames: int = DEFAULT_MAX_OUTPUT_FRAMES
     opset: int = 17
@@ -139,14 +138,130 @@ def _validate_config(config: BrowserExportConfig) -> None:
         raise ValueError("Browser export requires ONNX opset 17 or newer.")
     if config.max_tokens <= 0:
         raise ValueError("max_tokens must be positive.")
-    if config.constraint_max_tokens <= 0:
-        raise ValueError("constraint_max_tokens must be positive.")
     if config.max_prompt_tokens <= 0:
         raise ValueError("max_prompt_tokens must be positive.")
     if config.max_output_frames <= 0:
         raise ValueError("max_output_frames must be positive.")
     if not config.minilm_artifact.is_dir():
         raise FileNotFoundError(f"MiniLM artifact directory not found: {config.minilm_artifact}")
+    if config.output_path.exists() and config.output_path.is_dir():
+        raise IsADirectoryError(f"Browser model-pack output must be a .tar.gz file: {config.output_path}")
+    if not config.output_path.name.endswith(".tar.gz"):
+        raise ValueError(f"Browser model-pack output must end in .tar.gz: {config.output_path}")
+
+
+def _specialize_denoiser_position_tables(
+    denoiser: torch.nn.Module,
+    *,
+    num_timesteps: int,
+    max_motion_tokens: int,
+) -> None:
+    """Trim non-learned lookup tables to the browser runtime's reachable indices."""
+    if num_timesteps <= 0:
+        raise ValueError("num_timesteps must be positive.")
+    if max_motion_tokens <= 0:
+        raise ValueError("max_motion_tokens must be positive.")
+
+    for block_name in ("root_model", "body_model"):
+        block = getattr(denoiser, block_name)
+        if block.positional_encoding_mode != "learned_prefix_zero_at_first_generation":
+            raise ValueError(
+                "Browser export requires learned_prefix_zero_at_first_generation "
+                f"positional encoding, got {block.positional_encoding_mode!r} for {block_name}."
+            )
+
+        timestep_table = block.sequence_pos_encoder.pe
+        if block.embed_timestep.sequence_pos_encoder is not block.sequence_pos_encoder:
+            raise ValueError(f"Timestep positional encoder is not shared for {block_name}.")
+        if timestep_table.ndim != 3 or timestep_table.shape[0] != 1:
+            raise ValueError(f"Unexpected timestep positional table shape for {block_name}: {timestep_table.shape}")
+        if timestep_table.shape[1] < num_timesteps:
+            raise ValueError(
+                f"Timestep positional table for {block_name} has only {timestep_table.shape[1]} rows; "
+                f"{num_timesteps} are required."
+            )
+        # TimestepEmbedder holds the same PositionalEncoding module, so replacing
+        # its non-persistent buffer specializes both references.
+        block.sequence_pos_encoder.pe = timestep_table[:, :num_timesteps].clone()
+
+        motion_encoder = block.motion_token_embedding
+        motion_table = motion_encoder.pe
+        if motion_table.ndim != 2:
+            raise ValueError(f"Unexpected motion positional table shape for {block_name}: {motion_table.shape}")
+        if motion_encoder.max_len < max_motion_tokens:
+            raise ValueError(
+                f"Motion positional table for {block_name} supports only "
+                f"|index| < {motion_encoder.max_len}; |index| < {max_motion_tokens} is required."
+            )
+
+        # PositionalEncodingNegativeIndex stores [0..N-1, -(N-1)..-1].
+        # Preserve the exact original values while retaining every index the
+        # fixed browser window can reach: -history_tokens through max_tokens-1.
+        positive = motion_table[:max_motion_tokens]
+        negative = motion_table[-(max_motion_tokens - 1) :] if max_motion_tokens > 1 else motion_table[:0]
+        motion_encoder.pe = torch.cat((positive, negative), dim=0).clone()
+        motion_encoder.max_len = max_motion_tokens
+
+
+def _write_deterministic_tar_gz(
+    source_dir: Path,
+    member_paths: list[Path],
+    output_path: Path,
+) -> None:
+    """Write an atomic, reproducible POSIX ustar archive."""
+    archive_names = {path.relative_to(source_dir).as_posix() for path in member_paths}
+    if "manifest.json" not in archive_names:
+        raise ValueError("Browser model-pack archive requires manifest.json.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output_path.name}.",
+        suffix=".tmp",
+        dir=output_path.parent,
+    )
+    os.close(file_descriptor)
+    temporary_path = Path(temporary_name)
+
+    try:
+        with (
+            temporary_path.open("wb") as raw_output,
+            gzip.GzipFile(
+                filename="",
+                mode="wb",
+                compresslevel=9,
+                fileobj=raw_output,
+                mtime=0,
+            ) as gzip_output,
+            tarfile.open(
+                fileobj=gzip_output,
+                mode="w",
+                format=tarfile.USTAR_FORMAT,
+            ) as archive,
+        ):
+            for path in sorted(
+                member_paths,
+                key=lambda item: (
+                    item.relative_to(source_dir).as_posix() != "manifest.json",
+                    item.relative_to(source_dir).as_posix(),
+                ),
+            ):
+                if not path.is_file():
+                    raise FileNotFoundError(f"Browser model-pack payload is not a regular file: {path}")
+                archive_name = path.relative_to(source_dir).as_posix()
+                info = tarfile.TarInfo(archive_name)
+                info.size = path.stat().st_size
+                info.mode = 0o644
+                info.mtime = 0
+                info.uid = 0
+                info.gid = 0
+                info.uname = "root"
+                info.gname = "root"
+                with path.open("rb") as input_file:
+                    archive.addfile(info, input_file)
+        temporary_path.replace(output_path)
+        output_path.chmod(0o644)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _export_graph(
@@ -266,109 +381,6 @@ def _make_denoiser_dummy(
     )
 
 
-def _make_constraint_denoiser_dummy(
-    model,
-    constraint_max_tokens: int,
-    text_condition_dim: int,
-    device: torch.device,
-) -> tuple[torch.Tensor, ...]:
-    """Build a full history/generation/future separated-CFG export example."""
-    nfpt = int(model.num_frames_per_token)
-    max_frames = constraint_max_tokens * nfpt
-    generation_frames = int(model.gen_horizon_len)
-    generation_tokens = generation_frames // nfpt
-    history_tokens = generation_tokens
-    history_frames = history_tokens * nfpt
-    future_tokens = constraint_max_tokens - history_tokens - generation_tokens
-    future_frames = future_tokens * nfpt
-
-    history_mask = torch.zeros(1, max_frames, device=device)
-    history_mask[:, :history_frames] = 1
-    generation_mask = torch.zeros(1, max_frames, device=device)
-    generation_mask[:, history_frames : history_frames + generation_frames] = 1
-    future_mask = torch.zeros(1, max_frames, device=device)
-    future_mask[:, history_frames + generation_frames :] = 1
-
-    history_token_mask = torch.zeros(1, constraint_max_tokens, device=device)
-    history_token_mask[:, :history_tokens] = 1
-    generation_token_mask = torch.zeros(1, constraint_max_tokens, device=device)
-    generation_token_mask[
-        :,
-        history_tokens : history_tokens + generation_tokens,
-    ] = 1
-    future_token_mask = torch.zeros(1, constraint_max_tokens, device=device)
-    future_token_mask[:, -1] = 1
-
-    generator = torch.Generator(device=device)
-    generator.manual_seed(20260730)
-    motion_mask = torch.zeros(
-        1,
-        max_frames,
-        model.motion_rep.motion_rep_dim,
-        device=device,
-    )
-    # Exercise both generation-horizon and future constraints in numeric
-    # validation.  The mask is sparse like the timeline constraints used by
-    # the interactive demo.
-    motion_mask[
-        :,
-        history_frames + nfpt,
-        model.motion_rep.slice_dict["root_pos"],
-    ] = 1
-    motion_mask[
-        :,
-        max_frames - nfpt,
-        model.motion_rep.slice_dict["global_rot_data"],
-    ] = 1
-    observed_motion = (
-        torch.randn(
-            1,
-            max_frames,
-            model.motion_rep.motion_rep_dim,
-            generator=generator,
-            device=device,
-        )
-        * motion_mask
-    )
-
-    return (
-        torch.tensor([2.0], dtype=torch.float32, device=device),
-        torch.tensor([2.0], dtype=torch.float32, device=device),
-        torch.randn(
-            1,
-            constraint_max_tokens,
-            model.denoiser.nframe_root_dim + model.denoiser.latent_embedding_dim,
-            generator=generator,
-            device=device,
-        ),
-        torch.tensor([history_frames], dtype=torch.int64, device=device),
-        torch.tensor([generation_frames], dtype=torch.int64, device=device),
-        torch.tensor([future_frames], dtype=torch.int64, device=device),
-        history_mask,
-        generation_mask,
-        future_mask,
-        history_token_mask,
-        generation_token_mask,
-        future_token_mask,
-        torch.randn(
-            1,
-            1,
-            text_condition_dim,
-            generator=generator,
-            device=device,
-        ),
-        torch.ones(1, 1, dtype=torch.float32, device=device),
-        torch.tensor(
-            [model.diffusion.num_base_steps - 1],
-            dtype=torch.int64,
-            device=device,
-        ),
-        torch.zeros(1, dtype=torch.float32, device=device),
-        motion_mask,
-        observed_motion,
-    )
-
-
 def _make_decoder_dummy(
     model,
     max_tokens: int,
@@ -484,26 +496,6 @@ def _verify_numeric(
             "timestep",
             "first_heading_angle",
         ),
-        "constraint_denoiser": (
-            "text_cfg_weight",
-            "constraint_cfg_weight",
-            "x",
-            "history_len",
-            "generation_len",
-            "future_len",
-            "history_mask",
-            "generation_mask",
-            "future_mask",
-            "history_token_mask",
-            "generation_token_mask",
-            "future_token_mask",
-            "text_conditions",
-            "text_condition_mask",
-            "timestep",
-            "first_heading_angle",
-            "motion_mask",
-            "observed_motion",
-        ),
         "decoder": (
             "hybrid_tokens",
             "motion_pad_mask",
@@ -513,7 +505,6 @@ def _verify_numeric(
     output_names = {
         "text_encoder": ("text_conditions",),
         "denoiser": ("pred_x0",),
-        "constraint_denoiser": ("pred_x0",),
         "decoder": (
             "normalized_motion",
             "posed_joints",
@@ -534,7 +525,6 @@ def _verify_numeric(
     for graph_name in (
         "text_encoder",
         "denoiser",
-        "constraint_denoiser",
         "decoder",
     ):
         module = modules[graph_name]
@@ -613,72 +603,6 @@ def _graph_contracts() -> dict[str, Any]:
             },
             "outputs": {"predX0": "pred_x0"},
         },
-        "constraint_denoiser": {
-            "model": "denoiser_constraints.onnx",
-            "inputs": {
-                "textCfgWeight": "text_cfg_weight",
-                "constraintCfgWeight": "constraint_cfg_weight",
-                "x": "x",
-                "historyLength": "history_len",
-                "generationLength": "generation_len",
-                "futureLength": "future_len",
-                "historyMask": "history_mask",
-                "generationMask": "generation_mask",
-                "futureMask": "future_mask",
-                "historyTokenMask": "history_token_mask",
-                "generationTokenMask": "generation_token_mask",
-                "futureTokenMask": "future_token_mask",
-                "textConditions": "text_conditions",
-                "textConditionMask": "text_condition_mask",
-                "timestep": "timestep",
-                "firstHeadingAngle": "first_heading_angle",
-                "motionMask": "motion_mask",
-                "observedMotion": "observed_motion",
-            },
-            "outputs": {"predX0": "pred_x0"},
-            "io": {
-                "x": {
-                    "dtype": "float32",
-                    "shape": [1, "constraint_max_tokens", "hybrid_dim"],
-                },
-                "history_mask": {
-                    "dtype": "float32",
-                    "shape": [1, "constraint_max_frames"],
-                },
-                "generation_mask": {
-                    "dtype": "float32",
-                    "shape": [1, "constraint_max_frames"],
-                },
-                "future_mask": {
-                    "dtype": "float32",
-                    "shape": [1, "constraint_max_frames"],
-                },
-                "history_token_mask": {
-                    "dtype": "float32",
-                    "shape": [1, "constraint_max_tokens"],
-                },
-                "generation_token_mask": {
-                    "dtype": "float32",
-                    "shape": [1, "constraint_max_tokens"],
-                },
-                "future_token_mask": {
-                    "dtype": "float32",
-                    "shape": [1, "constraint_max_tokens"],
-                },
-                "motion_mask": {
-                    "dtype": "float32",
-                    "shape": [1, "constraint_max_frames", "motion_dim"],
-                },
-                "observed_motion": {
-                    "dtype": "float32",
-                    "shape": [1, "constraint_max_frames", "motion_dim"],
-                },
-                "pred_x0": {
-                    "dtype": "float32",
-                    "shape": [1, "constraint_max_tokens", "hybrid_dim"],
-                },
-            },
-        },
         "decoder": {
             "model": "decoder.onnx",
             "inputs": {
@@ -713,7 +637,6 @@ def _build_manifest(
     autoencoder = model.autoencoder
     nfpt = int(model.num_frames_per_token)
     max_frames = config.max_tokens * nfpt
-    constraint_max_frames = config.constraint_max_tokens * nfpt
     generation_frames = int(model.gen_horizon_len)
     generation_tokens = generation_frames // nfpt
     history_frames = max_frames - generation_frames
@@ -730,7 +653,6 @@ def _build_manifest(
     manifest: dict[str, Any] = {
         "format": BROWSER_PACK_FORMAT,
         "schema_version": BROWSER_PACK_SCHEMA_VERSION,
-        "created_utc": datetime.now(timezone.utc).isoformat(),
         "model": {
             "id": config.model_id,
             "variant": "MiniLM Core40 interactive",
@@ -749,8 +671,6 @@ def _build_manifest(
             "num_frames_per_token": nfpt,
             "max_tokens": config.max_tokens,
             "max_frames": max_frames,
-            "constraint_max_tokens": config.constraint_max_tokens,
-            "constraint_max_frames": constraint_max_frames,
             "generation_tokens": generation_tokens,
             "generation_frames": generation_frames,
             "history_tokens": history_tokens,
@@ -768,8 +688,6 @@ def _build_manifest(
             "min_frames": generation_frames,
             "max_frames": config.max_output_frames,
             "default_cfg_weight": 2.0,
-            "default_text_cfg_weight": 2.0,
-            "default_constraint_cfg_weight": 2.0,
             "denoising_steps": int(diffusion.num_base_steps),
             "window_policy": (
                 "Generate 40 frames per step. For continuation, retain and recenter the preceding 40 frames."
@@ -813,9 +731,6 @@ def _build_manifest(
         "motion_layout": {name: [int(value.start), int(value.stop)] for name, value in motion_rep.slice_dict.items()},
         "capabilities": {
             "text_conditioning": True,
-            "kinematic_constraints": True,
-            "future_constraints": True,
-            "separated_classifier_free_guidance": True,
             "initial_root_transform": True,
             "detailed_motion_outputs": True,
             "motion_correction": False,
@@ -823,11 +738,8 @@ def _build_manifest(
         "runtime": {
             "onnx_opset": config.opset,
             "batch_size": 1,
-            "contract_revision": 2,
-            "text_only": False,
-            "constraints_supported": True,
-            "separated_cfg": True,
-            "future_constraints_supported": True,
+            "contract_revision": 3,
+            "text_only": True,
             "detailed_motion_outputs": True,
             "motion_correction_included": False,
             "global_translation_y_must_be_zero": False,
@@ -872,12 +784,12 @@ def _build_manifest(
     return manifest
 
 
-def export_browser_model_pack(config: BrowserExportConfig) -> Path:
-    """Export and validate the four-graph Core40 browser model pack."""
-    _validate_config(config)
+def _export_browser_model_pack_directory(
+    config: BrowserExportConfig,
+    output_dir: Path,
+) -> list[Path]:
+    """Export and validate the three browser graphs in a temporary directory."""
     device = _resolve_device(config.device)
-    output_dir = config.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     resolved_model = resolve_model_name(
         config.model,
@@ -896,16 +808,9 @@ def export_browser_model_pack(config: BrowserExportConfig) -> Path:
     generation_tokens = int(model.gen_horizon_len // model.num_frames_per_token)
     if config.max_tokens != 2 * generation_tokens:
         raise ValueError(
-            "The browser v1 contract requires exactly one 40-frame history "
+            "The Core40 browser contract requires exactly one 40-frame history "
             "window plus one 40-frame generation window; expected "
             f"max_tokens={2 * generation_tokens}, got {config.max_tokens}."
-        )
-    if config.constraint_max_tokens <= 2 * generation_tokens:
-        raise ValueError(
-            "The constraint graph requires room for a history window, one "
-            "generation window, and at least one future-constraint token; "
-            f"constraint_max_tokens must exceed {2 * generation_tokens}, got "
-            f"{config.constraint_max_tokens}."
         )
 
     student, tokenizer, artifact_config = MotionConditionStudent.from_artifact(config.minilm_artifact)
@@ -930,14 +835,15 @@ def export_browser_model_pack(config: BrowserExportConfig) -> Path:
     student.backbone.set_attn_implementation("eager")
     student.to(device=device, dtype=torch.float32).eval()
 
+    _specialize_denoiser_position_tables(
+        model.denoiser.model,
+        num_timesteps=int(model.diffusion.num_base_steps),
+        max_motion_tokens=config.max_tokens,
+    )
+
     modules: dict[str, torch.nn.Module] = {
         "text_encoder": BrowserMiniLMEncoder(student).to(device).eval(),
         "denoiser": BrowserTextCFGDenoiser(model.denoiser.model).to(device).eval(),
-        "constraint_denoiser": BrowserConstraintCFGDenoiser(
-            model.denoiser.model,
-        )
-        .to(device)
-        .eval(),
         "decoder": BrowserMotionDecoder(
             model.autoencoder,
             model.motion_rep,
@@ -957,12 +863,6 @@ def export_browser_model_pack(config: BrowserExportConfig) -> Path:
             int(artifact_config["output_dim"]),
             device,
         ),
-        "constraint_denoiser": _make_constraint_denoiser_dummy(
-            model,
-            config.constraint_max_tokens,
-            int(artifact_config["output_dim"]),
-            device,
-        ),
         "decoder": _make_decoder_dummy(
             model,
             config.max_tokens,
@@ -973,7 +873,6 @@ def export_browser_model_pack(config: BrowserExportConfig) -> Path:
     graph_paths = {
         "text_encoder": output_dir / "text_encoder.onnx",
         "denoiser": output_dir / "denoiser.onnx",
-        "constraint_denoiser": output_dir / "denoiser_constraints.onnx",
         "decoder": output_dir / "decoder.onnx",
     }
     _export_graph(
@@ -1009,33 +908,6 @@ def export_browser_model_pack(config: BrowserExportConfig) -> Path:
             "text_conditions",
             "timestep",
             "first_heading_angle",
-        ],
-        output_names=["pred_x0"],
-        opset=config.opset,
-    )
-    _export_graph(
-        modules["constraint_denoiser"],
-        dummy_inputs["constraint_denoiser"],
-        graph_paths["constraint_denoiser"],
-        input_names=[
-            "text_cfg_weight",
-            "constraint_cfg_weight",
-            "x",
-            "history_len",
-            "generation_len",
-            "future_len",
-            "history_mask",
-            "generation_mask",
-            "future_mask",
-            "history_token_mask",
-            "generation_token_mask",
-            "future_token_mask",
-            "text_conditions",
-            "text_condition_mask",
-            "timestep",
-            "first_heading_angle",
-            "motion_mask",
-            "observed_motion",
         ],
         output_names=["pred_x0"],
         opset=config.opset,
@@ -1083,7 +955,21 @@ def export_browser_model_pack(config: BrowserExportConfig) -> Path:
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    return manifest_path
+    return [manifest_path, *payload_paths]
+
+
+def export_browser_model_pack(config: BrowserExportConfig) -> Path:
+    """Export a reproducible, self-contained three-graph Core40 browser pack."""
+    _validate_config(config)
+    with tempfile.TemporaryDirectory(prefix="ardy-browser-export-") as temporary_directory:
+        output_dir = Path(temporary_directory)
+        member_paths = _export_browser_model_pack_directory(config, output_dir)
+        _write_deterministic_tar_gz(
+            output_dir,
+            member_paths,
+            config.output_path,
+        )
+    return config.output_path
 
 
 __all__ = [

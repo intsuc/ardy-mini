@@ -3,14 +3,14 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { MotionConstraint } from "./constraints";
+import type { MotionConstraint } from "./motion-constraint";
 import type { BrowserModelPackManifest } from "./manifest";
 import { postprocessMotion } from "./postprocess";
 
 function manifest(): BrowserModelPackManifest {
   return {
     format: "ardy-browser-model-pack",
-    schema_version: 1,
+    schema_version: 2,
     model: { id: "test", variant: "test" },
     files: {},
     tokenizer: { directory: "tokenizer", max_length: 8 },
@@ -62,6 +62,7 @@ function manifest(): BrowserModelPackManifest {
         normalization_denominator: [1, 1, 1, 1, 1],
       },
     } as BrowserModelPackManifest["stats"],
+    runtime: { contract_revision: 3, text_only: true },
   };
 }
 

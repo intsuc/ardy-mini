@@ -168,9 +168,9 @@ The browser runtime provides:
 - stateful 40-frame streaming with replace, append, continuous buffer
   extension, playhead branching, and live-prompt replanning;
 - fixed internal generation settings rather than an advanced motion-parameter
-  editor: text CFG `3.5`, constraint CFG `1.0`, up to 40 history frames, an
-  80-frame future window, a 20-frame live-prompt replan buffer, a 10-frame
-  automatic-extension threshold, and a zero initial root transform;
+  editor: text CFG `3.5`, up to 40 history frames, a 20-frame live-prompt
+  replan buffer, a 10-frame automatic-extension threshold, and a zero initial
+  root transform;
 - predicted contacts, joint-orientation axes, and root trajectory;
 - dynamic skeleton metadata supplied by the model pack rather than a fixed
   viewer topology;
@@ -183,11 +183,11 @@ constraints, waypoints, target-velocity controls, initial-transform editor,
 CFG/history/future tuning controls, or optional motion-correction controls.
 Versioned session codecs remain covered as internal compatibility utilities,
 but the browser UI has no session or motion file import/export actions.
-The exported pack still contains the constraint-aware denoiser graph; the
-current UI sends no user-authored constraint set and therefore generates
-through the unconstrained path.
+The browser pack contains only the text encoder, unconstrained denoiser, and
+structured decoder graphs. Constraint-aware generation remains a Python/Viser
+feature.
 
-Export the local four-graph pack and start the app:
+Export the local three-graph gzip pack and start the app:
 
 ```bash
 uv sync --extra browser
@@ -195,27 +195,27 @@ uv sync --extra browser
 uv run --extra browser python scripts/export_browser.py \
   --checkpoints-dir checkpoints \
   --minilm-artifact artifacts/minilm-ardy-core40 \
-  --output-dir artifacts/browser/core40
+  --output artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz
 
 cd web
 npm ci
 npm run dev
 ```
 
-Choose `artifacts/browser/core40` with the demo's **Choose model-pack folder**
-button. The measured FP32 pack contains four ONNX graphs and is approximately
-1.4 GiB (about 1.5 GB decimal); after loading, the header reports the backend
-actually in use. The static web build contains no model weights, and inference
-does not send prompts, model-pack files, VRM files, generation state, or motion
-to a server.
+Choose `artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz` with the demo's
+**Choose model pack** button. The browser accepts this single `.tar.gz` format
+only; it streams the archive through gzip/ustar validation before creating
+three ONNX sessions. The verified export in this environment is 718,180,222
+bytes (684.91 MiB), down from 1,488,867,166 bytes for the former four-graph
+directory. The static web build contains no model weights, and inference does
+not send prompts, model-pack files, VRM files, generation state, or motion to a
+server.
 
 VRM animation requires a current structured-output pack. Its
-`manifest.json` must report `runtime.contract_revision: 2` and decoder outputs
-for `localRotations` and `globalRotations`. An older positions-only pack can
-still animate the skeleton and VRM hips position, but the avatar's bones remain
-in their rest/T pose; the browser deliberately does not infer rotations from
-joint positions. Regenerate the pack with the command above if those rotation
-outputs are absent.
+`manifest.json` must use schema version `2`, report
+`runtime.contract_revision: 3`, and include decoder outputs for
+`localRotations` and `globalRotations`. Older directory and positions-only
+packs are rejected; regenerate them with the command above.
 
 This MiniLM artifact is specific to
 `ARDY-Core-RP-20FPS-Horizon40` and typo-free English motion prompts. Branch

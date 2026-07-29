@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-import { mkdir, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { writeFile } from "node:fs/promises";
 
 import { expect, test, type Page } from "@playwright/test";
 
@@ -45,13 +44,20 @@ test("renders the two-pane technical workspace without motion parameters", async
     ),
   ).toHaveCount(0);
   await expect(page.locator("#model-setup-help")).toContainText(
-    "about 1.4 GiB, four ONNX graphs",
+    "ardy-minilm-core40-browser-v1.tar.gz",
   );
   await expect(page.locator("#privacy-badge")).toContainText("Local");
   await expect(page.locator("#isolation-label")).toContainText(
     /WASM (threads ready|single-thread)/,
   );
   await expect(page.locator("#import-model")).toContainText("Choose model pack");
+  await expect(page.locator("#model-file-input")).toHaveAttribute(
+    "accept",
+    ".tar.gz,application/gzip",
+  );
+  await expect(page.locator("#model-file-input")).not.toHaveAttribute(
+    "multiple",
+  );
   await expect(page.getByText("20 FPS", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Core40", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Runtime notes", { exact: true })).toHaveCount(0);
@@ -679,18 +685,14 @@ test("keeps invalid model-pack errors beside the model setup action", async ({
 }, testInfo) => {
   await page.goto("/");
 
-  const invalidPack = testInfo.outputPath("invalid-pack");
-  await mkdir(invalidPack, { recursive: true });
-  await writeFile(
-    path.join(invalidPack, "not-a-model-pack.txt"),
-    "not a model pack",
-  );
+  const invalidPack = testInfo.outputPath("invalid-pack.tar.gz");
+  await writeFile(invalidPack, "not a gzip archive");
   await page.locator("#model-file-input").setInputFiles(invalidPack);
 
   const modelError = page.locator("#model-error-banner");
   await expect(modelError).toBeVisible();
   await expect(modelError).toBeFocused();
-  await expect(modelError).toContainText("manifest.json");
+  await expect(modelError).toContainText(/decompress|gzip/i);
   await expect(page.locator("#error-banner")).toBeHidden();
   await expect
     .poll(() =>

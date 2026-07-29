@@ -4,31 +4,47 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  MAX_WORKER_CONSTRAINTS,
   MAX_WORKER_PROMPT_LENGTH,
   parseWorkerCommand,
   serializeWorkerError,
   WORKER_PROTOCOL_VERSION,
 } from "./protocol";
 
-function constraint(id = "root-1") {
-  const values = new Float32Array(330);
-  const mask = new Float32Array(330);
-  values[0] = 0.25;
-  mask[0] = 1;
-  return {
-    id,
-    kind: "root",
-    frame: 40,
-    endFrame: 44,
-    values,
-    mask,
-  };
-}
+describe("worker protocol v3", () => {
+  it("accepts one tar.gz archive and rejects the legacy file array", () => {
+    const archive = new File(["gzip"], "model-pack.tar.gz", {
+      type: "application/gzip",
+    });
+    expect(
+      parseWorkerCommand({
+        type: "loadModelPack",
+        requestId: "load",
+        archive,
+        backend: "webgpu",
+      }),
+    ).toMatchObject({
+      type: "loadModelPack",
+      archive,
+      backend: "webgpu",
+    });
+    expect(() =>
+      parseWorkerCommand({
+        type: "loadModelPack",
+        requestId: "legacy-load",
+        files: [archive],
+      }),
+    ).toThrow(/archive/);
+    expect(() =>
+      parseWorkerCommand({
+        type: "loadModelPack",
+        requestId: "wrong-extension",
+        archive: new File(["gzip"], "model-pack.zip"),
+      }),
+    ).toThrow(/\.tar\.gz/);
+  });
 
-describe("worker protocol v2", () => {
-  it("keeps the protocol-v1 generate shape as a replace-compatible command", () => {
-    expect(WORKER_PROTOCOL_VERSION).toBe(2);
+  it("parses a replace-compatible generation command", () => {
+    expect(WORKER_PROTOCOL_VERSION).toBe(3);
     const command = parseWorkerCommand({
       type: "generate",
       requestId: "legacy",
@@ -48,8 +64,7 @@ describe("worker protocol v2", () => {
     expect(command).not.toHaveProperty("mode");
   });
 
-  it("normalizes a constrained branch command and clones mutable inputs", () => {
-    const sourceConstraint = constraint();
+  it("normalizes a branch command and clones mutable inputs", () => {
     const translation = new Float64Array([1, 2, 3]);
     const command = parseWorkerCommand({
       type: "generate",
@@ -59,11 +74,8 @@ describe("worker protocol v2", () => {
       prompt: "Turn left and raise both hands.",
       seed: "take-two",
       durationFrames: 40,
-      textCfgWeight: 2.5,
-      constraintCfgWeight: 1.25,
+      cfgWeight: 2.5,
       historyFrames: 40,
-      futureFrames: 120,
-      constraints: [sourceConstraint],
     });
 
     expect(command).toMatchObject({
@@ -71,13 +83,7 @@ describe("worker protocol v2", () => {
       mode: "branch",
       branchFrame: 80,
       historyFrames: 40,
-      futureFrames: 120,
     });
-    if (command.type !== "generate") {
-      throw new Error("unreachable");
-    }
-    expect(command.constraints?.[0].values).toEqual(sourceConstraint.values);
-    expect(command.constraints?.[0].values).not.toBe(sourceConstraint.values);
 
     const replace = parseWorkerCommand({
       type: "generate",
@@ -117,14 +123,7 @@ describe("worker protocol v2", () => {
       }),
     ).toThrow(/exactly one/);
     expect(() =>
-      parseWorkerCommand({
-        ...base,
-        cfgWeight: 2,
-        textCfgWeight: 3,
-      }),
-    ).toThrow(/must not both/);
-    expect(() =>
-      parseWorkerCommand({ ...base, textCfgWeight: 101 }),
+      parseWorkerCommand({ ...base, cfgWeight: 101 }),
     ).toThrow(/between 0 and 100/);
     expect(() =>
       parseWorkerCommand({
@@ -137,61 +136,6 @@ describe("worker protocol v2", () => {
       parseWorkerCommand({
         ...base,
         prompt: "x".repeat(MAX_WORKER_PROMPT_LENGTH + 1),
-      }),
-    ).toThrow(/at most/);
-  });
-
-  it("validates sparse constraint tensors before model allocation", () => {
-    const base = {
-      type: "generate",
-      requestId: "constraint",
-      mode: "replace",
-      prompt: "Walk.",
-      seed: 1,
-      durationFrames: 40,
-    };
-    expect(() =>
-      parseWorkerCommand({
-        ...base,
-        constraints: [
-          {
-            ...constraint(),
-            values: [0],
-          },
-        ],
-      }),
-    ).toThrow(/Float32Array/);
-    expect(() =>
-      parseWorkerCommand({
-        ...base,
-        constraints: [
-          {
-            ...constraint(),
-            mask: new Float32Array(329),
-          },
-        ],
-      }),
-    ).toThrow(/equal lengths/);
-    const nonFinite = constraint();
-    nonFinite.values[0] = Number.NaN;
-    expect(() =>
-      parseWorkerCommand({ ...base, constraints: [nonFinite] }),
-    ).toThrow(/finite/);
-    const invalidMask = constraint();
-    invalidMask.mask[0] = 2;
-    expect(() =>
-      parseWorkerCommand({ ...base, constraints: [invalidMask] }),
-    ).toThrow(/between 0 and 1/);
-    expect(() =>
-      parseWorkerCommand({
-        ...base,
-        constraints: [constraint("same"), constraint("same")],
-      }),
-    ).toThrow(/unique/);
-    expect(() =>
-      parseWorkerCommand({
-        ...base,
-        constraints: Array(MAX_WORKER_CONSTRAINTS + 1).fill(constraint()),
       }),
     ).toThrow(/at most/);
   });

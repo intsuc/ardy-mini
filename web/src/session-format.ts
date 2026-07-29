@@ -16,7 +16,7 @@ import {
 import type {
   MotionConstraint,
   MotionConstraintKind as RuntimeConstraintKind,
-} from "./runtime/constraints";
+} from "./runtime/motion-constraint";
 import type { PortableRandomState } from "./runtime/random";
 
 export const MOTION_FILE_FORMAT = "ardy-browser-motion";

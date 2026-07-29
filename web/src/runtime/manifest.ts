@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export const MODEL_PACK_FORMAT = "ardy-browser-model-pack";
-export const MODEL_PACK_SCHEMA_VERSION = 1;
+export const MODEL_PACK_SCHEMA_VERSION = 2;
 export const MODEL_PACK_MANIFEST_FILE = "manifest.json";
 
 export type Sha256Hex = string;
@@ -58,51 +58,25 @@ export interface DenoiserOutputs extends Record<string, string> {
   predX0: string;
 }
 
-export interface ConstraintDenoiserInputs extends Record<string, string> {
-  textCfgWeight: string;
-  constraintCfgWeight: string;
-  x: string;
-  historyLength: string;
-  generationLength: string;
-  futureLength: string;
-  historyMask: string;
-  generationMask: string;
-  futureMask: string;
-  historyTokenMask: string;
-  generationTokenMask: string;
-  futureTokenMask: string;
-  textConditions: string;
-  textConditionMask: string;
-  timestep: string;
-  firstHeadingAngle: string;
-  motionMask: string;
-  observedMotion: string;
-}
-
 export interface DecoderInputs extends Record<string, string> {
   hybridTokens: string;
   motionPadMask: string;
   globalTranslation: string;
 }
 
-export interface DecoderOutputs
-  extends Record<string, string | undefined> {
+export interface DecoderOutputs extends Record<string, string> {
   normalizedMotion: string;
   posedJoints: string;
-  localRotations?: string;
-  globalRotations?: string;
-  rootPositions?: string;
-  footContacts?: string;
-  globalRootHeading?: string;
+  localRotations: string;
+  globalRotations: string;
+  rootPositions: string;
+  footContacts: string;
+  globalRootHeading: string;
 }
 
 export interface BrowserGraphSpecs {
   text_encoder: GraphSpec<TextEncoderInputs, TextEncoderOutputs>;
   denoiser: GraphSpec<DenoiserInputs, DenoiserOutputs>;
-  constraint_denoiser?: GraphSpec<
-    ConstraintDenoiserInputs,
-    DenoiserOutputs
-  >;
   decoder: GraphSpec<DecoderInputs, DecoderOutputs>;
 }
 
@@ -111,9 +85,6 @@ export interface BrowserDimensions {
   num_frames_per_token: number;
   max_tokens: number;
   max_frames: number;
-  /** Fixed window owned by the optional constraint graph. */
-  constraint_max_tokens?: number;
-  constraint_max_frames?: number;
   generation_tokens: number;
   generation_frames: number;
   history_tokens: number;
@@ -132,8 +103,6 @@ export interface BrowserGenerationConfig {
   min_frames: number;
   max_frames: number;
   default_cfg_weight: number;
-  default_text_cfg_weight?: number;
-  default_constraint_cfg_weight?: number;
   denoising_steps: number;
   window_policy?: string;
 }
@@ -204,12 +173,9 @@ export type BrowserMotionLayout = Record<string, [number, number]>;
 
 export interface BrowserRuntimeCapabilities {
   onnx_opset?: number;
-  contract_revision?: number;
+  contract_revision: 3;
   batch_size?: number;
-  text_only?: boolean;
-  constraints_supported?: boolean;
-  separated_cfg?: boolean;
-  future_constraints_supported?: boolean;
+  text_only: true;
   detailed_motion_outputs?: boolean;
   motion_correction_included?: boolean;
   global_translation_y_must_be_zero?: boolean;
@@ -217,9 +183,6 @@ export interface BrowserRuntimeCapabilities {
 
 export interface BrowserCapabilities {
   text_conditioning?: boolean;
-  kinematic_constraints?: boolean;
-  future_constraints?: boolean;
-  separated_classifier_free_guidance?: boolean;
   initial_root_transform?: boolean;
   detailed_motion_outputs?: boolean;
   motion_correction?: boolean;
@@ -246,7 +209,7 @@ export interface BrowserModelPackManifest {
   stats?: BrowserStats;
   motion_layout?: BrowserMotionLayout;
   capabilities?: BrowserCapabilities;
-  runtime?: BrowserRuntimeCapabilities;
+  runtime: BrowserRuntimeCapabilities;
 }
 
 export class ManifestValidationError extends Error {
@@ -307,6 +270,18 @@ function nonNegativeIntegerAt(value: unknown, path: string): number {
   return number;
 }
 
+function rejectLegacyFields(
+  record: Readonly<Record<string, unknown>>,
+  path: string,
+  fields: readonly string[],
+): void {
+  for (const field of fields) {
+    if (Object.hasOwn(record, field)) {
+      fail(`${path}.${field} is not supported by the current text-only contract`);
+    }
+  }
+}
+
 function numberArrayAt(value: unknown, path: string, length: number): number[] {
   if (!Array.isArray(value) || value.length !== length) {
     fail(`${path} must contain exactly ${length} numbers`);
@@ -342,11 +317,15 @@ function validateNameMap(
   requiredKeys: readonly string[],
 ): Record<string, string> {
   const record = objectAt(value, path);
-  for (const key of requiredKeys) {
-    stringAt(record[key], `${path}.${key}`);
+  const actualKeys = Object.keys(record);
+  if (
+    actualKeys.length !== requiredKeys.length ||
+    requiredKeys.some((key) => !Object.hasOwn(record, key))
+  ) {
+    fail(`${path} must contain exactly ${requiredKeys.join(", ")}`);
   }
-  const names = Object.values(record).map((name, index) =>
-    stringAt(name, `${path}[${index}]`),
+  const names = requiredKeys.map((key) =>
+    stringAt(record[key], `${path}.${key}`),
   );
   if (new Set(names).size !== names.length) {
     fail(`${path} must not map multiple semantic fields to the same ONNX name`);
@@ -360,12 +339,13 @@ function validateGraph(
   files: ReadonlySet<string>,
   requiredInputs: readonly string[],
   requiredOutputs: readonly string[],
-): void {
+): Set<string> {
   const graph = objectAt(value, path);
   const model = normalizePackPath(stringAt(graph.model, `${path}.model`));
   if (!files.has(model)) {
     fail(`${path}.model references undeclared file ${JSON.stringify(model)}`);
   }
+  const referencedFiles = new Set([model]);
   validateNameMap(graph.inputs, `${path}.inputs`, requiredInputs);
   validateNameMap(graph.outputs, `${path}.outputs`, requiredOutputs);
 
@@ -390,8 +370,10 @@ function validateGraph(
       if (!files.has(file)) {
         fail(`${path}.external_data references undeclared file ${JSON.stringify(file)}`);
       }
+      referencedFiles.add(file);
     }
   }
+  return referencedFiles;
 }
 
 function validateManifestFiles(value: unknown): Set<string> {
@@ -425,6 +407,10 @@ function validateManifestFiles(value: unknown): Set<string> {
 
 function validateDimensions(value: unknown): BrowserDimensions {
   const dimensions = objectAt(value, "dimensions");
+  rejectLegacyFields(dimensions, "dimensions", [
+    "constraint_max_tokens",
+    "constraint_max_frames",
+  ]);
   const result = {} as unknown as BrowserDimensions;
   for (const key of [
     "fps",
@@ -446,19 +432,6 @@ function validateDimensions(value: unknown): BrowserDimensions {
   ] as const) {
     result[key] = positiveIntegerAt(dimensions[key], `dimensions.${key}`);
   }
-  if (dimensions.constraint_max_tokens !== undefined) {
-    result.constraint_max_tokens = positiveIntegerAt(
-      dimensions.constraint_max_tokens,
-      "dimensions.constraint_max_tokens",
-    );
-  }
-  if (dimensions.constraint_max_frames !== undefined) {
-    result.constraint_max_frames = positiveIntegerAt(
-      dimensions.constraint_max_frames,
-      "dimensions.constraint_max_frames",
-    );
-  }
-
   if (result.max_frames !== result.max_tokens * result.num_frames_per_token) {
     fail("dimensions.max_frames must equal max_tokens * num_frames_per_token");
   }
@@ -475,21 +448,6 @@ function validateDimensions(value: unknown): BrowserDimensions {
   }
   if (result.history_tokens + result.generation_tokens > result.max_tokens) {
     fail("history_tokens + generation_tokens exceeds max_tokens");
-  }
-  const constraintMaxTokens =
-    result.constraint_max_tokens ?? result.max_tokens;
-  const constraintMaxFrames =
-    result.constraint_max_frames ?? result.max_frames;
-  if (
-    constraintMaxFrames !==
-    constraintMaxTokens * result.num_frames_per_token
-  ) {
-    fail(
-      "dimensions.constraint_max_frames must equal constraint_max_tokens * num_frames_per_token",
-    );
-  }
-  if (constraintMaxTokens < result.generation_tokens + 1) {
-    fail("constraint graph must leave room for generation and context");
   }
   if (
     result.nframe_root_dim !==
@@ -523,7 +481,7 @@ function validateDimensions(value: unknown): BrowserDimensions {
   for (const key of Object.keys(core40Contract) as Array<keyof BrowserDimensions>) {
     if (result[key] !== core40Contract[key]) {
       fail(
-        `dimensions.${key} must be ${core40Contract[key]} for the browser Core40 v1 runtime`,
+        `dimensions.${key} must be ${core40Contract[key]} for the browser Core40 runtime`,
       );
     }
   }
@@ -571,9 +529,9 @@ function validateDiffusion(value: unknown, steps: number): void {
 }
 
 /**
- * Validate an untrusted JSON value and narrow it to the v1 runtime contract.
+ * Validate an untrusted JSON value and narrow it to the current runtime contract.
  *
- * Model packs are user-selectable directories, so all fields used for allocation,
+ * Model packs are user-selected archives, so all fields used for allocation,
  * file lookup, tensor shapes, or numerical kernels are checked before any model
  * bytes are handed to ONNX Runtime.
  */
@@ -607,14 +565,31 @@ export function validateModelPackManifest(value: unknown): BrowserModelPackManif
   }
 
   const graphs = objectAt(manifest.graphs, "graphs");
-  validateGraph(
+  const expectedGraphNames = ["text_encoder", "denoiser", "decoder"];
+  const actualGraphNames = Object.keys(graphs);
+  if (
+    actualGraphNames.length !== expectedGraphNames.length ||
+    expectedGraphNames.some((name) => !Object.hasOwn(graphs, name))
+  ) {
+    fail(
+      `graphs must contain exactly ${expectedGraphNames.join(", ")}`,
+    );
+  }
+  const referencedFiles = new Set([
+    `${tokenizerDirectory}/tokenizer.json`,
+    `${tokenizerDirectory}/tokenizer_config.json`,
+  ]);
+  const collectGraphFiles = (graphFiles: ReadonlySet<string>): void => {
+    for (const file of graphFiles) referencedFiles.add(file);
+  };
+  collectGraphFiles(validateGraph(
     graphs.text_encoder,
     "graphs.text_encoder",
     files,
     ["inputIds", "attentionMask", "tokenTypeIds"],
     ["textConditions"],
-  );
-  validateGraph(
+  ));
+  collectGraphFiles(validateGraph(
     graphs.denoiser,
     "graphs.denoiser",
     files,
@@ -632,95 +607,43 @@ export function validateModelPackManifest(value: unknown): BrowserModelPackManif
       "firstHeadingAngle",
     ],
     ["predX0"],
-  );
-  if (graphs.constraint_denoiser !== undefined) {
-    validateGraph(
-      graphs.constraint_denoiser,
-      "graphs.constraint_denoiser",
-      files,
-      [
-        "textCfgWeight",
-        "constraintCfgWeight",
-        "x",
-        "historyLength",
-        "generationLength",
-        "futureLength",
-        "historyMask",
-        "generationMask",
-        "futureMask",
-        "historyTokenMask",
-        "generationTokenMask",
-        "futureTokenMask",
-        "textConditions",
-        "textConditionMask",
-        "timestep",
-        "firstHeadingAngle",
-        "motionMask",
-        "observedMotion",
-      ],
-      ["predX0"],
-    );
-  }
-  validateGraph(
+  ));
+  collectGraphFiles(validateGraph(
     graphs.decoder,
     "graphs.decoder",
     files,
     ["hybridTokens", "motionPadMask", "globalTranslation"],
-    ["normalizedMotion", "posedJoints"],
-  );
-  const decoder = objectAt(graphs.decoder, "graphs.decoder");
-  const decoderOutputs = objectAt(
-    decoder.outputs,
-    "graphs.decoder.outputs",
-  );
-  const richDecoderOutputs = [
-    "localRotations",
-    "globalRotations",
-    "rootPositions",
-    "footContacts",
-    "globalRootHeading",
-  ] as const;
-  const presentRichOutputs = richDecoderOutputs.filter(
-    (key) => decoderOutputs[key] !== undefined,
-  );
-  if (
-    presentRichOutputs.length !== 0 &&
-    presentRichOutputs.length !== richDecoderOutputs.length
-  ) {
-    fail(
-      "graphs.decoder.outputs must provide either all structured motion outputs or none",
-    );
-  }
-  for (const key of presentRichOutputs) {
-    stringAt(
-      decoderOutputs[key],
-      `graphs.decoder.outputs.${key}`,
-    );
+    [
+      "normalizedMotion",
+      "posedJoints",
+      "localRotations",
+      "globalRotations",
+      "rootPositions",
+      "footContacts",
+      "globalRootHeading",
+    ],
+  ));
+  for (const file of files) {
+    if (!referencedFiles.has(file)) {
+      fail(`files contains unreferenced asset ${JSON.stringify(file)}`);
+    }
   }
 
   const dimensions = validateDimensions(manifest.dimensions);
   const generation = objectAt(manifest.generation, "generation");
+  rejectLegacyFields(generation, "generation", [
+    "default_text_cfg_weight",
+    "default_constraint_cfg_weight",
+  ]);
   const minFrames = positiveIntegerAt(generation.min_frames, "generation.min_frames");
   const maxFrames = positiveIntegerAt(generation.max_frames, "generation.max_frames");
   if (minFrames !== dimensions.generation_frames) {
     fail("generation.min_frames must equal one generation window");
   }
   if (maxFrames !== 10 * dimensions.fps) {
-    fail("generation.max_frames must equal the browser v1 10-second limit");
+    fail("generation.max_frames must equal the browser 10-second limit");
   }
   positiveAt(generation.default_cfg_weight, "generation.default_cfg_weight");
-  if (generation.default_text_cfg_weight !== undefined) {
-    positiveAt(
-      generation.default_text_cfg_weight,
-      "generation.default_text_cfg_weight",
-    );
-  }
-  if (generation.default_constraint_cfg_weight !== undefined) {
-    positiveAt(
-      generation.default_constraint_cfg_weight,
-      "generation.default_constraint_cfg_weight",
-    );
-  }
   if (generation.window_policy !== undefined) {
     stringAt(generation.window_policy, "generation.window_policy");
   }
@@ -909,40 +832,41 @@ export function validateModelPackManifest(value: unknown): BrowserModelPackManif
     }
   }
 
-  if (manifest.runtime !== undefined) {
-    const runtime = objectAt(manifest.runtime, "runtime");
-    if (runtime.onnx_opset !== undefined) {
-      positiveIntegerAt(runtime.onnx_opset, "runtime.onnx_opset");
+  const runtime = objectAt(manifest.runtime, "runtime");
+  rejectLegacyFields(runtime, "runtime", [
+    "constraints_supported",
+    "separated_cfg",
+    "future_constraints_supported",
+  ]);
+  if (runtime.onnx_opset !== undefined) {
+    positiveIntegerAt(runtime.onnx_opset, "runtime.onnx_opset");
+  }
+  if (runtime.contract_revision !== 3) {
+    fail("runtime.contract_revision must be 3");
+  }
+  if (runtime.text_only !== true) {
+    fail("runtime.text_only must be true");
+  }
+  for (const key of [
+    "detailed_motion_outputs",
+    "motion_correction_included",
+    "global_translation_y_must_be_zero",
+  ]) {
+    if (runtime[key] !== undefined && typeof runtime[key] !== "boolean") {
+      fail(`runtime.${key} must be a boolean`);
     }
-    if (runtime.contract_revision !== undefined) {
-      positiveIntegerAt(runtime.contract_revision, "runtime.contract_revision");
-    }
-    for (const key of [
-      "text_only",
-      "constraints_supported",
-      "separated_cfg",
-      "future_constraints_supported",
-      "detailed_motion_outputs",
-      "motion_correction_included",
-      "global_translation_y_must_be_zero",
-    ]) {
-      if (runtime[key] !== undefined && typeof runtime[key] !== "boolean") {
-        fail(`runtime.${key} must be a boolean`);
-      }
-    }
-    if (runtime.batch_size !== undefined) {
-      positiveIntegerAt(runtime.batch_size, "runtime.batch_size");
-    }
-    if (
-      runtime.constraints_supported === true &&
-      graphs.constraint_denoiser === undefined
-    ) {
-      fail("runtime declares constraints without a constraint_denoiser graph");
-    }
+  }
+  if (runtime.batch_size !== undefined) {
+    positiveIntegerAt(runtime.batch_size, "runtime.batch_size");
   }
 
   if (manifest.capabilities !== undefined) {
     const capabilities = objectAt(manifest.capabilities, "capabilities");
+    rejectLegacyFields(capabilities, "capabilities", [
+      "kinematic_constraints",
+      "future_constraints",
+      "separated_classifier_free_guidance",
+    ]);
     for (const [key, enabled] of Object.entries(capabilities)) {
       if (typeof enabled !== "boolean") {
         fail(`capabilities.${key} must be a boolean`);

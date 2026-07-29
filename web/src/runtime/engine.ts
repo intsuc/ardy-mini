@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-import type { MotionConstraint } from "./constraints";
-import { buildConstraintWindowBuffers } from "./constraints";
 import { applyDdimStepInPlace, ddimStepForIndex } from "./ddim";
 import type { BrowserModelPackManifest } from "./manifest";
 import type { ModelPack } from "./model-pack";
@@ -24,11 +22,9 @@ import {
 import { LocalTokenizer } from "./tokenizer";
 import {
   createArWindow,
-  createConditionedArWindow,
   createMotionPadMask,
   recenterAndRequantize,
   type ArWindow,
-  type ConditionedArWindow,
 } from "./windows";
 
 export class RuntimeCancelledError extends Error {
@@ -58,11 +54,7 @@ export interface RuntimeGenerateOptions {
   durationFrames?: number;
   durationSeconds?: number;
   cfgWeight?: number;
-  textCfgWeight?: number;
-  constraintCfgWeight?: number;
   historyFrames?: number;
-  futureFrames?: number;
-  constraints?: readonly MotionConstraint[];
   initialTranslation?: readonly [number, number, number] | Float32Array;
   initialHeading?: number;
   signal?: AbortSignal;
@@ -79,11 +71,8 @@ export interface RuntimeSessionOptions {
 export interface RuntimeSessionGenerateOptions {
   prompt: string;
   durationFrames: number;
-  textCfgWeight?: number;
-  constraintCfgWeight?: number;
+  cfgWeight?: number;
   historyFrames?: number;
-  futureFrames?: number;
-  constraints?: readonly MotionConstraint[];
   signal?: AbortSignal;
   onProgress?: (progress: RuntimeProgress) => void;
   onChunk?: (chunk: RuntimeGenerationChunk) => void | Promise<void>;
@@ -122,7 +111,6 @@ export interface RuntimeGenerationChunk extends RuntimeMotionArrays {
   frameCount: number;
   hybridTokens: Float32Array;
   hybridShape: [number, number];
-  appliedConstraintIds: string[];
   timingsMs: RuntimeTimings;
 }
 
@@ -653,12 +641,10 @@ export class BrowserArdyGenerationSession {
   }
 
   async #denoise(
-    window: ArWindow | ConditionedArWindow,
+    window: ArWindow,
     textConditions: ort.Tensor,
     prepared: PreparedHistory,
-    textCfgWeight: number,
-    constraintCfgWeight: number,
-    useConstraints: boolean,
+    cfgWeight: number,
     signal: AbortSignal | undefined,
     onProgress: RuntimeSessionGenerateOptions["onProgress"],
     progressOffset: number,
@@ -671,123 +657,41 @@ export class BrowserArdyGenerationSession {
       (window.generationTokenOffset + window.generationTokens) *
       dimensions.hybrid_dim;
     const timestepData = BigInt64Array.of(0n);
-    let feeds: Record<string, ort.Tensor>;
-    let session: ort.InferenceSession;
-    let predictionName: string;
-
-    if (useConstraints) {
-      if (
-        graphs.constraint_denoiser === undefined ||
-        this.#sessions.constraintDenoiser === undefined ||
-        !("futureMask" in window)
-      ) {
-        throw new Error("This model pack does not support kinematic constraints");
-      }
-      const inputs = graphs.constraint_denoiser.inputs;
-      const constraintTokens =
-        dimensions.constraint_max_tokens ?? dimensions.max_tokens;
-      const constraintFrames =
-        dimensions.constraint_max_frames ?? dimensions.max_frames;
-      feeds = {
-        [inputs.textCfgWeight]: floatScalar(textCfgWeight),
-        [inputs.constraintCfgWeight]: floatScalar(constraintCfgWeight),
-        [inputs.x]: new ort.Tensor(
-          "float32",
-          window.x,
-          [1, constraintTokens, dimensions.hybrid_dim],
-        ),
-        [inputs.historyLength]: int64Scalar(window.historyFrames),
-        [inputs.generationLength]: int64Scalar(window.generationFrames),
-        [inputs.futureLength]: int64Scalar(window.futureFrames),
-        [inputs.historyMask]: new ort.Tensor(
-          "float32",
-          window.historyMask,
-          [1, constraintFrames],
-        ),
-        [inputs.generationMask]: new ort.Tensor(
-          "float32",
-          window.generationMask,
-          [1, constraintFrames],
-        ),
-        [inputs.futureMask]: new ort.Tensor(
-          "float32",
-          window.futureMask,
-          [1, constraintFrames],
-        ),
-        [inputs.historyTokenMask]: new ort.Tensor(
-          "float32",
-          window.historyTokenMask,
-          [1, constraintTokens],
-        ),
-        [inputs.generationTokenMask]: new ort.Tensor(
-          "float32",
-          window.generationTokenMask,
-          [1, constraintTokens],
-        ),
-        [inputs.futureTokenMask]: new ort.Tensor(
-          "float32",
-          window.futureTokenMask,
-          [1, constraintTokens],
-        ),
-        [inputs.textConditions]: textConditions,
-        [inputs.textConditionMask]: new ort.Tensor(
-          "float32",
-          Float32Array.of(1),
-          [1, 1],
-        ),
-        [inputs.timestep]: new ort.Tensor("int64", timestepData, [1]),
-        [inputs.firstHeadingAngle]: floatScalar(prepared.firstHeadingAngle),
-        [inputs.motionMask]: new ort.Tensor(
-          "float32",
-          window.motionMask,
-          [1, constraintFrames, dimensions.motion_dim],
-        ),
-        [inputs.observedMotion]: new ort.Tensor(
-          "float32",
-          window.observedMotion,
-          [1, constraintFrames, dimensions.motion_dim],
-        ),
-      };
-      session = this.#sessions.constraintDenoiser;
-      predictionName = graphs.constraint_denoiser.outputs.predX0;
-    } else {
-      const inputs = graphs.denoiser.inputs;
-      feeds = {
-        [inputs.cfgWeight]: floatScalar(textCfgWeight),
-        [inputs.x]: new ort.Tensor(
-          "float32",
-          window.x,
-          [1, dimensions.max_tokens, dimensions.hybrid_dim],
-        ),
-        [inputs.historyLength]: int64Scalar(window.historyFrames),
-        [inputs.generationLength]: int64Scalar(window.generationFrames),
-        [inputs.historyMask]: new ort.Tensor(
-          "float32",
-          window.historyMask,
-          [1, dimensions.max_frames],
-        ),
-        [inputs.generationMask]: new ort.Tensor(
-          "float32",
-          window.generationMask,
-          [1, dimensions.max_frames],
-        ),
-        [inputs.historyTokenMask]: new ort.Tensor(
-          "float32",
-          window.historyTokenMask,
-          [1, dimensions.max_tokens],
-        ),
-        [inputs.generationTokenMask]: new ort.Tensor(
-          "float32",
-          window.generationTokenMask,
-          [1, dimensions.max_tokens],
-        ),
-        [inputs.textConditions]: textConditions,
-        [inputs.timestep]: new ort.Tensor("int64", timestepData, [1]),
-        [inputs.firstHeadingAngle]: floatScalar(prepared.firstHeadingAngle),
-      };
-      session = this.#sessions.denoiser;
-      predictionName = graphs.denoiser.outputs.predX0;
-    }
+    const inputs = graphs.denoiser.inputs;
+    const feeds: Record<string, ort.Tensor> = {
+      [inputs.cfgWeight]: floatScalar(cfgWeight),
+      [inputs.x]: new ort.Tensor(
+        "float32",
+        window.x,
+        [1, dimensions.max_tokens, dimensions.hybrid_dim],
+      ),
+      [inputs.historyLength]: int64Scalar(window.historyFrames),
+      [inputs.generationLength]: int64Scalar(window.generationFrames),
+      [inputs.historyMask]: new ort.Tensor(
+        "float32",
+        window.historyMask,
+        [1, dimensions.max_frames],
+      ),
+      [inputs.generationMask]: new ort.Tensor(
+        "float32",
+        window.generationMask,
+        [1, dimensions.max_frames],
+      ),
+      [inputs.historyTokenMask]: new ort.Tensor(
+        "float32",
+        window.historyTokenMask,
+        [1, dimensions.max_tokens],
+      ),
+      [inputs.generationTokenMask]: new ort.Tensor(
+        "float32",
+        window.generationTokenMask,
+        [1, dimensions.max_tokens],
+      ),
+      [inputs.textConditions]: textConditions,
+      [inputs.timestep]: new ort.Tensor("int64", timestepData, [1]),
+      [inputs.firstHeadingAngle]: floatScalar(prepared.firstHeadingAngle),
+    };
+    const predictionName = graphs.denoiser.outputs.predX0;
 
     let elapsed = 0;
     for (
@@ -804,7 +708,7 @@ export class BrowserArdyGenerationSession {
       );
       timestepData[0] = BigInt(step.timestep);
       const started = now();
-      const outputs = await session.run(feeds);
+      const outputs = await this.#sessions.denoiser.run(feeds);
       throwIfCancelled(signal);
       const prediction = floatData(
         tensorFrom(outputs, predictionName, window.x.length),
@@ -822,7 +726,7 @@ export class BrowserArdyGenerationSession {
         stage: "denoising",
         completed: progressOffset + inferenceIndex + 1,
         total: progressTotal,
-        message: useConstraints ? "constraint window" : "text window",
+        message: "text window",
       });
     }
     return elapsed;
@@ -918,33 +822,18 @@ export class BrowserArdyGenerationSession {
         `Session generation must be 1–${generation.max_frames} frames`,
       );
     }
-    const textCfgWeight = finiteCfgWeight(
-      options.textCfgWeight,
-      generation.default_text_cfg_weight ?? generation.default_cfg_weight,
-      "Text CFG weight",
-    );
-    const constraintCfgWeight = finiteCfgWeight(
-      options.constraintCfgWeight,
-      generation.default_constraint_cfg_weight ?? generation.default_cfg_weight,
-      "Constraint CFG weight",
+    const cfgWeight = finiteCfgWeight(
+      options.cfgWeight,
+      generation.default_cfg_weight,
+      "CFG weight",
     );
     const requestedHistoryFrames = options.historyFrames ?? dimensions.history_frames;
-    const requestedFutureFrames =
-      options.futureFrames ??
-      Math.max(
-        0,
-        (dimensions.constraint_max_frames ?? dimensions.max_frames) -
-          dimensions.history_frames -
-          dimensions.generation_frames,
-      );
     if (
       !Number.isSafeInteger(requestedHistoryFrames) ||
       requestedHistoryFrames < 0 ||
-      requestedHistoryFrames > dimensions.history_frames ||
-      !Number.isSafeInteger(requestedFutureFrames) ||
-      requestedFutureFrames < 0
+      requestedHistoryFrames > dimensions.history_frames
     ) {
-      throw new RangeError("History and future frame counts are invalid");
+      throw new RangeError("History frame count is invalid");
     }
 
     // A partial token cannot be encoded back into a continuation without the
@@ -971,42 +860,17 @@ export class BrowserArdyGenerationSession {
     for (let windowIndex = 0; windowIndex < windowCount; windowIndex += 1) {
       throwIfCancelled(options.signal);
       const prepared = this.#prepareHistory(requestedHistoryFrames);
-      const constraints = options.constraints ?? [];
-      const constraintBuffers =
-        constraints.length === 0
-          ? undefined
-          : buildConstraintWindowBuffers(
-              this.manifest,
-              constraints,
-              prepared.windowStartFrame,
-              prepared.historyFrames,
-              requestedFutureFrames,
-              prepared.globalTranslation,
-            );
-      const useConstraints =
-        constraintBuffers !== undefined &&
-        constraintBuffers.appliedConstraintIds.length > 0;
-      let window: ArWindow | ConditionedArWindow;
-      if (useConstraints) {
-        window = createConditionedArWindow(
-          dimensions,
-          this.#random,
-          prepared.history,
-          constraintBuffers.futureFrames,
-          constraintBuffers.motionMask,
-          constraintBuffers.observedMotion,
-        );
-      } else {
-        window = createArWindow(dimensions, this.#random, prepared.history);
-      }
+      const window = createArWindow(
+        dimensions,
+        this.#random,
+        prepared.history,
+      );
 
       denoisingMs += await this.#denoise(
         window,
         encoded.tensor,
         prepared,
-        textCfgWeight,
-        constraintCfgWeight,
-        useConstraints,
+        cfgWeight,
         options.signal,
         options.onProgress,
         windowIndex * this.manifest.diffusion.timesteps.length,
@@ -1092,8 +956,6 @@ export class BrowserArdyGenerationSession {
         jointsShape: [1, framesToCopy, dimensions.num_joints, 3],
         hybridTokens: hybridTokens.slice(),
         hybridShape: [generatedTokens, dimensions.hybrid_dim],
-        appliedConstraintIds:
-          constraintBuffers?.appliedConstraintIds ?? [],
         timingsMs: {
           total: 0,
           text: windowIndex === 0 ? encoded.elapsed : 0,
@@ -1330,11 +1192,8 @@ export class BrowserArdyRuntime {
     return session.generate({
       prompt: options.prompt,
       durationFrames: frameCount,
-      textCfgWeight: options.textCfgWeight ?? options.cfgWeight,
-      constraintCfgWeight: options.constraintCfgWeight,
+      cfgWeight: options.cfgWeight,
       historyFrames: options.historyFrames,
-      futureFrames: options.futureFrames,
-      constraints: options.constraints,
       signal: options.signal,
       onProgress: options.onProgress,
       onChunk: options.onChunk,

@@ -2,10 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
-  MotionConstraint,
-  MotionConstraintKind,
-} from "./constraints";
-import type {
   RuntimeContinuationState,
   RuntimeGenerationChunk,
   RuntimeGenerationResult,
@@ -13,31 +9,20 @@ import type {
 import type { PortableRandomState } from "./random";
 import type { BrowserModelPackManifest } from "./manifest";
 
-export const WORKER_PROTOCOL_VERSION = 2;
+export const WORKER_PROTOCOL_VERSION = 3;
 
 export const MAX_WORKER_REQUEST_ID_LENGTH = 256;
 export const MAX_WORKER_PROMPT_LENGTH = 4_096;
 export const MAX_WORKER_SEED_LENGTH = 512;
 export const MAX_WORKER_FRAME_COUNT = 1_000_000;
-export const MAX_WORKER_CONSTRAINTS = 10_000;
-export const MAX_WORKER_CONSTRAINT_FEATURES = 65_536;
+export const MAX_WORKER_HYBRID_DIM = 65_536;
 export const MAX_WORKER_CONTINUATION_VALUES = 100_000_000;
 
-const MAX_MODEL_PACK_FILES = 10_000;
 const MAX_MODEL_PACK_BYTES = 8 * 1024 * 1024 * 1024;
 const MAX_WASM_PATH_LENGTH = 4_096;
 const MAX_CFG_WEIGHT = 100;
 const MAX_DURATION_SECONDS = 3_600;
 const UINT32_RANGE = 0x1_0000_0000;
-
-const CONSTRAINT_KINDS = new Set<MotionConstraintKind>([
-  "root",
-  "full-body",
-  "left-hand",
-  "right-hand",
-  "left-foot",
-  "right-foot",
-]);
 
 export type RuntimeBackendPreference = "auto" | "webgpu" | "wasm";
 export type RuntimeBackend = "webgpu" | "wasm";
@@ -56,8 +41,6 @@ export interface RuntimeCapabilities {
   streamingChunks: boolean;
   sessionContinuation: boolean;
   branching: boolean;
-  constraints: boolean;
-  futureConstraints: boolean;
   richMotionOutputs: boolean;
   motionCorrection: boolean;
 }
@@ -72,8 +55,8 @@ interface RequestMessage {
 
 export interface LoadModelPackCommand extends RequestMessage {
   type: "loadModelPack";
-  /** Files selected with an `<input webkitdirectory>` or drag-and-drop directory. */
-  files: File[];
+  /** The canonical gzip-compressed POSIX ustar model pack. */
+  archive: File;
   backend?: RuntimeBackendPreference;
   /** URL prefix containing ORT's version-matched .mjs/.wasm files. */
   wasmPaths?: string;
@@ -92,15 +75,10 @@ export interface GenerateCommand extends RequestMessage {
   /** Either durationFrames or durationSeconds must be supplied, but not both. */
   durationFrames?: number;
   durationSeconds?: number;
-  /** Protocol-v1 alias for textCfgWeight. */
   cfgWeight?: number;
-  textCfgWeight?: number;
-  constraintCfgWeight?: number;
   historyFrames?: number;
-  futureFrames?: number;
   initialTranslation?: Float32Array;
   initialHeading?: number;
-  constraints?: MotionConstraint[];
 }
 
 export interface ResetSessionCommand extends RequestMessage {
@@ -160,7 +138,6 @@ export interface ModelLoadedEvent extends RequestMessage {
     minFrames: number;
     maxFrames: number;
     generationFrames: number;
-    constraintMaxFrames: number;
     capabilities: RuntimeCapabilities;
     /** Validated conditioning/skeleton metadata needed by the browser editor. */
     manifest: BrowserModelPackManifest;
@@ -396,75 +373,6 @@ function finiteFloat32Array(
   return result;
 }
 
-function parseConstraint(value: unknown, index: number): MotionConstraint {
-  const label = `generate.constraints[${index}]`;
-  if (!isRecord(value)) {
-    throw new TypeError(`${label} must be an object`);
-  }
-  const id = boundedString(value.id, `${label}.id`, 256).trim();
-  if (
-    typeof value.kind !== "string" ||
-    !CONSTRAINT_KINDS.has(value.kind as MotionConstraintKind)
-  ) {
-    throw new TypeError(`${label}.kind is not supported`);
-  }
-  const frame = boundedInteger(value.frame, `${label}.frame`, 0);
-  const endFrame =
-    value.endFrame === undefined
-      ? undefined
-      : boundedInteger(value.endFrame, `${label}.endFrame`, frame);
-  const values = finiteFloat32Array(
-    value.values,
-    `${label}.values`,
-    MAX_WORKER_CONSTRAINT_FEATURES,
-  );
-  const mask = finiteFloat32Array(
-    value.mask,
-    `${label}.mask`,
-    MAX_WORKER_CONSTRAINT_FEATURES,
-  );
-  if (values.length !== mask.length) {
-    throw new RangeError(`${label}.values and mask must have equal lengths`);
-  }
-  let hasObservedFeature = false;
-  for (let feature = 0; feature < mask.length; feature += 1) {
-    if (mask[feature] < 0 || mask[feature] > 1) {
-      throw new RangeError(`${label}.mask[${feature}] must be between 0 and 1`);
-    }
-    hasObservedFeature ||= mask[feature] > 0.5;
-  }
-  if (!hasObservedFeature) {
-    throw new RangeError(`${label}.mask must observe at least one feature`);
-  }
-  return {
-    id,
-    kind: value.kind as MotionConstraintKind,
-    frame,
-    ...(endFrame === undefined ? {} : { endFrame }),
-    values,
-    mask,
-  };
-}
-
-function constraints(value: unknown): MotionConstraint[] | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (!Array.isArray(value)) {
-    throw new TypeError("generate.constraints must be an array");
-  }
-  if (value.length > MAX_WORKER_CONSTRAINTS) {
-    throw new RangeError(
-      `generate.constraints must contain at most ${MAX_WORKER_CONSTRAINTS} entries`,
-    );
-  }
-  const result = value.map(parseConstraint);
-  if (new Set(result.map((constraint) => constraint.id)).size !== result.length) {
-    throw new RangeError("generate.constraints ids must be unique");
-  }
-  return result;
-}
-
 function uint32(value: unknown, label: string): number {
   if (
     typeof value !== "number" ||
@@ -500,7 +408,7 @@ function continuation(value: unknown): HybridContinuation {
     value.hybridDim,
     "continuation.hybridDim",
     1,
-    MAX_WORKER_CONSTRAINT_FEATURES,
+    MAX_WORKER_HYBRID_DIM,
   );
   const hybridTokens = finiteFloat32Array(
     value.hybridTokens,
@@ -600,22 +508,9 @@ function parseGenerate(
     throw new TypeError("generate.branchFrame is only valid in branch mode");
   }
 
-  if (value.cfgWeight !== undefined && value.textCfgWeight !== undefined) {
-    throw new TypeError(
-      "generate.cfgWeight and textCfgWeight must not both be supplied",
-    );
-  }
-  const legacyCfgWeight = cfgWeight(
+  const parsedCfgWeight = cfgWeight(
     value.cfgWeight,
     "generate.cfgWeight",
-  );
-  const parsedTextCfgWeight = cfgWeight(
-    value.textCfgWeight,
-    "generate.textCfgWeight",
-  );
-  const parsedConstraintCfgWeight = cfgWeight(
-    value.constraintCfgWeight,
-    "generate.constraintCfgWeight",
   );
   const parsedTranslation = initialTranslation(
     value.initialTranslation,
@@ -643,13 +538,7 @@ function parseGenerate(
     seed: parsedSeed,
     ...(durationFrames === undefined ? {} : { durationFrames }),
     ...(durationSeconds === undefined ? {} : { durationSeconds }),
-    ...(legacyCfgWeight === undefined ? {} : { cfgWeight: legacyCfgWeight }),
-    ...(parsedTextCfgWeight === undefined
-      ? {}
-      : { textCfgWeight: parsedTextCfgWeight }),
-    ...(parsedConstraintCfgWeight === undefined
-      ? {}
-      : { constraintCfgWeight: parsedConstraintCfgWeight }),
+    ...(parsedCfgWeight === undefined ? {} : { cfgWeight: parsedCfgWeight }),
     ...(value.historyFrames === undefined
       ? {}
       : {
@@ -658,21 +547,10 @@ function parseGenerate(
             "generate.historyFrames",
           )!,
         }),
-    ...(value.futureFrames === undefined
-      ? {}
-      : {
-          futureFrames: optionalFrameCount(
-            value.futureFrames,
-            "generate.futureFrames",
-          )!,
-        }),
     ...(parsedTranslation === undefined
       ? {}
       : { initialTranslation: parsedTranslation }),
     ...(parsedHeading === undefined ? {} : { initialHeading: parsedHeading }),
-    ...(value.constraints === undefined
-      ? {}
-      : { constraints: constraints(value.constraints)! }),
   };
 }
 
@@ -684,26 +562,21 @@ export function parseWorkerCommand(value: unknown): WorkerCommand {
   const id = requestId(value.requestId);
   switch (value.type) {
     case "loadModelPack": {
-      if (!Array.isArray(value.files) || !value.files.every(isFile)) {
-        throw new TypeError(
-          "loadModelPack.files must be an array of File objects",
-        );
+      if (!isFile(value.archive)) {
+        throw new TypeError("loadModelPack.archive must be a File object");
+      }
+      if (!value.archive.name.toLowerCase().endsWith(".tar.gz")) {
+        throw new TypeError("loadModelPack.archive must be a .tar.gz file");
+      }
+      if (value.archive.size === 0) {
+        throw new RangeError("loadModelPack.archive must not be empty");
       }
       if (
-        value.files.length === 0 ||
-        value.files.length > MAX_MODEL_PACK_FILES
+        !Number.isSafeInteger(value.archive.size) ||
+        value.archive.size > MAX_MODEL_PACK_BYTES
       ) {
         throw new RangeError(
-          `loadModelPack.files must contain 1–${MAX_MODEL_PACK_FILES} files`,
-        );
-      }
-      const totalBytes = value.files.reduce(
-        (total, file) => total + file.size,
-        0,
-      );
-      if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_MODEL_PACK_BYTES) {
-        throw new RangeError(
-          `loadModelPack files must total at most ${MAX_MODEL_PACK_BYTES} bytes`,
+          `loadModelPack.archive must be at most ${MAX_MODEL_PACK_BYTES} bytes`,
         );
       }
       if (
@@ -718,7 +591,7 @@ export function parseWorkerCommand(value: unknown): WorkerCommand {
       return {
         type: "loadModelPack",
         requestId: id,
-        files: [...value.files],
+        archive: value.archive,
         backend: optionalBackend(value.backend),
         wasmPaths: value.wasmPaths,
       };

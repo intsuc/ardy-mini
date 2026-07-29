@@ -21,15 +21,6 @@ export interface ArWindow {
   generationTokenOffset: number;
 }
 
-export interface ConditionedArWindow extends ArWindow {
-  futureMask: Float32Array;
-  futureTokenMask: Float32Array;
-  futureFrames: number;
-  futureTokens: number;
-  motionMask: Float32Array;
-  observedMotion: Float32Array;
-}
-
 function assertHistory(
   history: Float32Array | undefined,
   dimensions: BrowserDimensions,
@@ -47,16 +38,6 @@ function assertHistory(
     );
   }
   return tokens;
-}
-
-function roundFramesToTokens(
-  frames: number,
-  dimensions: BrowserDimensions,
-): number {
-  if (!Number.isSafeInteger(frames) || frames < 0) {
-    throw new RangeError("Frame count must be a non-negative integer");
-  }
-  return Math.ceil(frames / dimensions.num_frames_per_token);
 }
 
 export function createArWindow(
@@ -105,126 +86,6 @@ export function createArWindow(
     historyTokens,
     generationTokens,
     generationTokenOffset,
-  };
-}
-
-/**
- * Build the fixed-shape history/generation/future input used by the optional
- * constraint denoiser. Constraint buffers are already expressed in the
- * window's recentered coordinate system.
- */
-export function createConditionedArWindow(
-  dimensions: BrowserDimensions,
-  random: PortableRandom,
-  history: Float32Array | undefined,
-  futureFrames: number,
-  motionMask: Float32Array,
-  observedMotion: Float32Array,
-): ConditionedArWindow {
-  const historyTokens = assertHistory(history, dimensions);
-  const historyFrames = historyTokens * dimensions.num_frames_per_token;
-  const generationTokens = dimensions.generation_tokens;
-  const generationFrames = dimensions.generation_frames;
-  const futureTokens = roundFramesToTokens(futureFrames, dimensions);
-  const paddedFutureFrames =
-    futureTokens * dimensions.num_frames_per_token;
-  const maxTokens =
-    dimensions.constraint_max_tokens ?? dimensions.max_tokens;
-  const maxFrames =
-    dimensions.constraint_max_frames ?? dimensions.max_frames;
-  const generationTokenOffset = historyTokens;
-  if (
-    historyTokens + generationTokens + futureTokens > maxTokens ||
-    historyFrames + generationFrames + paddedFutureFrames > maxFrames
-  ) {
-    throw new RangeError(
-      "History, generation, and future constraints do not fit in the conditioned window",
-    );
-  }
-  if (
-    motionMask.length !== maxFrames * dimensions.motion_dim ||
-    observedMotion.length !== maxFrames * dimensions.motion_dim
-  ) {
-    throw new RangeError(
-      "Constraint buffers do not match the conditioned graph shape",
-    );
-  }
-
-  const x = new Float32Array(maxTokens * dimensions.hybrid_dim);
-  if (history !== undefined) {
-    x.set(history);
-  }
-  const noiseStart = historyTokens * dimensions.hybrid_dim;
-  const noiseEnd =
-    (historyTokens + generationTokens) * dimensions.hybrid_dim;
-  random.fillNormal(x, noiseStart, noiseEnd);
-
-  const historyMask = new Float32Array(maxFrames);
-  const generationMask = new Float32Array(maxFrames);
-  const futureMask = new Float32Array(maxFrames);
-  historyMask.fill(1, 0, historyFrames);
-  generationMask.fill(
-    1,
-    historyFrames,
-    historyFrames + generationFrames,
-  );
-  futureMask.fill(
-    1,
-    historyFrames + generationFrames,
-    historyFrames + generationFrames + paddedFutureFrames,
-  );
-
-  const historyTokenMask = new Float32Array(maxTokens);
-  const generationTokenMask = new Float32Array(maxTokens);
-  const futureTokenMask = new Float32Array(maxTokens);
-  historyTokenMask.fill(1, 0, historyTokens);
-  generationTokenMask.fill(
-    1,
-    historyTokens,
-    historyTokens + generationTokens,
-  );
-  for (let token = 0; token < futureTokens; token += 1) {
-    const absoluteToken = historyTokens + generationTokens + token;
-    const firstFrame = absoluteToken * dimensions.num_frames_per_token;
-    const endFrame = firstFrame + dimensions.num_frames_per_token;
-    let hasObservation = false;
-    for (
-      let frame = firstFrame;
-      frame < endFrame && !hasObservation;
-      frame += 1
-    ) {
-      const offset = frame * dimensions.motion_dim;
-      for (
-        let feature = 0;
-        feature < dimensions.motion_dim;
-        feature += 1
-      ) {
-        if (motionMask[offset + feature] > 0.5) {
-          hasObservation = true;
-          break;
-        }
-      }
-    }
-    futureTokenMask[absoluteToken] = hasObservation ? 1 : 0;
-  }
-
-  return {
-    x,
-    historyMask,
-    generationMask,
-    futureMask,
-    historyTokenMask,
-    generationTokenMask,
-    futureTokenMask,
-    historyFrames,
-    generationFrames,
-    futureFrames: paddedFutureFrames,
-    historyTokens,
-    generationTokens,
-    futureTokens,
-    generationTokenOffset,
-    motionMask,
-    observedMotion,
   };
 }
 

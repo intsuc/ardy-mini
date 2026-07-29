@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-import type { MotionConstraint } from "./constraints";
+import type { MotionConstraint } from "./motion-constraint";
 import type { BrowserModelPackManifest } from "./manifest";
 
 const DEFAULT_CONTACT_THRESHOLD = 0.5;

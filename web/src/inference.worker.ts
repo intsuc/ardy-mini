@@ -10,7 +10,7 @@ import {
   type RuntimeGenerationResult,
   type RuntimeProgress,
 } from "./runtime/engine";
-import { loadModelPackFromFiles } from "./runtime/model-pack";
+import { loadModelPackFromTarGzip } from "./runtime/model-pack";
 import {
   parseWorkerCommand,
   serializeWorkerError,
@@ -126,7 +126,6 @@ function startOperation(
 
 function capabilitiesFor(selectedRuntime: BrowserArdyRuntime): RuntimeCapabilities {
   const manifest = selectedRuntime.manifest;
-  const constraints = manifest.graphs.constraint_denoiser !== undefined;
   const decoderOutputs = manifest.graphs.decoder.outputs;
   const richMotionOutputs =
     decoderOutputs.localRotations !== undefined &&
@@ -138,10 +137,6 @@ function capabilitiesFor(selectedRuntime: BrowserArdyRuntime): RuntimeCapabiliti
     streamingChunks: true,
     sessionContinuation: true,
     branching: true,
-    constraints,
-    futureConstraints:
-      constraints &&
-      (manifest.runtime?.future_constraints_supported ?? true),
     richMotionOutputs,
     // The UI applies a deterministic browser-native correction pass after
     // each completed decode request. This is distinct from ARDY's optional native C++
@@ -175,7 +170,6 @@ function cloneChunk(chunk: RuntimeGenerationChunk): RuntimeGenerationChunk {
     motion: new Float32Array(chunk.motion),
     joints: new Float32Array(chunk.joints),
     hybridTokens: new Float32Array(chunk.hybridTokens),
-    appliedConstraintIds: [...chunk.appliedConstraintIds],
     ...(chunk.localRotations === undefined
       ? {}
       : { localRotations: new Float32Array(chunk.localRotations) }),
@@ -249,8 +243,8 @@ function motionTransfers(
 
 function load(command: Extract<WorkerCommand, { type: "loadModelPack" }>): void {
   startOperation(command.requestId, "loading", async (operation) => {
-    const pack = await loadModelPackFromFiles(
-      command.files,
+    const pack = await loadModelPackFromTarGzip(
+      command.archive,
       (progress) => postProgress(command.requestId, progress),
       operation.controller.signal,
     );
@@ -278,9 +272,6 @@ function load(command: Extract<WorkerCommand, { type: "loadModelPack" }>): void 
         minFrames: loaded.manifest.generation.min_frames,
         maxFrames: loaded.manifest.generation.max_frames,
         generationFrames: loaded.manifest.dimensions.generation_frames,
-        constraintMaxFrames:
-          loaded.manifest.dimensions.constraint_max_frames ??
-          loaded.manifest.dimensions.max_frames,
         capabilities,
         manifest: loaded.manifest,
       },
@@ -344,11 +335,8 @@ function generate(command: Extract<WorkerCommand, { type: "generate" }>): void {
     const result = await session.generate({
       prompt: command.prompt,
       durationFrames: frameCountFor(selectedRuntime, command),
-      textCfgWeight: command.textCfgWeight ?? command.cfgWeight,
-      constraintCfgWeight: command.constraintCfgWeight,
+      cfgWeight: command.cfgWeight,
       historyFrames: command.historyFrames,
-      futureFrames: command.futureFrames,
-      constraints: command.constraints,
       signal: operation.controller.signal,
       onProgress: (progress) => postProgress(command.requestId, progress),
       onChunk: (chunk) => {

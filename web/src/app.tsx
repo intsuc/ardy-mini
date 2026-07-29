@@ -260,7 +260,7 @@ function ModelSection() {
             </span>
           </CardTitle>
           <CardDescription id="model-detail">
-            Choose an exported Core40 browser-pack folder.
+            Choose the exported Core40 .tar.gz model pack.
           </CardDescription>
           <CardAction>
             <Badge
@@ -288,8 +288,11 @@ function ModelSection() {
         </CardHeader>
         <CardFooter id="model-setup-help">
           <CardDescription>
-            Select <code>artifacts/browser/core40</code> (about 1.4 GiB,
-            four ONNX graphs). The pack is stored only in this browser.{" "}
+            Select{" "}
+            <code>
+              artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz
+            </code>
+            . The compressed pack is stored only in this browser.{" "}
             <ButtonLink
               variant="link"
               size="xs"
@@ -317,7 +320,7 @@ function ModelSection() {
         <input
           id="model-file-input"
           type="file"
-          multiple
+          accept=".tar.gz,application/gzip"
           hidden
           aria-hidden="true"
         />

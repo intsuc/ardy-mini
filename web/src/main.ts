@@ -6,10 +6,7 @@ import {
   type RuntimeGenerationChunk,
   type RuntimeGenerationResult,
 } from "./runtime/engine";
-import {
-  validateModelPackManifest,
-  type BrowserModelPackManifest,
-} from "./runtime/manifest";
+import { type BrowserModelPackManifest } from "./runtime/manifest";
 import {
   type GenerationCompleteEvent,
   type GenerationMode,
@@ -61,23 +58,12 @@ import {
 const UINT32_MAX = 0xffff_ffff;
 const ALLOWED_DURATIONS = new Set([2, 4, 6, 8, 10]);
 const CACHE_ROOT = "ardy-mini-model-cache";
-const CACHE_PACK = "active-pack";
-const CACHE_INDEX = "index.json";
-const PACK_MANIFEST = "manifest.json";
+const CACHE_ARCHIVE = "active-pack.tar.gz";
 const ORT_WASM_PATH = new URL("ort/", document.baseURI).href;
 const DEFAULT_TEXT_CFG_WEIGHT = 3.5;
-const DEFAULT_CONSTRAINT_CFG_WEIGHT = 1;
 const DEFAULT_HISTORY_FRAMES = 40;
-const DEFAULT_FUTURE_CROP_FRAMES = 80;
 const DEFAULT_REPLAN_BUFFER_FRAMES = 20;
 const DEFAULT_REPLAN_THRESHOLD_FRAMES = 10;
-
-type FileWithRelativePath = File & { readonly webkitRelativePath?: string };
-
-interface CacheIndex {
-  schemaVersion: 1;
-  files: Array<{ path: string; size: number; lastModified: number; type: string }>;
-}
 
 interface FormValues {
   prompt: string;
@@ -99,10 +85,6 @@ export function cameraMoveForCode(
   if (code === "KeyS") return [-1, 0];
   if (code === "KeyD") return [0, 1];
   return null;
-}
-
-interface DirectoryPickerWindow {
-  showDirectoryPicker?: (options?: { mode?: "read" }) => Promise<FileSystemDirectoryHandle>;
 }
 
 interface ActiveGeneration {
@@ -161,62 +143,8 @@ export function formatBytes(bytes: number): string {
   return `${value >= 10 || exponent === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[exponent]}`;
 }
 
-function canonicalPackPath(file: FileWithRelativePath): string {
-  return (file.webkitRelativePath || file.name)
-    .replaceAll("\\", "/")
-    .replace(/^\.\/+/, "");
-}
-
-/**
- * Strip the directory selected by `<input webkitdirectory>` while retaining all
- * paths below the pack's manifest.
- */
-export function canonicalizePackFiles(input: readonly File[]): File[] {
-  if (input.length === 0) {
-    throw new Error("The selected model-pack folder is empty.");
-  }
-  const entries = input.map((file) => ({ file, path: canonicalPackPath(file) }));
-  const manifestPaths = entries.filter(
-    ({ path }) => path === PACK_MANIFEST || path.endsWith(`/${PACK_MANIFEST}`),
-  );
-  if (manifestPaths.length !== 1) {
-    throw new Error(
-      manifestPaths.length === 0
-        ? "No manifest.json was found in the selected folder."
-        : "The selected folder contains more than one manifest.json.",
-    );
-  }
-
-  const manifestPath = manifestPaths[0].path;
-  const prefix = manifestPath.slice(0, manifestPath.length - PACK_MANIFEST.length);
-  const normalized = entries.map(({ file, path }) => {
-    if (prefix && !path.startsWith(prefix)) {
-      throw new Error(
-        "Every model-pack file must be inside the folder containing manifest.json.",
-      );
-    }
-    const relativePath = prefix ? path.slice(prefix.length) : path;
-    const parts = relativePath.split("/");
-    if (
-      !relativePath ||
-      relativePath.startsWith("/") ||
-      relativePath.endsWith("/") ||
-      parts.some((part) => !part || part === "." || part === "..")
-    ) {
-      throw new Error(`Unsafe model-pack path: ${relativePath || path}`);
-    }
-    return new File([file], relativePath, {
-      type: file.type,
-      lastModified: file.lastModified,
-    });
-  });
-
-  normalized.sort((left, right) => {
-    if (left.name === PACK_MANIFEST) return -1;
-    if (right.name === PACK_MANIFEST) return 1;
-    return left.name.localeCompare(right.name);
-  });
-  return normalized;
+export function isModelPackArchive(file: File): boolean {
+  return file.size > 0 && file.name.toLowerCase().endsWith(".tar.gz");
 }
 
 export function shouldAutoplayMotion(reducedMotion: boolean): boolean {
@@ -296,10 +224,8 @@ function humanizeStage(stage: string): string {
     "loading-tokenizer": "Loading tokenizer",
     "loading-sessions": "Preparing inference sessions",
     "encoding-text": "Encoding motion prompt",
-    "preparing-constraints": "Preparing constraints",
     denoising: "Generating motion",
     decoding: "Decoding skeleton",
-    postprocessing: "Correcting motion",
   };
   return labels[stage] ?? stage;
 }
@@ -312,11 +238,9 @@ function progressFraction(event: ProgressEvent): number {
 function generationProgress(event: ProgressEvent): number {
   const local = progressFraction(event);
   const stage = event.stage as string;
-  if (stage === "encoding-text") return local * 0.06;
-  if (stage === "preparing-constraints") return 0.06 + local * 0.04;
+  if (stage === "encoding-text") return local * 0.1;
   if (stage === "denoising") return 0.1 + local * 0.78;
-  if (stage === "decoding") return 0.88 + local * 0.1;
-  if (stage === "postprocessing") return 0.98 + local * 0.02;
+  if (stage === "decoding") return 0.88 + local * 0.12;
   return local;
 }
 
@@ -332,33 +256,6 @@ function modelLoadProgress(event: ProgressEvent): number {
   };
   const range = ranges[event.stage];
   return range ? range[0] + local * (range[1] - range[0]) : local;
-}
-
-async function collectDirectoryFiles(
-  directory: FileSystemDirectoryHandle,
-  prefix = "",
-): Promise<File[]> {
-  const files: File[] = [];
-  for await (const [name, handle] of directory.entries()) {
-    const path = prefix ? `${prefix}/${name}` : name;
-    if (handle.kind === "directory") {
-      files.push(
-        ...(await collectDirectoryFiles(
-          handle as FileSystemDirectoryHandle,
-          path,
-        )),
-      );
-    } else {
-      const source = await (handle as FileSystemFileHandle).getFile();
-      files.push(
-        new File([source], path, {
-          type: source.type,
-          lastModified: source.lastModified,
-        }),
-      );
-    }
-  }
-  return files;
 }
 
 function supportsPersistentPackCache(): boolean {
@@ -384,36 +281,14 @@ async function getCacheRoot(
   }
 }
 
-async function ensureDirectory(
-  root: FileSystemDirectoryHandle,
-  parts: readonly string[],
-): Promise<FileSystemDirectoryHandle> {
-  let directory = root;
-  for (const part of parts) {
-    directory = await directory.getDirectoryHandle(part, { create: true });
-  }
-  return directory;
-}
-
-async function writeTextFile(
-  directory: FileSystemDirectoryHandle,
-  name: string,
-  text: string,
-): Promise<void> {
-  const handle = await directory.getFileHandle(name, { create: true });
-  const writable = await handle.createWritable();
-  await writable.write(text);
-  await writable.close();
-}
-
 async function cacheModelPack(
-  files: readonly File[],
+  archive: File,
   onProgress: (completedBytes: number, totalBytes: number) => void,
 ): Promise<void> {
   const root = await getCacheRoot(true);
   if (!root) throw new Error("Persistent browser storage is unavailable.");
 
-  const totalBytes = files.reduce((total, file) => total + file.size, 0);
+  const totalBytes = archive.size;
   const estimate = await navigator.storage.estimate();
   const available = (estimate.quota ?? 0) - (estimate.usage ?? 0);
   if (estimate.quota !== undefined && available < totalBytes * 1.05) {
@@ -423,86 +298,55 @@ async function cacheModelPack(
   }
 
   await navigator.storage.persist?.();
-  try {
-    await root.removeEntry(CACHE_PACK, { recursive: true });
-  } catch (error) {
-    if (!(error instanceof DOMException && error.name === "NotFoundError")) {
-      throw error;
-    }
-  }
-  const packDirectory = await root.getDirectoryHandle(CACHE_PACK, {
+  const handle = await root.getFileHandle(CACHE_ARCHIVE, {
     create: true,
   });
+  const writable = await handle.createWritable();
+  const reader = archive.stream().getReader();
   let completedBytes = 0;
-  const index: CacheIndex = { schemaVersion: 1, files: [] };
-
-  for (const file of files) {
-    const parts = file.name.split("/");
-    const filename = parts.pop();
-    if (!filename) throw new Error(`Invalid model-pack path ${file.name}.`);
-    const directory = await ensureDirectory(packDirectory, parts);
-    const handle = await directory.getFileHandle(filename, { create: true });
-    const writable = await handle.createWritable();
-    await writable.write(file);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await writable.write(value);
+      completedBytes += value.byteLength;
+      onProgress(completedBytes, totalBytes);
+    }
     await writable.close();
-    completedBytes += file.size;
-    index.files.push({
-      path: file.name,
-      size: file.size,
-      lastModified: file.lastModified,
-      type: file.type,
-    });
-    onProgress(completedBytes, totalBytes);
+  } catch (error) {
+    await reader.cancel(error).catch(() => {});
+    await writable.abort(error).catch(() => {});
+    throw error;
   }
-
-  await writeTextFile(root, CACHE_INDEX, JSON.stringify(index));
 }
 
-async function readCachedModelPack(): Promise<File[] | null> {
+async function readCachedModelPack(): Promise<File | null> {
   const root = await getCacheRoot(false);
   if (!root) return null;
   try {
-    const indexHandle = await root.getFileHandle(CACHE_INDEX);
-    const index = JSON.parse(
-      await (await indexHandle.getFile()).text(),
-    ) as CacheIndex;
-    if (
-      index.schemaVersion !== 1 ||
-      !Array.isArray(index.files) ||
-      index.files.length === 0
-    ) {
+    const stored = await (
+      await root.getFileHandle(CACHE_ARCHIVE)
+    ).getFile();
+    if (stored.size === 0) {
+      await removeCachedModelPack();
       return null;
     }
-    const packDirectory = await root.getDirectoryHandle(CACHE_PACK);
-    const files: File[] = [];
-    for (const entry of index.files) {
-      if (!entry || typeof entry.path !== "string") return null;
-      const parts = entry.path.split("/");
-      const filename = parts.pop();
-      if (
-        !filename ||
-        parts.some((part) => !part || part === "." || part === "..")
-      ) {
-        return null;
-      }
-      let directory = packDirectory;
-      for (const part of parts) {
-        directory = await directory.getDirectoryHandle(part);
-      }
-      const stored = await (
-        await directory.getFileHandle(filename)
-      ).getFile();
-      if (stored.size !== entry.size) return null;
-      files.push(
-        new File([stored], entry.path, {
-          type: entry.type,
-          lastModified: entry.lastModified,
-        }),
-      );
+    return new File([stored], CACHE_ARCHIVE, {
+      type: "application/gzip",
+      lastModified: stored.lastModified,
+    });
+  } catch (error) {
+    if (
+      error instanceof DOMException &&
+      (error.name === "NotFoundError" || error.name === "TypeMismatchError")
+    ) {
+      // The former directory-pack cache used this same root. It is not a
+      // supported input and would otherwise consume quota beside the new
+      // archive-only cache.
+      await removeCachedModelPack();
+      return null;
     }
-    return canonicalizePackFiles(files);
-  } catch {
-    return null;
+    throw error;
   }
 }
 
@@ -518,22 +362,6 @@ async function removeCachedModelPack(): Promise<void> {
       throw error;
     }
   }
-}
-
-async function manifestFromFiles(
-  files: readonly File[],
-): Promise<BrowserModelPackManifest> {
-  const file = files.find((candidate) => candidate.name === PACK_MANIFEST);
-  if (!file) throw new Error("The canonical model pack has no manifest.");
-  let value: unknown;
-  try {
-    value = JSON.parse(await file.text()) as unknown;
-  } catch (error) {
-    throw new Error(
-      `manifest.json is invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  return validateModelPackManifest(value);
 }
 
 function sameSkeleton(
@@ -871,8 +699,6 @@ export function bootstrap(): () => void {
   const dismissVrmError =
     requiredElement<HTMLButtonElement>("dismiss-vrm-error");
 
-  fileInput.setAttribute("webkitdirectory", "");
-  fileInput.setAttribute("directory", "");
   restartFromNow.disabled = true;
 
   const hasWebGpu = "gpu" in navigator;
@@ -918,14 +744,13 @@ export function bootstrap(): () => void {
   let activeGeneration: ActiveGeneration | null = null;
   let activeRestoreRequest: string | null = null;
   let announceContinuationRestore = true;
-  let lastPackFiles: File[] | null = null;
+  let lastPackArchive: File | null = null;
   let packPendingCache = false;
   let cachedPack = false;
   let modelLabel = "";
   let modelBackend = "";
   let modelInfo: ModelLoadedEvent["model"] | null = null;
   let activeManifest: BrowserModelPackManifest | null = null;
-  let pendingManifest: BrowserModelPackManifest | null = null;
   let generationProgressValue = 0;
   let modelProgressValue = 0;
   let generationReturnFocus: HTMLElement | null = null;
@@ -1262,8 +1087,10 @@ export function bootstrap(): () => void {
   }
 
   function setGenerationBusy(active: boolean, background = false): void {
+    const activeElement = document.activeElement;
     const returnFocus =
-      !active && document.activeElement === cancelGeneration
+      !active &&
+      (activeElement === cancelGeneration || activeElement === document.body)
         ? generationReturnFocus
         : null;
     generationProgressElement.dataset.state = active
@@ -1288,7 +1115,7 @@ export function bootstrap(): () => void {
     if (!active) {
       generationReturnFocus = null;
       if (returnFocus?.isConnected) {
-        window.requestAnimationFrame(() => returnFocus.focus());
+        returnFocus.focus({ preventScroll: true });
       }
     }
   }
@@ -1351,39 +1178,18 @@ export function bootstrap(): () => void {
 
   if (viewer) viewer.onPlaybackChange = updatePlayback;
 
-  async function chooseModelPack(): Promise<File[] | null> {
-    const picker = (window as unknown as DirectoryPickerWindow)
-      .showDirectoryPicker;
-    if (!picker) {
-      fileInput.click();
-      return null;
-    }
-    try {
-      const directory = await picker({ mode: "read" });
-      return canonicalizePackFiles(await collectDirectoryFiles(directory));
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
-        return null;
-      }
-      throw error;
-    }
-  }
-
   async function loadModelPack(
-    files: File[],
+    archive: File,
     shouldCache: boolean,
   ): Promise<void> {
     clearError();
     clearModelError();
-    const canonicalFiles = canonicalizePackFiles(files);
-    const manifest = await manifestFromFiles(canonicalFiles);
-    const totalBytes = canonicalFiles.reduce(
-      (total, file) => total + file.size,
-      0,
-    );
+    if (!isModelPackArchive(archive)) {
+      throw new Error("Choose a non-empty .tar.gz model-pack file.");
+    }
+    const totalBytes = archive.size;
     activeLoadRequest = requestId("load");
-    lastPackFiles = canonicalFiles;
-    pendingManifest = manifest;
+    lastPackArchive = archive;
     packPendingCache = shouldCache;
     modelLoading = true;
     modelReady = false;
@@ -1402,24 +1208,24 @@ export function bootstrap(): () => void {
     setModelStatus(
       "loading",
       "Loading Core40 model",
-      `${canonicalFiles.length} files · ${formatBytes(totalBytes)}`,
+      `${archive.name} · ${formatBytes(totalBytes)}`,
       "Loading",
     );
     updateGenerateAvailability();
     announce(
-      `Loading model pack, ${formatBytes(totalBytes)}. Files stay on this device.`,
+      `Loading model pack, ${formatBytes(totalBytes)}. The archive stays on this device.`,
     );
     const command: LoadModelPackCommand = {
       type: "loadModelPack",
       requestId: activeLoadRequest,
-      files: canonicalFiles,
+      archive,
       backend: backend.value as RuntimeBackendPreference,
       wasmPaths: ORT_WASM_PATH,
     };
     postCommand(command);
   }
 
-  async function persistLoadedPack(files: File[]): Promise<void> {
+  async function persistLoadedPack(archive: File): Promise<void> {
     if (!supportsPersistentPackCache()) {
       modelDetail.textContent = modelInfo?.id ?? modelLabel;
       return;
@@ -1434,7 +1240,7 @@ export function bootstrap(): () => void {
     modelProgressLabel.textContent = "Caching";
     updateGenerateAvailability();
     try {
-      await cacheModelPack(files, (completed, total) => {
+      await cacheModelPack(archive, (completed, total) => {
         const percent =
           total > 0 ? Math.round((completed / total) * 100) : 0;
         modelProgressValue = Math.max(modelProgressValue, percent / 100);
@@ -1525,8 +1331,7 @@ export function bootstrap(): () => void {
     modelLoading = false;
     modelReady = true;
     activeLoadRequest = null;
-    activeManifest = event.model.manifest ?? pendingManifest;
-    pendingManifest = null;
+    activeManifest = event.model.manifest;
     modelInfo = event.model;
     modelLabel = event.model.variant || event.model.id;
     modelBackend =
@@ -1559,9 +1364,9 @@ export function bootstrap(): () => void {
     } else {
       resetWorkerSession();
     }
-    if (packPendingCache && lastPackFiles) {
+    if (packPendingCache && lastPackArchive) {
       packPendingCache = false;
-      void persistLoadedPack(lastPackFiles);
+      void persistLoadedPack(lastPackArchive);
     }
   }
 
@@ -1727,6 +1532,7 @@ export function bootstrap(): () => void {
       durationSeconds?: number;
       branchFrame?: number;
       background?: boolean;
+      returnFocus?: HTMLElement;
     } = {},
   ): void {
     if (
@@ -1778,10 +1584,11 @@ export function bootstrap(): () => void {
           : "Starting session";
     if (!background) {
       generationReturnFocus =
-        document.activeElement instanceof HTMLElement &&
+        options.returnFocus ??
+        (document.activeElement instanceof HTMLElement &&
         document.activeElement !== document.body
           ? document.activeElement
-          : generate;
+          : generate);
     }
     setGenerationBusy(true, background);
     if (!background) {
@@ -1794,10 +1601,6 @@ export function bootstrap(): () => void {
         }
       });
     }
-    const requestedFuture = Math.min(
-      DEFAULT_FUTURE_CROP_FRAMES,
-      modelInfo.constraintMaxFrames,
-    );
     const command: WorkerCommand = {
       type: "generate",
       requestId: id,
@@ -1817,13 +1620,11 @@ export function bootstrap(): () => void {
             durationSeconds:
               options.durationSeconds ?? values.durationSeconds,
           }),
-      textCfgWeight: DEFAULT_TEXT_CFG_WEIGHT,
-      constraintCfgWeight: DEFAULT_CONSTRAINT_CFG_WEIGHT,
+      cfgWeight: DEFAULT_TEXT_CFG_WEIGHT,
       historyFrames: Math.min(
         DEFAULT_HISTORY_FRAMES,
         activeManifest?.dimensions.history_frames ?? DEFAULT_HISTORY_FRAMES,
       ),
-      futureFrames: requestedFuture,
       ...(mode === "replace"
         ? {
             initialTranslation: new Float32Array(
@@ -1963,7 +1764,6 @@ export function bootstrap(): () => void {
           const wasRestoring = event.requestId === activeRestoreRequest;
           if (wasLoading) {
             activeLoadRequest = null;
-            pendingManifest = null;
             modelLoading = false;
             modelReady = false;
             modelProgress.hidden = true;
@@ -2040,7 +1840,14 @@ export function bootstrap(): () => void {
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    startGeneration("replace");
+    const submitter =
+      event.submitter instanceof HTMLElement
+        ? event.submitter
+        : document.activeElement instanceof HTMLElement &&
+            document.activeElement !== document.body
+          ? document.activeElement
+          : generate;
+    startGeneration("replace", { returnFocus: submitter });
   });
 
   prompt.addEventListener("input", updatePrompt);
@@ -2077,8 +1884,8 @@ export function bootstrap(): () => void {
       backendHelp.textContent =
         "Auto prefers WebGPU and falls back to WebAssembly.";
     }
-    if (lastPackFiles && modelReady) {
-      void loadModelPack(lastPackFiles, false).catch((error) =>
+    if (lastPackArchive && modelReady) {
+      void loadModelPack(lastPackArchive, false).catch((error) =>
         showModelError(
           "Could not reload model",
           error instanceof Error ? error.message : String(error),
@@ -2087,22 +1894,12 @@ export function bootstrap(): () => void {
     }
   });
 
-  importModel.addEventListener("click", async () => {
-    try {
-      const files = await chooseModelPack();
-      if (files) await loadModelPack(files, true);
-    } catch (error) {
-      showModelError(
-        "Could not open model pack",
-        error instanceof Error ? error.message : String(error),
-      );
-    }
+  importModel.addEventListener("click", () => {
+    fileInput.click();
   });
 
   fileInput.addEventListener("change", () => {
-    const selected = fileInput.files?.length
-      ? Array.from(fileInput.files)
-      : null;
+    const selected = fileInput.files?.item(0) ?? null;
     fileInput.value = "";
     if (!selected) return;
     void loadModelPack(selected, true).catch((error) =>
@@ -2117,7 +1914,7 @@ export function bootstrap(): () => void {
     try {
       await removeCachedModelPack();
       cachedPack = false;
-      lastPackFiles = null;
+      lastPackArchive = null;
       activeManifest = null;
       currentContinuation = null;
       modelReady = false;
@@ -2127,7 +1924,7 @@ export function bootstrap(): () => void {
       setModelStatus(
         "missing",
         "Model pack required",
-        "Choose the exported Core40 browser-pack folder.",
+        "Choose the exported Core40 .tar.gz model pack.",
         "Not loaded",
       );
       updateGenerateAvailability();
@@ -2154,11 +1951,12 @@ export function bootstrap(): () => void {
   });
 
   restartGeneration.addEventListener("click", () =>
-    startGeneration("replace"),
+    startGeneration("replace", { returnFocus: restartGeneration }),
   );
   restartFromNow.addEventListener("click", () => {
     const frame = viewer?.getPlaybackState().frame ?? 0;
     startGeneration("branch", {
+      returnFocus: restartFromNow,
       branchFrame: frame,
       durationFrames: integerValue(
         targetBufferControl.getSnapshot().value,
@@ -2170,7 +1968,7 @@ export function bootstrap(): () => void {
   });
   applyPrompt.addEventListener("click", () => {
     if (!currentMotion) {
-      startGeneration("replace");
+      startGeneration("replace", { returnFocus: applyPrompt });
       return;
     }
     const playback = viewer?.getPlaybackState();
@@ -2180,6 +1978,7 @@ export function bootstrap(): () => void {
       (playback?.frame ?? 0) + buffer,
     );
     startGeneration("branch", {
+      returnFocus: applyPrompt,
       branchFrame,
       durationFrames: integerValue(
         targetBufferControl.getSnapshot().value,
@@ -2383,18 +2182,18 @@ export function bootstrap(): () => void {
     "Checking",
   );
   void readCachedModelPack()
-    .then(async (files) => {
+    .then(async (archive) => {
       if (disposed) return;
-      if (files) {
+      if (archive) {
         cachedPack = true;
         removeModel.hidden = false;
-        await loadModelPack(files, false);
+        await loadModelPack(archive, false);
       } else {
         modelCard.removeAttribute("aria-busy");
         setModelStatus(
           "missing",
           "Model pack required",
-          "Choose the exported Core40 browser-pack folder.",
+          "Choose the exported Core40 .tar.gz model pack.",
           "Not loaded",
         );
       }

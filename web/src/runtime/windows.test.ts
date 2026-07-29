@@ -8,7 +8,6 @@ import { PortableRandom } from "./random";
 import {
   copyTailHistory,
   createArWindow,
-  createConditionedArWindow,
   createMotionPadMask,
   decoderValidTokensForFrames,
   recenterAndRequantize,
@@ -72,30 +71,6 @@ describe("AR window construction", () => {
     const mask = createMotionPadMask(core40, 11);
     expect(mask.slice(0, 44)).toEqual(new Float32Array(44).fill(1));
     expect(mask.slice(44)).toEqual(new Float32Array(36));
-  });
-
-  it("marks only future tokens that contain a sparse observation", () => {
-    const conditionedDimensions: BrowserDimensions = {
-      ...dimensions,
-      constraint_max_tokens: 6,
-      constraint_max_frames: 6,
-    };
-    const motionMask = new Float32Array(6 * dimensions.motion_dim);
-    const observedMotion = new Float32Array(motionMask.length);
-    // Two history + two generation frames put future at indices 4 and 5.
-    motionMask[5 * dimensions.motion_dim + 2] = 1;
-    observedMotion[5 * dimensions.motion_dim + 2] = 0.25;
-    const window = createConditionedArWindow(
-      conditionedDimensions,
-      new PortableRandom(7),
-      new Float32Array(2 * dimensions.hybrid_dim),
-      2,
-      motionMask,
-      observedMotion,
-    );
-    expect([...window.futureMask]).toEqual([0, 0, 0, 0, 1, 1]);
-    expect([...window.futureTokenMask]).toEqual([0, 0, 0, 0, 0, 1]);
-    expect(window.observedMotion).toBe(observedMotion);
   });
 });
 

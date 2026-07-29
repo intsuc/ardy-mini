@@ -53,17 +53,17 @@ async function runGeneration(
 test.describe("real browser model-pack", () => {
   test.skip(
     !configuredPack,
-    "Set ARDY_BROWSER_MODEL_PACK to opt into the ~1.4 GiB four-graph real-model test.",
+    "Set ARDY_BROWSER_MODEL_PACK to the exported .tar.gz archive to opt into the real-model test.",
   );
 
-  test("loads four sessions and exercises protocol-v2 session generation", async ({
+  test("loads the archive and exercises browser session generation", async ({
     page,
   }, testInfo) => {
     testInfo.setTimeout(45 * 60 * 1000);
     expect(["auto", "webgpu", "wasm"]).toContain(configuredBackend);
 
     // This test covers inference rather than persistence. Avoid a second
-    // ~1.4 GiB OPFS copy while running in CI or on a developer workstation.
+    // OPFS copy while running in CI or on a developer workstation.
     await page.addInitScript(() => {
       try {
         Object.defineProperty(navigator, "storage", {
@@ -88,7 +88,7 @@ test.describe("real browser model-pack", () => {
     await page.goto("/");
     await page.waitForFunction(() => document.querySelector("#backend") !== null);
     await expect(page.locator("#model-setup-help")).toContainText(
-      "about 1.4 GiB, four ONNX graphs",
+      "ardy-minilm-core40-browser-v1.tar.gz",
     );
 
     const environment = await page.evaluate(async () => {
@@ -169,7 +169,6 @@ test.describe("real browser model-pack", () => {
     for (const graph of [
       "text_encoder.onnx",
       "denoiser.onnx",
-      "denoiser_constraints.onnx",
       "decoder.onnx",
     ]) {
       expect(joinedLoadStages).toContain(graph);

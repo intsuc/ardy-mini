@@ -7,22 +7,13 @@ import {
   canAttemptGeneration,
   canContinueGeneration,
   cameraMoveForCode,
-  canonicalizePackFiles,
   formatBytes,
   formatTime,
+  isModelPackArchive,
   shouldAutoplayMotion,
   shouldResetMotionPresentation,
   validateGenerationForm,
 } from "./main";
-
-function directoryFile(path: string, contents = "x"): File {
-  const file = new File([contents], path.split("/").at(-1) ?? path);
-  Object.defineProperty(file, "webkitRelativePath", {
-    configurable: true,
-    value: path,
-  });
-  return file;
-}
 
 describe("generation form validation", () => {
   it("accepts the supported prompt, duration, and uint32 seed domain", () => {
@@ -66,29 +57,15 @@ describe("generation form validation", () => {
   });
 });
 
-describe("model-pack file normalization", () => {
-  it("strips the directory-picker root and retains nested graph paths", () => {
-    const files = canonicalizePackFiles([
-      directoryFile("ardy-pack/graphs/decoder.onnx", "decoder"),
-      directoryFile("ardy-pack/manifest.json", "{}"),
-      directoryFile("ardy-pack/tokenizer/tokenizer.json", "{}"),
-    ]);
-
-    expect(files.map((file) => file.name)).toEqual([
-      "manifest.json",
-      "graphs/decoder.onnx",
-      "tokenizer/tokenizer.json",
-    ]);
-  });
-
-  it("requires exactly one manifest", () => {
-    expect(() => canonicalizePackFiles([directoryFile("ardy-pack/model.onnx")])).toThrow(/manifest/);
-    expect(() =>
-      canonicalizePackFiles([
-        directoryFile("one/manifest.json"),
-        directoryFile("two/manifest.json"),
-      ]),
-    ).toThrow(/more than one/);
+describe("model-pack archive selection", () => {
+  it("accepts only a non-empty .tar.gz file", () => {
+    expect(
+      isModelPackArchive(
+        new File(["gzip bytes"], "ardy-minilm-core40-browser-v1.tar.gz"),
+      ),
+    ).toBe(true);
+    expect(isModelPackArchive(new File(["x"], "legacy-pack.zip"))).toBe(false);
+    expect(isModelPackArchive(new File([], "empty.tar.gz"))).toBe(false);
   });
 });
 

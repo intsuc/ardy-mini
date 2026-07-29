@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export * from "./ddim";
-export * from "./constraints";
 export * from "./engine";
 export * from "./hash";
 export * from "./manifest";
 export * from "./model-pack";
+export * from "./motion-constraint";
 export * from "./postprocess";
 export * from "./protocol";
 export * from "./random";

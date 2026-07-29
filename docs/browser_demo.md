@@ -25,7 +25,8 @@ The supported model artifact is intentionally narrow:
 - well-formed, typo-free English motion prompts;
 - 20 FPS and a 40-frame (2-second) generation horizon;
 - the current structured-output browser contract (`runtime.contract_revision`
-  `2`) with decoder-local and decoder-global rotation tracks.
+  `3`, model-pack schema `2`) with decoder-local and decoder-global rotation
+  tracks.
 
 The form accepts any non-empty prompt of at most 280 characters, but that
 validation does not expand the trained model's supported language. Prompts
@@ -61,18 +62,14 @@ Generation commands use these fixed internal values:
 | Setting | Internal value |
 |---|---:|
 | Text CFG | `3.5` |
-| Constraint CFG | `1.0` |
 | History | up to `40` frames, clamped to the manifest capacity |
-| Future window | `80` frames, clamped to the pack capacity |
 | Live-prompt replan buffer | `20` frames |
 | Automatic-extension threshold | `10` frames |
 | Initial root translation / heading | `[0, 0, 0]` / `0` radians |
 
 Duration (2–10 seconds), seed, backend, continuous generation, and its target
-buffer remain normal user controls. The constraint CFG and future-window
-values remain part of the worker/model contract, but the current application
-sends no user-authored kinematic constraints and uses the unconstrained
-denoiser path.
+buffer remain normal user controls. The browser model and worker contracts do
+not contain a constraint graph or constraint-generation inputs.
 
 The browser application does not expose or apply root/full-body/end-effector
 constraints, waypoints, dense trajectories, target velocity/heading, an
@@ -111,7 +108,8 @@ motion. The current exported pack supplies both. The manifest should contain:
 
 ```json
 {
-  "runtime": { "contract_revision": 2 },
+  "schema_version": 2,
+  "runtime": { "contract_revision": 3 },
   "graphs": {
     "decoder": {
       "outputs": {
@@ -123,12 +121,9 @@ motion. The current exported pack supplies both. The manifest should contain:
 }
 ```
 
-Do not use `schema_version` alone to distinguish old and current packs. With an
-older positions-only pack, the skeleton still animates and the VRM hips follows
-position, but the avatar bones remain in their rest/T pose. This is
-intentional: the browser does not guess bone rotations from positions.
-Regenerate the pack with the current exporter rather than adding a positional
-fallback.
+The loader accepts only the current gzip archive/schema contract. Older
+directory packs and positions-only packs are rejected; regenerate them with
+the current exporter.
 
 ## Architecture
 
@@ -140,7 +135,6 @@ separate WebAssembly sessions if WebGPU session creation fails.
 |---|---|---|
 | `text_encoder.onnx` | WordPiece IDs, attention mask, token types | direct 2,048-D root/body condition (two 1,024-D branches) |
 | `denoiser.onnx` | text CFG, up to 40 history frames, 40 generation frames, text condition, timestep | clean 148-D hybrid tokens for unconstrained windows |
-| `denoiser_constraints.onnx` | independent text/constraint CFG, history/generation/future masks, text condition, sparse observed motion | retained in the exported contract for constrained-runtime compatibility; the current UI does not select it |
 | `decoder.onnx` | hybrid tokens, valid-token mask, accumulated root translation | normalized motion, joints, local/global rotations, roots/headings, contacts |
 
 The JavaScript runtime supplies a reproducible portable Gaussian random stream
@@ -149,11 +143,9 @@ retains global hybrid tokens, recenters the latest history, and requantizes
 the latent body features with the manifest's FSQ constants.
 
 The worker protocol supports replace, append, branch, chunk progress,
-continuation restore, rich motion arrays, and capability reporting. Its schema
-still understands the constraint-capable pack contract, but the current
-application does not construct or send a kinematic-constraint set. Typed-array
-snapshots are transferred to the main thread so streaming cannot detach state
-that the worker still needs.
+continuation restore, rich motion arrays, and capability reporting. It has no
+constraint-graph inputs. Typed-array snapshots are transferred to the main
+thread so streaming cannot detach state that the worker still needs.
 
 ## Export a local model pack
 
@@ -170,45 +162,52 @@ uv sync --extra browser
 uv run --extra browser python scripts/export_browser.py \
   --checkpoints-dir checkpoints \
   --minilm-artifact artifacts/minilm-ardy-core40 \
-  --output-dir artifacts/browser/core40
+  --output artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz
 ```
 
-The exporter checks all four ONNX files and, unless `--skip-verify` is passed,
+The exporter checks all three ONNX files and, unless `--skip-verify` is passed,
 compares each graph with its PyTorch source through ONNX Runtime CPU.
 `manifest.json` records graph contracts, tensor dimensions, diffusion and
 quantization constants, normalization statistics, motion layout, skeleton
 metadata, capabilities, file sizes, SHA-256 digests, model compatibility, and
-license notices.
+license notices. Before ONNX export, it specializes the denoiser's
+non-persistent sinusoidal lookup tables to the ten reachable diffusion
+timesteps and the fixed 20-token browser AR window. It then writes a
+deterministic POSIX ustar archive through gzip; no unpacked model-pack output is
+kept.
 
 Confirm that the result is the current structured-output contract:
 
 ```bash
+tar -xOzf artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz manifest.json |
 jq '{
+  schema_version,
   contract_revision: .runtime.contract_revision,
   local_rotations: .graphs.decoder.outputs.localRotations,
   global_rotations: .graphs.decoder.outputs.globalRotations
-}' artifacts/browser/core40/manifest.json
+}'
 ```
 
-The expected contract revision is `2`, and both output names must be present.
-If they are absent, the pack predates VRM rotation output and should be
-regenerated.
+The expected schema/contract revisions are `2` and `3`, and both rotation
+output names must be present. The archive contains exactly one manifest, three
+ONNX graphs, and two tokenizer files.
 
-The measured FP32 payload in this environment is 1,488,773,547 bytes
-(approximately 1.39 GiB, or 1.49 GB decimal):
+The verified export produced in this environment is 718,180,222 bytes
+(684.91 MiB, 0.6689 GiB) as `.tar.gz`. Its member payload is 775,577,052 bytes:
 
 | Asset | Bytes |
 |---|---:|
 | MiniLM condition encoder | 112,430,592 |
-| Unconstrained ARDY denoiser | 651,936,916 |
-| Constraint-aware ARDY denoiser | 652,051,598 |
+| Specialized unconstrained ARDY denoiser | 590,701,706 |
 | Structured motion decoder | 71,642,198 |
 | Tokenizer files | 712,243 |
+| Manifest | 90,313 |
 
-Small exporter/version differences can change the exact byte count. Plan for
-at least 1.6 GB of origin storage if the app is allowed to persist a validated
-copy, and substantially more working memory while four inference sessions are
-loaded.
+The former four-graph directory occupied 1,488,867,166 bytes in the same
+environment. Removing its constraint graph and specializing the remaining
+denoiser saves 713,290,114 bytes (680.25 MiB, 0.6643 GiB) before compression;
+the final gzip file is 770,686,944 bytes (0.7177 GiB) smaller than that
+directory. Small exporter/version differences can change the exact byte count.
 
 ## Run the app
 
@@ -221,10 +220,11 @@ npm run dev
 ```
 
 Open the printed localhost URL, choose **Choose model pack**, and select the
-`artifacts/browser/core40` directory. The app validates every file declared in
-the manifest before creating inference sessions. When origin storage is
-available, it can retain the validated pack in the origin-private file system
-for later visits.
+`artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz` file. The app
+stream-decompresses gzip, validates the POSIX ustar structure and every
+manifest-declared file, then creates the three inference sessions. When origin
+storage is available, it can retain the original gzip archive in
+origin-private storage for later visits.
 
 The desktop UI has an **Input** pane and an **Output** pane:
 
@@ -286,9 +286,11 @@ generated motion remain in the browser. Model and avatar selection read local
 files; inference does not upload them. VRM object URLs are revoked after
 loading. The app has no inference service dependency.
 
-The validated model pack may be retained in origin-private storage when the
-browser permits it. A selected VRM avatar is page-local; select it again after
-reloading the page.
+The selected `.tar.gz` model pack may be retained as one file in
+origin-private storage when the browser permits it. A selected VRM avatar is
+page-local; select it again after reloading the page.
+If the app finds the former unpacked directory-pack cache, it removes that
+unsupported cache before asking for the current archive.
 
 Vite development and preview send:
 
@@ -325,7 +327,6 @@ CPU errors:
 |---|---:|
 | MiniLM text conditions | `1.91e-5` |
 | Unconstrained denoiser tokens | `9.98e-6` |
-| Constraint-aware denoiser tokens | `1.18e-4` |
 | Normalized motion | `1.51e-3` |
 | Posed joints | `1.23e-4 m` |
 | Local rotations | `9.36e-4` |
@@ -333,22 +334,20 @@ CPU errors:
 | Root positions / headings / contacts | `0` |
 
 Browser runtime and memory measurements are device-, browser-, driver-, and
-execution-provider-specific. The current size includes the constraint-aware
-graph for pack/runtime contract compatibility even though the application does
-not expose or apply kinematic constraints. Measurements from older three-graph
-or positions-only packs do not describe the present pack and should not be
-used as requirements.
+execution-provider-specific. The current pack has three graphs; measurements
+from the former four-graph directory pack or positions-only packs do not
+describe this contract.
 
 An opt-in real-pack Playwright run can force either provider:
 
 ```bash
 cd web
 
-ARDY_BROWSER_MODEL_PACK=../artifacts/browser/core40 \
+ARDY_BROWSER_MODEL_PACK=../artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz \
 ARDY_BROWSER_BACKEND=wasm \
 npm run test:e2e -- e2e/real-model.spec.ts
 
-ARDY_BROWSER_MODEL_PACK=../artifacts/browser/core40 \
+ARDY_BROWSER_MODEL_PACK=../artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz \
 ARDY_BROWSER_BACKEND=webgpu \
 npm run test:e2e -- e2e/real-model.spec.ts
 ```
@@ -378,7 +377,7 @@ Set `ARDY_BROWSER_REDUCED_MOTION=1` to exercise paused initial playback.
   VRM is the only supported local character format; the browser has no general
   scene-mesh importer.
 - A loaded VRM is page-local and must be selected again after a reload.
-- WASM is a fallback, not a performance promise. Four large graph sessions can
+- WASM is a fallback, not a performance promise. Three large graph sessions can
   require considerably more RAM than the on-disk pack.
 
 ## Distribution and trust

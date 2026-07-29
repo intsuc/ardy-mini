@@ -4,15 +4,19 @@
 
 from __future__ import annotations
 
+import tarfile
 from types import SimpleNamespace
 from typing import ClassVar
 
 import torch
 from torch import nn
 
-from ardy.browser.export import _graph_contracts
+from ardy.browser.export import (
+    _graph_contracts,
+    _specialize_denoiser_position_tables,
+    _write_deterministic_tar_gz,
+)
 from ardy.browser.wrappers import (
-    BrowserConstraintCFGDenoiser,
     BrowserMiniLMEncoder,
     BrowserMotionDecoder,
     BrowserTextCFGDenoiser,
@@ -104,61 +108,6 @@ def test_browser_denoiser_runs_two_pass_text_only_cfg():
     assert captured["observed_motion"] is None
     assert not captured["future_mask"].any()
     assert not captured["future_token_mask"].any()
-
-
-def test_browser_constraint_denoiser_matches_separated_cfg_semantics():
-    inner = _CaptureDenoiser()
-    wrapper = BrowserConstraintCFGDenoiser(inner).eval()
-    x = torch.zeros(1, 3, 5)
-    frame_count = 12
-    token_count = 3
-    history_mask = torch.zeros(1, frame_count)
-    history_mask[:, :4] = 1
-    generation_mask = torch.zeros(1, frame_count)
-    generation_mask[:, 4:8] = 1
-    future_mask = torch.zeros(1, frame_count)
-    future_mask[:, 8:] = 1
-    history_token_mask = torch.tensor([[1.0, 0.0, 0.0]])
-    generation_token_mask = torch.tensor([[0.0, 1.0, 0.0]])
-    future_token_mask = torch.tensor([[0.0, 0.0, 1.0]])
-    motion_mask = torch.ones(1, frame_count, 2)
-    observed_motion = torch.full_like(motion_mask, 3.0)
-
-    output = wrapper(
-        torch.tensor([2.0]),
-        torch.tensor([1.5]),
-        x,
-        torch.tensor([4]),
-        torch.tensor([4]),
-        torch.tensor([4]),
-        history_mask,
-        generation_mask,
-        future_mask,
-        history_token_mask,
-        generation_token_mask,
-        future_token_mask,
-        torch.full((1, 1, 6), 2.0),
-        torch.ones(1, 1),
-        torch.tensor([9]),
-        torch.zeros(1),
-        motion_mask,
-        observed_motion,
-    )
-
-    assert output.shape == (1, token_count, 5)
-    assert torch.allclose(output, torch.full_like(output, 8.5))
-    captured = inner.last_kwargs
-    assert captured["x"].shape[0] == 3
-    assert torch.equal(
-        captured["text_feat"].mean(dim=(1, 2)),
-        torch.tensor([2.0, 0.0, 0.0]),
-    )
-    assert not captured["future_token_mask"][0].any()
-    assert captured["future_token_mask"][1, 2]
-    assert not captured["future_token_mask"][2].any()
-    assert not captured["motion_mask"][0].any()
-    assert captured["motion_mask"][1].all()
-    assert not captured["motion_mask"][2].any()
 
 
 class _IdentityStats:
@@ -284,14 +233,10 @@ def test_browser_decoder_returns_world_motion_and_posed_joints():
 def test_manifest_graph_semantics_match_browser_runtime_contract():
     graphs = _graph_contracts()
 
+    assert set(graphs) == {"text_encoder", "denoiser", "decoder"}
     assert graphs["text_encoder"]["outputs"] == {"textConditions": "text_conditions"}
     assert graphs["denoiser"]["inputs"]["historyLength"] == "history_len"
     assert graphs["denoiser"]["inputs"]["generationLength"] == "generation_len"
-    assert graphs["constraint_denoiser"]["inputs"]["textCfgWeight"] == "text_cfg_weight"
-    assert graphs["constraint_denoiser"]["inputs"]["constraintCfgWeight"] == "constraint_cfg_weight"
-    assert graphs["constraint_denoiser"]["inputs"]["futureLength"] == "future_len"
-    assert graphs["constraint_denoiser"]["inputs"]["motionMask"] == "motion_mask"
-    assert graphs["constraint_denoiser"]["inputs"]["observedMotion"] == "observed_motion"
     assert graphs["decoder"]["outputs"] == {
         "normalizedMotion": "normalized_motion",
         "posedJoints": "posed_joints",
@@ -301,3 +246,76 @@ def test_manifest_graph_semantics_match_browser_runtime_contract():
         "footContacts": "foot_contacts",
         "globalRootHeading": "global_root_heading",
     }
+
+
+def _fake_position_block() -> SimpleNamespace:
+    timestep_encoder = SimpleNamespace(pe=torch.arange(24, dtype=torch.float32).reshape(1, 12, 2))
+    motion_encoder = SimpleNamespace(
+        max_len=6,
+        pe=torch.arange(22, dtype=torch.float32).reshape(11, 2),
+    )
+    return SimpleNamespace(
+        positional_encoding_mode="learned_prefix_zero_at_first_generation",
+        sequence_pos_encoder=timestep_encoder,
+        embed_timestep=SimpleNamespace(sequence_pos_encoder=timestep_encoder),
+        motion_token_embedding=motion_encoder,
+    )
+
+
+def test_browser_position_tables_are_trimmed_without_changing_reachable_values():
+    root = _fake_position_block()
+    body = _fake_position_block()
+    denoiser = SimpleNamespace(root_model=root, body_model=body)
+    original_root_timestep = root.sequence_pos_encoder.pe.clone()
+    original_root_motion = root.motion_token_embedding.pe.clone()
+
+    _specialize_denoiser_position_tables(
+        denoiser,
+        num_timesteps=4,
+        max_motion_tokens=3,
+    )
+
+    assert root.sequence_pos_encoder.pe.shape == (1, 4, 2)
+    assert torch.equal(root.sequence_pos_encoder.pe, original_root_timestep[:, :4])
+    assert root.embed_timestep.sequence_pos_encoder is root.sequence_pos_encoder
+    assert root.motion_token_embedding.max_len == 3
+    assert root.motion_token_embedding.pe.shape == (5, 2)
+    assert torch.equal(
+        root.motion_token_embedding.pe,
+        torch.cat((original_root_motion[:3], original_root_motion[-2:]), dim=0),
+    )
+    assert body.sequence_pos_encoder.pe.shape == (1, 4, 2)
+    assert body.motion_token_embedding.pe.shape == (5, 2)
+
+
+def test_browser_archive_is_reproducible_ustar_with_root_level_members(tmp_path):
+    source = tmp_path / "source"
+    tokenizer = source / "tokenizer"
+    tokenizer.mkdir(parents=True)
+    manifest = source / "manifest.json"
+    model = source / "denoiser.onnx"
+    tokenizer_json = tokenizer / "tokenizer.json"
+    manifest.write_text('{"schema_version":2}\n', encoding="utf-8")
+    model.write_bytes(b"onnx payload")
+    tokenizer_json.write_text("{}\n", encoding="utf-8")
+    members = [tokenizer_json, model, manifest]
+    first = tmp_path / "first.tar.gz"
+    second = tmp_path / "second.tar.gz"
+
+    _write_deterministic_tar_gz(source, members, first)
+    _write_deterministic_tar_gz(source, members, second)
+
+    assert first.read_bytes() == second.read_bytes()
+    assert first.stat().st_mode & 0o777 == 0o644
+    with tarfile.open(first, mode="r:gz") as archive:
+        infos = archive.getmembers()
+        assert [info.name for info in infos] == [
+            "manifest.json",
+            "denoiser.onnx",
+            "tokenizer/tokenizer.json",
+        ]
+        assert all(info.isfile() for info in infos)
+        assert all(info.mtime == 0 for info in infos)
+        assert all(info.uid == 0 and info.gid == 0 for info in infos)
+        assert all(info.mode == 0o644 for info in infos)
+        assert archive.extractfile("denoiser.onnx").read() == b"onnx payload"

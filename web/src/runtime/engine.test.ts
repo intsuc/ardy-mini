@@ -14,7 +14,7 @@ import type { LocalTokenizer } from "./tokenizer";
 function manifest(): BrowserModelPackManifest {
   return {
     format: "ardy-browser-model-pack",
-    schema_version: 1,
+    schema_version: 2,
     model: { id: "fixture", variant: "session" },
     files: {},
     tokenizer: { directory: "tokenizer", max_length: 8 },
@@ -59,6 +59,7 @@ function manifest(): BrowserModelPackManifest {
       mean: new Array(128).fill(0),
       std: new Array(128).fill(1),
     },
+    runtime: { contract_revision: 3, text_only: true },
   };
 }
 
@@ -153,7 +154,7 @@ describe("stateful browser generation session", () => {
 function generationManifest(): BrowserModelPackManifest {
   return {
     format: "ardy-browser-model-pack",
-    schema_version: 1,
+    schema_version: 2,
     model: { id: "fixture", variant: "generation" },
     files: {},
     tokenizer: { directory: "tokenizer", max_length: 8 },
@@ -194,6 +195,11 @@ function generationManifest(): BrowserModelPackManifest {
         outputs: {
           normalizedMotion: "normalized_motion",
           posedJoints: "posed_joints",
+          localRotations: "local_rotations",
+          globalRotations: "global_rotations",
+          rootPositions: "root_positions",
+          footContacts: "foot_contacts",
+          globalRootHeading: "global_root_heading",
         },
       },
     },
@@ -237,6 +243,7 @@ function generationManifest(): BrowserModelPackManifest {
       mean: [0],
       std: [1],
     },
+    runtime: { contract_revision: 3, text_only: true },
   };
 }
 
@@ -295,6 +302,12 @@ describe("stateful generation coordinates", () => {
             const joints = new Float32Array(
               pack.dimensions.max_frames * pack.dimensions.num_joints * 3,
             );
+            const rotations = new Float32Array(
+              pack.dimensions.max_frames * pack.dimensions.num_joints * 9,
+            );
+            const rootPositions = new Float32Array(
+              pack.dimensions.max_frames * 3,
+            );
             for (let frame = 0; frame < pack.dimensions.max_frames; frame += 1) {
               const motionOffset = frame * pack.dimensions.motion_dim;
               motion.set(
@@ -308,6 +321,10 @@ describe("stateful generation coordinates", () => {
                 motionOffset,
               );
               joints.set(
+                [translation[0] + frame, translation[1], translation[2]],
+                frame * 3,
+              );
+              rootPositions.set(
                 [translation[0] + frame, translation[1], translation[2]],
                 frame * 3,
               );
@@ -327,6 +344,43 @@ describe("stateful generation coordinates", () => {
                   pack.dimensions.num_joints,
                   3,
                 ],
+              ),
+              local_rotations: new ort.Tensor(
+                "float32",
+                rotations,
+                [
+                  1,
+                  pack.dimensions.max_frames,
+                  pack.dimensions.num_joints,
+                  3,
+                  3,
+                ],
+              ),
+              global_rotations: new ort.Tensor(
+                "float32",
+                rotations,
+                [
+                  1,
+                  pack.dimensions.max_frames,
+                  pack.dimensions.num_joints,
+                  3,
+                  3,
+                ],
+              ),
+              root_positions: new ort.Tensor(
+                "float32",
+                rootPositions,
+                [1, pack.dimensions.max_frames, 3],
+              ),
+              foot_contacts: new ort.Tensor(
+                "bool",
+                new Uint8Array(pack.dimensions.max_frames * 4),
+                [1, pack.dimensions.max_frames, 4],
+              ),
+              global_root_heading: new ort.Tensor(
+                "float32",
+                new Float32Array(pack.dimensions.max_frames * 2),
+                [1, pack.dimensions.max_frames, 2],
               ),
             };
           },

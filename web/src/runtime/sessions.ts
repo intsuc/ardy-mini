@@ -18,7 +18,6 @@ export { ort };
 export interface RuntimeSessions {
   textEncoder: ort.InferenceSession;
   denoiser: ort.InferenceSession;
-  constraintDenoiser?: ort.InferenceSession;
   decoder: ort.InferenceSession;
   backend: RuntimeBackend;
 }
@@ -86,7 +85,7 @@ async function createAll(
   onProgress?: SessionProgressCallback,
 ): Promise<RuntimeSessions> {
   const created: ort.InferenceSession[] = [];
-  const total = graphs.constraint_denoiser === undefined ? 3 : 4;
+  const total = 3;
   try {
     const textEncoder = await createSession(pack, graphs.text_encoder, providers);
     created.push(textEncoder);
@@ -94,23 +93,12 @@ async function createAll(
     const denoiser = await createSession(pack, graphs.denoiser, providers);
     created.push(denoiser);
     onProgress?.(2, total, "denoiser.onnx");
-    let constraintDenoiser: ort.InferenceSession | undefined;
-    if (graphs.constraint_denoiser !== undefined) {
-      constraintDenoiser = await createSession(
-        pack,
-        graphs.constraint_denoiser,
-        providers,
-      );
-      created.push(constraintDenoiser);
-      onProgress?.(3, total, "denoiser_constraints.onnx");
-    }
     const decoder = await createSession(pack, graphs.decoder, providers);
     created.push(decoder);
     onProgress?.(total, total, "decoder.onnx");
     return {
       textEncoder,
       denoiser,
-      ...(constraintDenoiser === undefined ? {} : { constraintDenoiser }),
       decoder,
       backend,
     };
@@ -124,12 +112,8 @@ function releaseGraphAssets(pack: ModelPack, graphs: BrowserGraphSpecs): void {
   for (const graph of [
     graphs.text_encoder,
     graphs.denoiser,
-    graphs.constraint_denoiser,
     graphs.decoder,
   ]) {
-    if (graph === undefined) {
-      continue;
-    }
     pack.release(graph.model);
     for (const external of graph.external_data ?? []) {
       pack.release(external.file);
@@ -175,9 +159,6 @@ export async function disposeRuntimeSessions(
   await releaseSessions([
     sessions.textEncoder,
     sessions.denoiser,
-    ...(sessions.constraintDenoiser === undefined
-      ? []
-      : [sessions.constraintDenoiser]),
     sessions.decoder,
   ]);
 }
