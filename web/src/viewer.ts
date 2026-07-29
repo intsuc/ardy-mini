@@ -3,6 +3,7 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import type { VRM } from "@pixiv/three-vrm";
 
 import {
   DEFAULT_EDITOR_STATE,
@@ -31,6 +32,18 @@ import {
   type SkeletonMetadata,
   type StructuredMotionResult,
 } from "./motion-data";
+import {
+  CORE27_VRM_BINDINGS,
+  createVrmRetargetPlan,
+  retargetMotionFrame,
+  type VrmRetargetFrame,
+  type VrmRetargetPlan,
+} from "./vrm-retarget";
+import {
+  loadVrmAvatar,
+  type LoadedVrmAvatar,
+  type VrmModelInfo,
+} from "./vrm-loader";
 
 export {
   CORE27_FOOT_CONTACT_JOINTS,
@@ -69,6 +82,7 @@ export type {
 } from "./editor-state";
 
 export type MotionClip = StructuredMotionResult;
+export type { VrmModelInfo } from "./vrm-loader";
 
 /**
  * This optional display is a joint-driven capsule/sphere body proxy. It is
@@ -180,12 +194,16 @@ export function frameAfterElapsed(
 function sameSkeleton(left: SkeletonMetadata, right: SkeletonMetadata): boolean {
   if (
     left.rootJointIndex !== right.rootJointIndex ||
+    left.jointNames.length !== right.jointNames.length ||
     left.parents.length !== right.parents.length ||
     left.contactJointIndices.length !== right.contactJointIndices.length
   ) {
     return false;
   }
   return (
+    left.jointNames.every(
+      (jointName, index) => jointName === right.jointNames[index],
+    ) &&
     left.parents.every((parent, index) => parent === right.parents[index]) &&
     left.contactJointIndices.every((joint, index) => joint === right.contactJointIndices[index])
   );
@@ -234,6 +252,7 @@ export class SkeletonViewer {
   private readonly constraintGroup = new THREE.Group();
   private readonly initialTransformGroup = new THREE.Group();
   private readonly waypointGroup = new THREE.Group();
+  private readonly vrmRoot = new THREE.Group();
   private readonly resizeObserver: ResizeObserver;
   private readonly jointTransform = new THREE.Object3D();
   private readonly boneTransform = new THREE.Object3D();
@@ -258,6 +277,12 @@ export class SkeletonViewer {
   private localRotationResolved = new Uint8Array();
   private clip: MotionClip | null = null;
   private referenceClip: MotionClip | null = null;
+  private vrm: VRM | null = null;
+  private vrmUtils: LoadedVrmAvatar["utils"] | null = null;
+  private vrmRetargetPlan: VrmRetargetPlan | null = null;
+  private vrmTargetHipsHeight = 1;
+  private vrmVisible = true;
+  private vrmLoadRevision = 0;
   private customTrajectory: Float32Array | null = null;
   private orientationJointIndices: number[] = [];
   private orientationAxes: THREE.AxesHelper[] = [];
@@ -298,6 +323,7 @@ export class SkeletonViewer {
     this.pageVisible = !document.hidden;
     this.lastAnimationTime = null;
     if (this.pageVisible) {
+      this.vrm?.springBoneManager?.reset();
       this.invalidate();
     } else {
       cancelAnimationFrame(this.animationFrame);
@@ -450,6 +476,7 @@ export class SkeletonViewer {
       this.constraintGroup,
       this.initialTransformGroup,
       this.waypointGroup,
+      this.vrmRoot,
     );
     this.joints.visible = false;
     this.bones.visible = false;
@@ -510,6 +537,7 @@ export class SkeletonViewer {
       this.referenceClip = null;
     }
     this.skeleton = normalized;
+    this.rebuildVrmRetargetPlan();
     this.createSkeletonMeshes(normalized);
     this.setOrientationAxes("all", this.orientationAxisSize);
     this.constraints = this.constraints.filter(
@@ -525,6 +553,74 @@ export class SkeletonViewer {
 
   getSkeleton(): SkeletonMetadata {
     return this.skeleton;
+  }
+
+  /**
+   * Load a local VRM 0.x/1.0 avatar. Heavy loader code is fetched only after
+   * this method is called, so the default skeleton preview stays lightweight.
+   */
+  async loadVrm(file: File): Promise<VrmModelInfo> {
+    const revision = ++this.vrmLoadRevision;
+    const loaded = await loadVrmAvatar(file);
+    if (revision !== this.vrmLoadRevision) {
+      loaded.utils.deepDispose(loaded.vrm.scene);
+      throw new DOMException("VRM loading was superseded.", "AbortError");
+    }
+
+    let hipsHeight: number;
+    let retargetPlan: VrmRetargetPlan;
+    try {
+      const hips = loaded.vrm.humanoid.getNormalizedBoneNode("hips");
+      if (!hips) {
+        throw new TypeError("The VRM does not expose its required hips bone.");
+      }
+      hipsHeight =
+        loaded.vrm.humanoid.normalizedRestPose.hips?.position?.[1] ??
+        hips.position.y;
+      if (!Number.isFinite(hipsHeight) || hipsHeight <= 0) {
+        throw new RangeError("The VRM has an invalid humanoid scale.");
+      }
+
+      retargetPlan = this.buildVrmRetargetPlan(loaded.vrm, hipsHeight);
+      const initialFrame = this.clip
+        ? retargetMotionFrame(this.clip, this.frameCursor, retargetPlan)
+        : null;
+      loaded.vrm.humanoid.resetNormalizedPose();
+      if (initialFrame) {
+        this.applyVrmRetargetFrame(loaded.vrm, initialFrame);
+      }
+      loaded.vrm.springBoneManager?.reset();
+      loaded.vrm.update(0);
+    } catch (error) {
+      loaded.utils.deepDispose(loaded.vrm.scene);
+      throw error;
+    }
+
+    // All fallible validation happens above. Keep the current avatar alive until
+    // the replacement is ready, then swap the staged model synchronously.
+    this.disposeVrmAvatar();
+    this.vrm = loaded.vrm;
+    this.vrmUtils = loaded.utils;
+    this.vrmRetargetPlan = retargetPlan;
+    this.vrmTargetHipsHeight = hipsHeight;
+    this.vrmRoot.position.set(0, 0, 0);
+    this.vrmRoot.add(loaded.vrm.scene);
+    this.vrmRoot.visible = this.vrmVisible;
+    this.invalidate();
+    return loaded.info;
+  }
+
+  clearVrm(): void {
+    this.vrmLoadRevision += 1;
+    this.disposeVrmAvatar();
+    this.invalidate();
+  }
+
+  setVrmVisible(visible: boolean): void {
+    this.vrmVisible = visible;
+    this.vrmRoot.visible = visible && this.vrm !== null;
+    if (this.vrmRoot.visible) this.vrm?.springBoneManager?.reset();
+    this.invalidate();
   }
 
   setMotion(
@@ -547,12 +643,15 @@ export class SkeletonViewer {
     } else {
       this.skeleton = clip.skeleton;
     }
+    this.rebuildVrmRetargetPlan();
     this.frameCursor = 0;
     this.playing = autoplay && !this.reducedMotion && clip.frameCount > 1;
     this.lastAnimationTime = null;
     this.lastReportedFrame = -1;
     this.buildTrajectory();
+    this.vrm?.humanoid.resetNormalizedPose();
     this.updatePose(0);
+    this.vrm?.springBoneManager?.reset();
     this.applyOutputVisibility();
     if (resetCamera) this.resetCamera();
     this.invalidate();
@@ -601,6 +700,7 @@ export class SkeletonViewer {
     this.trajectory.visible = false;
     this.orientationAxesGroup.visible = false;
     this.constraintGroup.visible = false;
+    this.resetVrmPose();
     this.invalidate();
     this.emitPlaybackState(true);
   }
@@ -665,6 +765,7 @@ export class SkeletonViewer {
     this.frameCursor = THREE.MathUtils.clamp(frame, 0, this.clip.frameCount - 1);
     this.lastAnimationTime = null;
     this.updatePose(this.frameCursor);
+    this.vrm?.springBoneManager?.reset();
     this.invalidate();
     this.emitPlaybackState(true);
   }
@@ -893,6 +994,8 @@ export class SkeletonViewer {
     this.canvas.removeEventListener("pointercancel", this.handleGroundPointerCancel);
     this.controls.removeEventListener("change", this.invalidate);
     this.controls.dispose();
+    this.vrmLoadRevision += 1;
+    this.disposeVrmAvatar();
     this.disposeSkeletonMeshes();
     this.trajectory.geometry.dispose();
     (this.trajectory.material as THREE.Material).dispose();
@@ -910,9 +1013,10 @@ export class SkeletonViewer {
     if (!this.pageVisible) return;
 
     let poseChanged = false;
+    let elapsedSeconds = 0;
     if (this.playing && this.clip) {
       if (this.lastAnimationTime !== null) {
-        const elapsedSeconds = Math.min((time - this.lastAnimationTime) / 1000, 0.25);
+        elapsedSeconds = Math.min((time - this.lastAnimationTime) / 1000, 0.25);
         const next = frameAfterElapsed(
           this.frameCursor,
           elapsedSeconds,
@@ -933,6 +1037,13 @@ export class SkeletonViewer {
     }
 
     const controlsChanged = this.controls.update();
+    if (
+      this.vrm &&
+      this.vrmRoot.visible &&
+      (this.needsRender || poseChanged || controlsChanged)
+    ) {
+      this.vrm.update(elapsedSeconds);
+    }
     if (this.needsRender || poseChanged || controlsChanged) {
       this.renderer.render(this.scene, this.camera);
       this.needsRender = false;
@@ -1188,6 +1299,74 @@ export class SkeletonViewer {
     this.updateReferencePose(frameCursor);
     this.updateOrientationAxes(frameCursor);
     this.updateConstraintMarkers(frame0);
+    this.updateVrmPose(frameCursor);
+  }
+
+  private rebuildVrmRetargetPlan(): void {
+    const vrm = this.vrm;
+    if (!vrm) {
+      this.vrmRetargetPlan = null;
+      return;
+    }
+    this.vrmRetargetPlan = this.buildVrmRetargetPlan(
+      vrm,
+      this.vrmTargetHipsHeight,
+    );
+  }
+
+  private buildVrmRetargetPlan(
+    vrm: VRM,
+    targetHipsHeight: number,
+  ): VrmRetargetPlan {
+    const presentBones = CORE27_VRM_BINDINGS.flatMap(({ targetBone }) =>
+      vrm.humanoid.getNormalizedBoneNode(targetBone)
+        ? [targetBone]
+        : [],
+    );
+    return createVrmRetargetPlan(this.skeleton, {
+      presentBones,
+      targetHipsHeight,
+      metaVersion: vrm.meta.metaVersion,
+    });
+  }
+
+  private resetVrmPose(): void {
+    const vrm = this.vrm;
+    if (!vrm) return;
+    vrm.humanoid.resetNormalizedPose();
+    vrm.springBoneManager?.reset();
+  }
+
+  private updateVrmPose(frameCursor: number): void {
+    const vrm = this.vrm;
+    const clip = this.clip;
+    const plan = this.vrmRetargetPlan;
+    if (!vrm || !clip || !plan) return;
+    const frame = retargetMotionFrame(clip, frameCursor, plan);
+    this.applyVrmRetargetFrame(vrm, frame);
+  }
+
+  private applyVrmRetargetFrame(vrm: VRM, frame: VrmRetargetFrame): void {
+    const hips = vrm.humanoid.getNormalizedBoneNode("hips");
+    hips?.position.fromArray(frame.hipsPosition);
+    for (const { targetBone, rotation } of frame.rotations) {
+      vrm.humanoid
+        .getNormalizedBoneNode(targetBone)
+        ?.quaternion.fromArray(rotation);
+    }
+  }
+
+  private disposeVrmAvatar(): void {
+    const vrm = this.vrm;
+    if (vrm) {
+      this.vrmRoot.remove(vrm.scene);
+      this.vrmUtils?.deepDispose(vrm.scene);
+    }
+    this.vrm = null;
+    this.vrmUtils = null;
+    this.vrmRetargetPlan = null;
+    this.vrmRoot.position.set(0, 0, 0);
+    this.vrmRoot.visible = false;
   }
 
   private updateReferencePose(primaryFrameCursor: number): void {

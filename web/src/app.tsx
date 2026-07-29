@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
+import { useEffect } from "react"
 import {
   IconCameraRotate,
+  IconDownload,
   IconPlayerPause,
   IconPlayerPlay,
   IconRefresh,
   IconRepeat,
+  IconUpload,
   IconX,
 } from "@tabler/icons-react"
 
@@ -61,6 +64,7 @@ import {
   PROMPT_EXAMPLES,
   PROMPT_EXAMPLE_EVENT,
 } from "@/prompt-examples"
+import { bootstrap } from "@/main"
 
 function EmptyFieldError({
   id,
@@ -280,7 +284,7 @@ function ModelSection() {
               aria-valuenow={0}
             >
               <span
-                className="block h-full w-full origin-left scale-x-0 bg-primary transition-transform"
+                className="block h-full w-full origin-left scale-x-[0.001] bg-primary transition-transform"
                 id="model-progress-fill"
               />
             </div>
@@ -618,7 +622,7 @@ function GenerationActionsSection() {
             id="generation-progressbar"
           >
             <span
-              className="block h-full w-full origin-left scale-x-0 bg-primary transition-transform"
+              className="block h-full w-full origin-left scale-x-[0.001] bg-primary transition-transform"
               id="generation-progress-fill"
             />
           </div>
@@ -712,8 +716,8 @@ function GenerationMessages() {
         <summary>Runtime notes</summary>
         <div className="details-body">
           <p>
-            Prompts, constraints, and generated motion stay on this
-            device.
+            Prompts, model files, avatars, and generated motion stay
+            on this device.
           </p>
           <a
             href="./notices/THIRD_PARTY_MODELS_AND_DATA.md"
@@ -742,7 +746,7 @@ function ViewportPanel() {
             3D preview
           </h2>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
           <Badge
             variant="outline"
             id="motion-badge"
@@ -756,17 +760,19 @@ function ViewportPanel() {
           >
             <strong id="runtime-value">—</strong>
           </Badge>
-          <Badge
-            variant="outline"
-            id="correction-metric"
-            aria-label="Motion correction metrics"
-            hidden
+          <Button
+            id="export-motion"
+            className="min-h-11"
+            variant="secondary"
+            type="button"
           >
-            root <strong id="root-error-value">—</strong> · slide{" "}
-            <strong id="foot-slide-value">—</strong>
-          </Badge>
+            <IconDownload data-icon="inline-start" aria-hidden="true" />
+            Export motion
+          </Button>
         </div>
       </div>
+
+      <PreviewSettingsSection />
 
       <div className="viewport" id="viewport">
         <canvas
@@ -918,449 +924,105 @@ function ViewportPanel() {
   )
 }
 
-function InitialTransformSection() {
+function VrmAvatarSection() {
   return (
-    <details className="tool-section" open>
-      <summary>Initial transform</summary>
-      <div className="tool-section__body">
-        <FieldGroup className="grid grid-cols-3 gap-2.5">
-          <Field className="field-group">
-            <FieldLabel htmlFor="initial-x">X (m)</FieldLabel>
-            <Input
-              id="initial-x"
-              type="number"
-              defaultValue="0"
-              step="0.1"
-              inputMode="decimal"
-            />
-          </Field>
-          <Field className="field-group">
-            <FieldLabel htmlFor="initial-z">Z (m)</FieldLabel>
-            <Input
-              id="initial-z"
-              type="number"
-              defaultValue="0"
-              step="0.1"
-              inputMode="decimal"
-            />
-          </Field>
-          <Field className="field-group">
-            <FieldLabel htmlFor="initial-heading">
-              Heading
-            </FieldLabel>
-            <Input
-              id="initial-heading"
-              type="number"
-              defaultValue="0"
-              min="-180"
-              max="180"
-              step="1"
-              inputMode="decimal"
-            />
-          </Field>
-        </FieldGroup>
-      </div>
-    </details>
-  )
-}
-
-function GuidanceSection() {
-  return (
-    <details className="tool-section" open>
-      <summary>Guidance and planning</summary>
-      <div className="tool-section__body">
-        <FieldGroup className="grid grid-cols-2 gap-2.5 max-[520px]:grid-cols-1">
-          <Field className="field-group">
-            <FieldLabel htmlFor="text-cfg">Text CFG</FieldLabel>
-            <Input
-              id="text-cfg"
-              type="number"
-              min="0"
-              max="10"
-              step="0.1"
-              defaultValue="3.5"
-            />
-          </Field>
-          <Field className="field-group">
-            <FieldLabel htmlFor="constraint-cfg">
-              Constraint CFG
-            </FieldLabel>
-            <Input
-              id="constraint-cfg"
-              type="number"
-              min="0"
-              max="10"
-              step="0.1"
-              defaultValue="1"
-            />
-          </Field>
-        </FieldGroup>
-        <FieldGroup className="grid grid-cols-2 gap-2.5 max-[520px]:grid-cols-1">
-          <Field className="field-group">
-            <FieldLabel htmlFor="history-frames">
-              History frames
-            </FieldLabel>
-            <Input
-              id="history-frames"
-              type="number"
-              min="0"
-              max="40"
-              step="1"
-              defaultValue="40"
-            />
-          </Field>
-          <Field className="field-group">
-            <FieldLabel htmlFor="future-crop">Future crop</FieldLabel>
-            <Input
-              id="future-crop"
-              type="number"
-              min="0"
-              max="120"
-              step="1"
-              defaultValue="80"
-            />
-          </Field>
-        </FieldGroup>
-        <FieldGroup className="grid grid-cols-2 gap-2.5 max-[520px]:grid-cols-1">
-          <Field className="field-group">
-            <FieldLabel htmlFor="replan-buffer">
-              Replan buffer
-            </FieldLabel>
-            <Input
-              id="replan-buffer"
-              type="number"
-              min="1"
-              max="80"
-              step="1"
-              defaultValue="20"
-            />
-          </Field>
-          <Field className="field-group">
-            <FieldLabel htmlFor="replan-threshold">
-              Threshold
-            </FieldLabel>
-            <Input
-              id="replan-threshold"
-              type="number"
-              min="1"
-              max="80"
-              step="1"
-              defaultValue="10"
-            />
-          </Field>
-        </FieldGroup>
-      </div>
-    </details>
-  )
-}
-
-function ConstraintsSection() {
-  return (
-    <details className="tool-section" open>
-      <summary>Constraints</summary>
-      <div className="tool-section__body">
-        <div
-          className="constraint-timeline"
-          id="constraint-timeline"
-          role="group"
-          aria-label="Constraint timeline tracks"
+    <section
+      className="grid gap-3"
+      aria-labelledby="vrm-avatar-title"
+    >
+      <div className="flex items-center justify-between gap-3">
+        <h3
+          className="text-xs font-medium text-muted-foreground"
+          id="vrm-avatar-title"
         >
-          <div className="constraint-ruler" aria-hidden="true">
-            <span>Track</span>
-            <span>0</span>
-            <span>40</span>
-            <span>80</span>
-            <span>120</span>
-          </div>
-          <button
-            id="constraint-track-full-body"
-            className="constraint-track"
-            type="button"
-            data-track="full-body"
-            aria-pressed="false"
-          >
-            <span>Full Body</span>
-            <span className="track-lane" />
-          </button>
-          <button
-            id="constraint-track-root"
-            className="constraint-track"
-            type="button"
-            data-track="root"
-            aria-pressed="false"
-          >
-            <span>Root</span>
-            <span className="track-lane" />
-          </button>
-          <button
-            id="constraint-track-left-hand"
-            className="constraint-track"
-            type="button"
-            data-track="left-hand"
-            aria-pressed="false"
-          >
-            <span>L Hand</span>
-            <span className="track-lane" />
-          </button>
-          <button
-            id="constraint-track-right-hand"
-            className="constraint-track"
-            type="button"
-            data-track="right-hand"
-            aria-pressed="false"
-          >
-            <span>R Hand</span>
-            <span className="track-lane" />
-          </button>
-          <button
-            id="constraint-track-left-foot"
-            className="constraint-track"
-            type="button"
-            data-track="left-foot"
-            aria-pressed="false"
-          >
-            <span>L Foot</span>
-            <span className="track-lane" />
-          </button>
-          <button
-            id="constraint-track-right-foot"
-            className="constraint-track"
-            type="button"
-            data-track="right-foot"
-            aria-pressed="false"
-          >
-            <span>R Foot</span>
-            <span className="track-lane" />
-          </button>
-        </div>
+          VRM avatar
+        </h3>
+        <Badge id="vrm-state" variant="outline" data-state="missing">
+          Optional
+        </Badge>
+      </div>
 
-        <FieldGroup className="grid grid-cols-3 gap-2.5 max-[520px]:grid-cols-1">
-          <Field className="field-group">
-            <FieldLabel htmlFor="constraint-type">Value</FieldLabel>
-            <NativeSelect
-              id="constraint-type"
-              defaultValue="position"
-            >
-              <NativeSelectOption value="position">
-                Position
-              </NativeSelectOption>
-              <NativeSelectOption value="rotation">
-                Rotation
-              </NativeSelectOption>
-              <NativeSelectOption value="pose">
-                Pose
-              </NativeSelectOption>
-            </NativeSelect>
-          </Field>
-          <Field className="field-group">
-            <FieldLabel htmlFor="constraint-frame">Start</FieldLabel>
-            <Input
-              id="constraint-frame"
-              type="number"
-              min="0"
-              step="1"
-              defaultValue="0"
-            />
-          </Field>
-          <Field className="field-group">
-            <FieldLabel htmlFor="constraint-end-frame">End</FieldLabel>
-            <Input
-              id="constraint-end-frame"
-              type="number"
-              min="0"
-              step="1"
-              defaultValue="0"
-            />
-          </Field>
-        </FieldGroup>
-        <div className="flex flex-wrap items-center gap-1.5 [&>*]:flex-auto">
+      <Card id="vrm-card" size="sm">
+        <CardHeader>
+          <CardTitle className="truncate" id="vrm-name">
+            No avatar loaded
+          </CardTitle>
+          <CardDescription id="vrm-detail">
+            Load a VRM 0.x or 1.0 file for local preview.
+          </CardDescription>
+        </CardHeader>
+        <CardFooter className="flex-wrap gap-1.5">
           <Button
-            id="add-constraint"
-            className="min-h-11"
+            id="import-vrm"
+            className="min-h-11 flex-1"
             variant="secondary"
             type="button"
           >
-            Add
+            <IconUpload data-icon="inline-start" aria-hidden="true" />
+            <span id="import-vrm-label">Load VRM</span>
           </Button>
-          <Button
-            id="delete-constraint"
-            className="min-h-11"
-            variant="destructive"
-            type="button"
-          >
-            Delete selected
-          </Button>
-          <Button
-            id="clear-constraints"
-            className="min-h-11"
-            variant="destructive"
-            type="button"
-          >
-            Clear all
-          </Button>
-        </div>
-      </div>
-    </details>
-  )
-}
-
-function RootControlSection() {
-  return (
-    <details className="tool-section">
-      <summary>Root control</summary>
-      <div className="tool-section__body">
-        <label
-          className="flex min-h-11 items-center justify-between gap-2.5"
-          htmlFor="waypoint-mode"
-        >
-          <span>
-            <span className="block text-xs font-medium">
-              Waypoint placement
-            </span>
-            <small className="mt-0.5 block text-xs text-muted-foreground">
-              Click the ground plane to add root targets.
-            </small>
-          </span>
-          <input id="waypoint-mode" type="checkbox" role="switch" />
-        </label>
-        <FieldGroup className="grid grid-cols-2 gap-2.5 max-[520px]:grid-cols-1">
-          <Field className="field-group">
-            <FieldLabel htmlFor="waypoint-interval">
-              Interval
-            </FieldLabel>
-            <Input
-              id="waypoint-interval"
-              type="number"
-              min="1"
-              max="200"
-              step="1"
-              defaultValue="20"
-            />
-          </Field>
-          <label
-            className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
-            htmlFor="waypoint-dense"
-          >
-            <input id="waypoint-dense" type="checkbox" />
-            <span>Dense trajectory</span>
-          </label>
-        </FieldGroup>
-        <Button
-          id="add-waypoint"
-          className="min-h-11 w-full"
-          variant="secondary"
-          type="button"
-        >
-          Add waypoint at playhead
-        </Button>
-
-        <Separator />
-        <div className="text-xs font-medium">Target velocity</div>
-        <p className="text-xs text-muted-foreground">
-          Blends from the current root velocity over 2 seconds.
-        </p>
-        <FieldGroup className="grid grid-cols-2 gap-2.5 max-[520px]:grid-cols-1">
-          <Field className="field-group">
-            <FieldLabel htmlFor="target-velocity">
-              Speed (m/s)
-            </FieldLabel>
-            <Input
-              id="target-velocity"
-              type="number"
-              min="0"
-              max="10"
-              step="0.1"
-              defaultValue="0"
-            />
-          </Field>
-          <Field className="field-group">
-            <FieldLabel htmlFor="target-heading">
-              Heading
-            </FieldLabel>
-            <Input
-              id="target-heading"
-              type="number"
-              min="-180"
-              max="180"
-              step="1"
-              defaultValue="0"
-            />
-          </Field>
-        </FieldGroup>
-        <Button
-          id="apply-target-velocity"
-          className="min-h-11 w-full"
-          variant="secondary"
-          type="button"
-        >
-          Apply velocity
-        </Button>
-      </div>
-    </details>
-  )
-}
-
-function PostprocessSection() {
-  return (
-    <details className="tool-section">
-      <summary>Postprocess</summary>
-      <div className="tool-section__body">
-        <label
-          className="flex min-h-11 items-center justify-between gap-2.5"
-          htmlFor="postprocess-enabled"
-        >
-          <span>
-            <span className="block text-xs font-medium">
-              Motion correction
-            </span>
-            <small className="mt-0.5 block text-xs text-muted-foreground">
-              Refine contacts and constraint adherence after decoding.
-            </small>
-          </span>
           <input
-            id="postprocess-enabled"
-            type="checkbox"
-            role="switch"
+            id="vrm-file-input"
+            type="file"
+            accept=".vrm,model/gltf-binary,application/octet-stream"
+            hidden
+            aria-hidden="true"
           />
-        </label>
-        <FieldGroup className="grid grid-cols-2 gap-2.5 max-[520px]:grid-cols-1">
-          <Field className="field-group">
-            <FieldLabel htmlFor="root-height-margin">
-              Root margin
-            </FieldLabel>
-            <Input
-              id="root-height-margin"
-              type="number"
-              min="0"
-              max="1"
-              step="0.01"
-              defaultValue="0.04"
-            />
-          </Field>
-          <Field className="field-group">
-            <FieldLabel htmlFor="contact-threshold">
-              Contact threshold
-            </FieldLabel>
-            <Input
-              id="contact-threshold"
-              type="number"
-              min="0"
-              max="1"
-              step="0.01"
-              defaultValue="0.5"
-            />
-          </Field>
-        </FieldGroup>
-      </div>
-    </details>
+          <Button
+            id="remove-vrm"
+            className="min-h-11 flex-1"
+            variant="destructive"
+            type="button"
+            disabled
+          >
+            Remove avatar
+          </Button>
+        </CardFooter>
+      </Card>
+
+      <label
+        className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
+        htmlFor="show-vrm"
+      >
+        <input id="show-vrm" type="checkbox" defaultChecked disabled />
+        <span>Show VRM avatar</span>
+      </label>
+
+      <Alert
+        id="vrm-error-banner"
+        variant="destructive"
+        tabIndex={-1}
+        hidden
+      >
+        <AlertTitle>VRM import failed</AlertTitle>
+        <AlertDescription id="vrm-error-message" />
+        <AlertAction>
+          <Button
+            id="dismiss-vrm-error"
+            className="min-h-11 min-w-11"
+            variant="ghost"
+            size="icon-sm"
+            type="button"
+            aria-label="Dismiss VRM error"
+          >
+            <IconX data-icon="inline-start" aria-hidden="true" />
+          </Button>
+        </AlertAction>
+      </Alert>
+    </section>
   )
 }
 
-function DisplaySection() {
+function DisplayControls() {
   return (
-    <details className="tool-section" open>
-      <summary>Display</summary>
-      <div className="tool-section__body grid grid-cols-2 max-[520px]:grid-cols-1">
+    <section className="grid gap-3" aria-labelledby="display-title">
+      <h3
+        className="text-xs font-medium text-muted-foreground"
+        id="display-title"
+      >
+        Display
+      </h3>
+      <div className="grid grid-cols-2 max-[520px]:grid-cols-1">
         <label
           className="flex min-h-11 items-center gap-2.5 text-xs font-medium"
           htmlFor="show-skeleton"
@@ -1419,6 +1081,19 @@ function DisplaySection() {
           aria-hidden="true"
         />
       </div>
+    </section>
+  )
+}
+
+function PreviewSettingsSection() {
+  return (
+    <details className="settings-details" id="preview-settings">
+      <summary>View settings</summary>
+      <div className="details-body grid gap-3">
+        <VrmAvatarSection />
+        <Separator />
+        <DisplayControls />
+      </div>
     </details>
   )
 }
@@ -1459,45 +1134,9 @@ function GenerationPanel() {
   )
 }
 
-function InspectorPanel() {
-  return (
-    <aside
-      className="panel inspector-panel"
-      aria-labelledby="inspector-title"
-    >
-      <div className="sticky top-0 z-10 flex min-h-15 items-center justify-between gap-3 border-b bg-background px-3 py-2.5 max-[760px]:static">
-        <div>
-          <p className="text-xs text-muted-foreground">Control</p>
-          <h2 className="text-sm font-medium" id="inspector-title">
-            Motion parameters
-          </h2>
-        </div>
-        <Button
-          id="export-motion"
-          className="min-h-11"
-          variant="secondary"
-          type="button"
-        >
-          Export motion
-        </Button>
-      </div>
-
-      <InitialTransformSection />
-
-      <GuidanceSection />
-
-      <ConstraintsSection />
-
-      <RootControlSection />
-
-      <PostprocessSection />
-
-      <DisplaySection />
-    </aside>
-  )
-}
-
 export function App() {
+  useEffect(() => bootstrap(), [])
+
   return (
     <div id="app">
       <a className="skip-link" href="#prompt">
@@ -1518,8 +1157,6 @@ export function App() {
         <GenerationPanel />
 
         <ViewportPanel />
-
-        <InspectorPanel />
       </main>
     </div>
   )

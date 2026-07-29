@@ -58,14 +58,15 @@ async function createSession(
   >,
   executionProviders: ort.InferenceSession.ExecutionProviderConfig[],
 ): Promise<ort.InferenceSession> {
-  const model = await pack.read(graph.model);
-  const externalData: Array<{ path: string; data: Uint8Array }> = [];
-  for (const spec of graph.external_data ?? []) {
-    externalData.push({
-      path: spec.path,
-      data: await pack.read(spec.file),
-    });
-  }
+  const [model, externalData] = await Promise.all([
+    pack.read(graph.model),
+    Promise.all(
+      (graph.external_data ?? []).map(async (spec) => ({
+        path: spec.path,
+        data: await pack.read(spec.file),
+      })),
+    ),
+  ]);
   return ort.InferenceSession.create(model, {
     executionProviders,
     logSeverityLevel: 3,

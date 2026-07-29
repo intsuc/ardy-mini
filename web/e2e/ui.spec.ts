@@ -14,7 +14,7 @@ async function setRange(page: Page, selector: string, value: number): Promise<vo
   }, value);
 }
 
-test("renders the three-pane technical workspace with model-gated controls", async ({
+test("renders the two-pane technical workspace without motion parameters", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -30,16 +30,15 @@ test("renders the three-pane technical workspace with model-gated controls", asy
   await expect(page.locator("#model-state")).toHaveText("Not loaded");
   await expect(page.locator("#generator-panel")).toBeVisible();
   await expect(page.locator("#viewport-panel")).toBeVisible();
-  await expect(page.locator(".inspector-panel")).toBeVisible();
+  await expect(page.locator(".inspector-panel")).toHaveCount(0);
 
   const panePositions = await Promise.all(
-    ["#generator-panel", "#viewport-panel", ".inspector-panel"].map((selector) =>
+    ["#generator-panel", "#viewport-panel"].map((selector) =>
       page.locator(selector).boundingBox(),
     ),
   );
   expect(panePositions.every(Boolean)).toBe(true);
   expect(panePositions[0]!.x).toBeLessThan(panePositions[1]!.x);
-  expect(panePositions[1]!.x).toBeLessThan(panePositions[2]!.x);
 
   await expect(page.getByLabel("Motion description")).toBeEditable();
   await expect(
@@ -62,9 +61,6 @@ test("renders the three-pane technical workspace with model-gated controls", asy
     "#apply-prompt",
     "#restart-generation",
     "#restart-from-now",
-    "#add-constraint",
-    "#add-waypoint",
-    "#apply-target-velocity",
     "#export-session",
     "#export-motion",
   ]) {
@@ -73,13 +69,53 @@ test("renders the three-pane technical workspace with model-gated controls", asy
   await expect(page.locator("#new-session")).toBeEnabled();
   await expect(page.locator("#import-session")).toBeEnabled();
 
-  await expect(
-    page.getByRole("group", { name: "Constraint timeline tracks" }),
-  ).toBeVisible();
-  await expect(page.locator(".constraint-track")).toHaveCount(6);
-  await expect(page.getByLabel("Text CFG")).toHaveValue("3.5");
-  await expect(page.getByLabel("Constraint CFG")).toHaveValue("1");
-  await expect(page.getByText("Root control", { exact: true })).toBeVisible();
+  for (const selector of [
+    "#initial-x",
+    "#initial-z",
+    "#initial-heading",
+    "#text-cfg",
+    "#constraint-cfg",
+    "#history-frames",
+    "#future-crop",
+    "#replan-buffer",
+    "#replan-threshold",
+    "#constraint-timeline",
+    ".constraint-track",
+    "#constraint-type",
+    "#constraint-frame",
+    "#constraint-end-frame",
+    "#add-constraint",
+    "#delete-constraint",
+    "#clear-constraints",
+    "#waypoint-mode",
+    "#waypoint-interval",
+    "#waypoint-dense",
+    "#add-waypoint",
+    "#target-velocity",
+    "#target-heading",
+    "#apply-target-velocity",
+    "#postprocess-enabled",
+    "#root-height-margin",
+    "#contact-threshold",
+  ]) {
+    await expect(page.locator(selector)).toHaveCount(0);
+  }
+  for (const label of [
+    "Control",
+    "Motion parameters",
+    "Initial transform",
+    "Guidance and planning",
+    "Constraints",
+    "Root control",
+    "Postprocess",
+  ]) {
+    await expect(page.getByText(label, { exact: true })).toHaveCount(0);
+  }
+
+  await expect(page.locator("#preview-settings")).toBeVisible();
+  await page.locator("#preview-settings > summary").click();
+  await expect(page.getByText("VRM avatar", { exact: true })).toBeVisible();
+  await expect(page.locator("#import-vrm")).toBeEnabled();
   await expect(page.getByText("Foot contacts", { exact: true })).toBeVisible();
   await expect(page.getByText("Orientations", { exact: true })).toBeVisible();
   await expect(page.getByText("Body proxy", { exact: true })).toBeVisible();
@@ -182,12 +218,6 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
     "Duration",
     "Seed",
     "Backend",
-    "Text CFG",
-    "Constraint CFG",
-    "History frames",
-    "Future crop",
-    "Start",
-    "End",
   ]) {
     await expect(page.getByLabel(label, { exact: true })).toHaveCount(1);
   }
@@ -264,6 +294,28 @@ test("keeps saved model actions inside the input panel at minimum width", async 
   ).toBe(true);
 });
 
+test("stacks the workspace before the two-pane layout can overflow", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 800, height: 900 });
+  await page.goto("/");
+
+  const panes = await Promise.all(
+    ["#generator-panel", "#viewport-panel"].map((selector) =>
+      page.locator(selector).boundingBox(),
+    ),
+  );
+  expect(panes.every(Boolean)).toBe(true);
+  expect(panes[0]!.y).toBeLessThan(panes[1]!.y);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    )
+    .toBe(true);
+});
+
 test("honors reduced motion and remains touch-safe without mobile overflow", async ({
   page,
 }) => {
@@ -323,13 +375,29 @@ test("honors reduced motion and remains touch-safe without mobile overflow", asy
     .toBe(true);
 
   const panes = await Promise.all(
-    ["#generator-panel", "#viewport-panel", ".inspector-panel"].map((selector) =>
+    ["#generator-panel", "#viewport-panel"].map((selector) =>
       page.locator(selector).boundingBox(),
     ),
   );
   expect(panes.every(Boolean)).toBe(true);
   expect(panes[0]!.y).toBeLessThan(panes[1]!.y);
-  expect(panes[1]!.y).toBeLessThan(panes[2]!.y);
+  await expect(page.locator(".inspector-panel")).toHaveCount(0);
+
+  await page.locator("#preview-settings > summary").click();
+  const preview = await page.locator("#viewport").boundingBox();
+  expect(preview).not.toBeNull();
+  expect(preview!.height).toBeGreaterThanOrEqual(384);
+
+  const mobileFormFontSizes = await page.evaluate(() =>
+    ["#prompt", "#seed", "#backend", "#prompt-example"].map((selector) => {
+      const element = document.querySelector(selector);
+      if (!(element instanceof HTMLElement)) {
+        throw new Error(`Missing mobile form control: ${selector}`);
+      }
+      return getComputedStyle(element).fontSize;
+    }),
+  );
+  expect(mobileFormFontSizes).toEqual(["16px", "16px", "16px", "16px"]);
 
   const tapTargetSelectors = [
     "#new-session",
@@ -343,7 +411,7 @@ test("honors reduced motion and remains touch-safe without mobile overflow", asy
     "#playback-speed",
     "#loop-toggle",
     "#reset-camera",
-    "#constraint-track-root",
+    "#import-vrm",
   ];
   const boxes = await Promise.all(
     tapTargetSelectors.map((selector) => page.locator(selector).boundingBox()),

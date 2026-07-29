@@ -2,14 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  createCapturedConstraint,
-  createRootConstraint,
-  interpolateRootWaypoints,
-  waypointsFromTargetVelocity,
-  type MotionConstraint,
-  type MotionConstraintKind as RuntimeConstraintKind,
-} from "./runtime/constraints";
-import {
   type RuntimeContinuationState,
   type RuntimeGenerationChunk,
   type RuntimeGenerationResult,
@@ -18,7 +10,6 @@ import {
   validateModelPackManifest,
   type BrowserModelPackManifest,
 } from "./runtime/manifest";
-import { postprocessMotion } from "./runtime/postprocess";
 import {
   type GenerationCompleteEvent,
   type GenerationMode,
@@ -26,7 +17,6 @@ import {
   type ModelLoadedEvent,
   type ProgressEvent,
   type RuntimeBackendPreference,
-  type RuntimeCapabilities,
   type WorkerCommand,
   type WorkerEvent,
 } from "./runtime/protocol";
@@ -47,17 +37,14 @@ import {
 } from "./session-format";
 import {
   DEFAULT_EDITOR_STATE,
-  type MotionConstraintMarker,
   type MotionEditorState,
-  type MotionWaypoint,
-  type QuaternionTuple,
-  type Vector3Tuple,
   type ViewerOutputVisibility,
 } from "./editor-state";
 import {
   BODY_PROXY_DESCRIPTION,
   SkeletonViewer,
   type PlaybackState,
+  type VrmModelInfo,
 } from "./viewer";
 import { PROMPT_EXAMPLE_EVENT } from "./prompt-examples";
 
@@ -68,9 +55,14 @@ const CACHE_PACK = "active-pack";
 const CACHE_INDEX = "index.json";
 const PACK_MANIFEST = "manifest.json";
 const ORT_WASM_PATH = new URL("ort/", document.baseURI).href;
+const DEFAULT_TEXT_CFG_WEIGHT = 3.5;
+const DEFAULT_CONSTRAINT_CFG_WEIGHT = 1;
+const DEFAULT_HISTORY_FRAMES = 40;
+const DEFAULT_FUTURE_CROP_FRAMES = 80;
+const DEFAULT_REPLAN_BUFFER_FRAMES = 20;
+const DEFAULT_REPLAN_THRESHOLD_FRAMES = 10;
 
 type FileWithRelativePath = File & { readonly webkitRelativePath?: string };
-type ConstraintValueKind = "position" | "rotation" | "pose";
 
 interface CacheIndex {
   schemaVersion: 1;
@@ -100,20 +92,6 @@ interface ActiveGeneration {
   receivedChunk: boolean;
   resumePlayback: boolean;
 }
-
-interface TrackDefinition {
-  buttonId: string;
-  runtimeKind: RuntimeConstraintKind;
-}
-
-const TRACK_DEFINITIONS: readonly TrackDefinition[] = [
-  { buttonId: "constraint-track-full-body", runtimeKind: "full-body" },
-  { buttonId: "constraint-track-root", runtimeKind: "root" },
-  { buttonId: "constraint-track-left-hand", runtimeKind: "left-hand" },
-  { buttonId: "constraint-track-right-hand", runtimeKind: "right-hand" },
-  { buttonId: "constraint-track-left-foot", runtimeKind: "left-foot" },
-  { buttonId: "constraint-track-right-foot", runtimeKind: "right-foot" },
-];
 
 export function validateGenerationForm(
   promptValue: string,
@@ -731,222 +709,6 @@ function motionFromRuntime(
   );
 }
 
-function rootPositionAt(
-  motion: StructuredMotionResult | null,
-  frame: number,
-): Vector3Tuple {
-  if (!motion || motion.frameCount === 0) return [0, 0, 0];
-  const safeFrame = Math.max(0, Math.min(motion.frameCount - 1, frame));
-  const offset =
-    (safeFrame * motion.skeleton.jointNames.length +
-      motion.skeleton.rootJointIndex) *
-    3;
-  return [
-    motion.positions[offset],
-    motion.positions[offset + 1],
-    motion.positions[offset + 2],
-  ];
-}
-
-function jointPositionAt(
-  motion: StructuredMotionResult,
-  frame: number,
-  joint: number,
-): Vector3Tuple {
-  const safeFrame = Math.max(0, Math.min(motion.frameCount - 1, frame));
-  const offset = (safeFrame * motion.skeleton.jointNames.length + joint) * 3;
-  return [
-    motion.positions[offset],
-    motion.positions[offset + 1],
-    motion.positions[offset + 2],
-  ];
-}
-
-function matrixQuaternion(
-  values: Float32Array,
-  offset: number,
-): QuaternionTuple {
-  const m00 = values[offset];
-  const m01 = values[offset + 1];
-  const m02 = values[offset + 2];
-  const m10 = values[offset + 3];
-  const m11 = values[offset + 4];
-  const m12 = values[offset + 5];
-  const m20 = values[offset + 6];
-  const m21 = values[offset + 7];
-  const m22 = values[offset + 8];
-  const trace = m00 + m11 + m22;
-  let x: number;
-  let y: number;
-  let z: number;
-  let w: number;
-  if (trace > 0) {
-    const scale = Math.sqrt(trace + 1) * 2;
-    w = 0.25 * scale;
-    x = (m21 - m12) / scale;
-    y = (m02 - m20) / scale;
-    z = (m10 - m01) / scale;
-  } else if (m00 > m11 && m00 > m22) {
-    const scale = Math.sqrt(1 + m00 - m11 - m22) * 2;
-    w = (m21 - m12) / scale;
-    x = 0.25 * scale;
-    y = (m01 + m10) / scale;
-    z = (m02 + m20) / scale;
-  } else if (m11 > m22) {
-    const scale = Math.sqrt(1 + m11 - m00 - m22) * 2;
-    w = (m02 - m20) / scale;
-    x = (m01 + m10) / scale;
-    y = 0.25 * scale;
-    z = (m12 + m21) / scale;
-  } else {
-    const scale = Math.sqrt(1 + m22 - m00 - m11) * 2;
-    w = (m10 - m01) / scale;
-    x = (m02 + m20) / scale;
-    y = (m12 + m21) / scale;
-    z = 0.25 * scale;
-  }
-  const magnitude = Math.hypot(x, y, z, w) || 1;
-  return [x / magnitude, y / magnitude, z / magnitude, w / magnitude];
-}
-
-function jointOrientationAt(
-  motion: StructuredMotionResult,
-  frame: number,
-  joint: number,
-): QuaternionTuple | undefined {
-  const track = motion.globalRotations ?? motion.localRotations;
-  if (!track) return undefined;
-  const safeFrame = Math.max(0, Math.min(motion.frameCount - 1, frame));
-  const offset = (safeFrame * track.shape[1] + joint) * track.shape[2];
-  if (track.shape[2] === 4) {
-    return [
-      track.values[offset],
-      track.values[offset + 1],
-      track.values[offset + 2],
-      track.values[offset + 3],
-    ];
-  }
-  return matrixQuaternion(track.values, offset);
-}
-
-function trackJointIndex(
-  motion: StructuredMotionResult,
-  kind: RuntimeConstraintKind,
-): number {
-  if (kind === "root" || kind === "full-body") {
-    return motion.skeleton.rootJointIndex;
-  }
-  const side = kind.startsWith("left") ? "left" : "right";
-  const part = kind.endsWith("hand") ? "hand" : "foot";
-  const jointIndex = motion.skeleton.jointNames.findIndex((name) => {
-    const normalizedName = name.toLowerCase();
-    return normalizedName.includes(side) && normalizedName.includes(part);
-  });
-  if (jointIndex === -1) {
-    throw new Error(`The loaded skeleton has no ${kind} joint.`);
-  }
-  return jointIndex;
-}
-
-function markerLabel(
-  kind: RuntimeConstraintKind,
-  valueKind: ConstraintValueKind,
-): string {
-  return `${kind}:${valueKind}`;
-}
-
-function markerRuntimeKind(
-  marker: MotionConstraintMarker,
-): RuntimeConstraintKind | null {
-  const kind = marker.label?.split(":", 1)[0];
-  return TRACK_DEFINITIONS.some((track) => track.runtimeKind === kind)
-    ? (kind as RuntimeConstraintKind)
-    : null;
-}
-
-function markerValueKind(marker: MotionConstraintMarker): ConstraintValueKind {
-  const value = marker.label?.split(":")[1];
-  return value === "position" || value === "rotation" || value === "pose"
-    ? value
-    : "pose";
-}
-
-function headingFromQuaternion(
-  orientation: QuaternionTuple | undefined,
-): number | undefined {
-  if (!orientation) return undefined;
-  const [x, y, z, w] = orientation;
-  return Math.atan2(
-    2 * (w * y + x * z),
-    1 - 2 * (y * y + z * z),
-  );
-}
-
-function rootHeadingAt(
-  motion: StructuredMotionResult,
-  manifest: BrowserModelPackManifest,
-  frame: number,
-): number | undefined {
-  const heading = manifest.motion_layout?.global_root_heading;
-  const stats = manifest.stats?.motion;
-  const stride = motion.normalizedMotionShape?.[1];
-  if (
-    !motion.normalizedMotion ||
-    !stride ||
-    !heading ||
-    heading[1] - heading[0] < 2 ||
-    !stats ||
-    stats.mean.length <= heading[0] + 1 ||
-    stats.normalization_denominator.length <= heading[0] + 1
-  ) {
-    return undefined;
-  }
-  const safeFrame = Math.max(0, Math.min(motion.frameCount - 1, frame));
-  const offset = safeFrame * stride + heading[0];
-  const cosine =
-    motion.normalizedMotion[offset] *
-      stats.normalization_denominator[heading[0]] +
-    stats.mean[heading[0]];
-  const sine =
-    motion.normalizedMotion[offset + 1] *
-      stats.normalization_denominator[heading[0] + 1] +
-    stats.mean[heading[0] + 1];
-  return Number.isFinite(cosine) && Number.isFinite(sine)
-    ? Math.atan2(sine, cosine)
-    : undefined;
-}
-
-function filterConstraintValue(
-  constraint: MotionConstraint,
-  kind: RuntimeConstraintKind,
-  valueKind: ConstraintValueKind,
-  manifest: BrowserModelPackManifest,
-): MotionConstraint {
-  if (valueKind === "pose" || kind === "full-body") return constraint;
-  const mask = constraint.mask.slice();
-  const layout = manifest.motion_layout;
-  if (kind === "root") {
-    if (valueKind === "position" && layout?.global_root_heading) {
-      mask.fill(
-        0,
-        layout.global_root_heading[0],
-        layout.global_root_heading[1],
-      );
-    } else if (valueKind === "rotation" && layout?.root_pos) {
-      mask.fill(0, layout.root_pos[0], layout.root_pos[1]);
-    }
-  } else if (valueKind === "position" && layout?.global_rot_data) {
-    mask.fill(0, layout.global_rot_data[0], layout.global_rot_data[1]);
-  } else if (valueKind === "rotation" && layout?.local_joints_positions) {
-    mask.fill(
-      0,
-      layout.local_joints_positions[0],
-      layout.local_joints_positions[1],
-    );
-  }
-  return { ...constraint, mask };
-}
-
 function cloneEditorState(state: MotionEditorState): MotionEditorState {
   return {
     initialTransform: {
@@ -976,16 +738,31 @@ function cloneEditorState(state: MotionEditorState): MotionEditorState {
   };
 }
 
-function cloneRuntimeConstraint(constraint: MotionConstraint): MotionConstraint {
-  return {
-    ...constraint,
-    values: new Float32Array(constraint.values),
-    mask: new Float32Array(constraint.mask),
-  };
+/**
+ * Keep display preferences from imported sessions, but discard the removed
+ * motion-parameter state so it cannot invisibly affect later generation.
+ */
+export function sanitizeImportedEditorState(
+  state: MotionEditorState,
+): MotionEditorState {
+  return cloneEditorState({
+    ...DEFAULT_EDITOR_STATE,
+    outputVisibility: {
+      ...DEFAULT_EDITOR_STATE.outputVisibility,
+      skeleton: state.outputVisibility.skeleton,
+      mesh: state.outputVisibility.mesh,
+      reference: false,
+      trajectory: state.outputVisibility.trajectory,
+      contacts: state.outputVisibility.contacts,
+      orientationAxes: state.outputVisibility.orientationAxes,
+    },
+  });
 }
 
-export function bootstrap(): void {
-  if (!document.getElementById("app")) return;
+export function bootstrap(): () => void {
+  if (!document.getElementById("app")) return () => {};
+  const lifecycle = new AbortController();
+  let disposed = false;
 
   const form = requiredElement<HTMLFormElement>("generation-form");
   const prompt = requiredElement<HTMLTextAreaElement>("prompt");
@@ -996,7 +773,6 @@ export function bootstrap(): void {
   const seed = requiredElement<HTMLInputElement>("seed");
   const seedError = requiredElement<HTMLElement>("seed-error");
   const randomizeSeed = requiredElement<HTMLButtonElement>("randomize-seed");
-  const runtimeSettings = requiredElement<HTMLDetailsElement>("runtime-settings");
   const backend = requiredElement<HTMLSelectElement>("backend");
   const backendHelp = requiredElement<HTMLElement>("backend-help");
   const importModel = requiredElement<HTMLButtonElement>("import-model");
@@ -1050,9 +826,6 @@ export function bootstrap(): void {
   const motionBadge = requiredElement<HTMLElement>("motion-badge");
   const runtimeMetric = requiredElement<HTMLElement>("runtime-metric");
   const runtimeValue = requiredElement<HTMLElement>("runtime-value");
-  const correctionMetric = requiredElement<HTMLElement>("correction-metric");
-  const rootErrorValue = requiredElement<HTMLElement>("root-error-value");
-  const footSlideValue = requiredElement<HTMLElement>("foot-slide-value");
   const playPause = requiredElement<HTMLButtonElement>("play-pause");
   const timeline = requiredElement<HTMLInputElement>("timeline");
   const currentTime = requiredElement<HTMLElement>("current-time");
@@ -1068,7 +841,6 @@ export function bootstrap(): void {
   const appStatus = requiredElement<HTMLElement>("app-status");
   const viewportPanel = requiredElement<HTMLElement>("viewport-panel");
   const viewport = requiredElement<HTMLElement>("viewport");
-  const playbackBar = requiredElement<HTMLElement>("playback-bar");
   const modelRuntimeStatus =
     requiredElement<HTMLElement>("model-runtime-status");
   const modelRuntimeDetail =
@@ -1080,55 +852,6 @@ export function bootstrap(): void {
     requiredElement<HTMLInputElement>("session-file-input");
   const exportSession = requiredElement<HTMLButtonElement>("export-session");
   const exportMotion = requiredElement<HTMLButtonElement>("export-motion");
-
-  const initialX = requiredElement<HTMLInputElement>("initial-x");
-  const initialZ = requiredElement<HTMLInputElement>("initial-z");
-  const initialHeading =
-    requiredElement<HTMLInputElement>("initial-heading");
-  const textCfg = requiredElement<HTMLInputElement>("text-cfg");
-  const constraintCfg = requiredElement<HTMLInputElement>("constraint-cfg");
-  const historyFrames = requiredElement<HTMLInputElement>("history-frames");
-  const futureCrop = requiredElement<HTMLInputElement>("future-crop");
-  const replanBuffer = requiredElement<HTMLInputElement>("replan-buffer");
-  const replanThreshold =
-    requiredElement<HTMLInputElement>("replan-threshold");
-
-  const constraintType =
-    requiredElement<HTMLSelectElement>("constraint-type");
-  const constraintFrame =
-    requiredElement<HTMLInputElement>("constraint-frame");
-  const constraintEndFrame =
-    requiredElement<HTMLInputElement>("constraint-end-frame");
-  const addConstraint = requiredElement<HTMLButtonElement>("add-constraint");
-  const deleteConstraint =
-    requiredElement<HTMLButtonElement>("delete-constraint");
-  const clearConstraints =
-    requiredElement<HTMLButtonElement>("clear-constraints");
-  const trackButtons = new Map<RuntimeConstraintKind, HTMLButtonElement>(
-    TRACK_DEFINITIONS.map(({ buttonId, runtimeKind }) => [
-      runtimeKind,
-      requiredElement<HTMLButtonElement>(buttonId),
-    ]),
-  );
-
-  const waypointMode = requiredElement<HTMLInputElement>("waypoint-mode");
-  const waypointInterval =
-    requiredElement<HTMLInputElement>("waypoint-interval");
-  const waypointDense = requiredElement<HTMLInputElement>("waypoint-dense");
-  const addWaypoint = requiredElement<HTMLButtonElement>("add-waypoint");
-  const targetVelocity =
-    requiredElement<HTMLInputElement>("target-velocity");
-  const targetHeading =
-    requiredElement<HTMLInputElement>("target-heading");
-  const applyTargetVelocity =
-    requiredElement<HTMLButtonElement>("apply-target-velocity");
-
-  const postprocessEnabled =
-    requiredElement<HTMLInputElement>("postprocess-enabled");
-  const rootHeightMargin =
-    requiredElement<HTMLInputElement>("root-height-margin");
-  const contactThreshold =
-    requiredElement<HTMLInputElement>("contact-threshold");
 
   const showSkeleton = requiredElement<HTMLInputElement>("show-skeleton");
   const showContacts = requiredElement<HTMLInputElement>("show-contacts");
@@ -1142,6 +865,23 @@ export function bootstrap(): void {
     requiredElement<HTMLButtonElement>("import-reference");
   const referenceFileInput =
     requiredElement<HTMLInputElement>("reference-file-input");
+  const previewSettings =
+    requiredElement<HTMLDetailsElement>("preview-settings");
+  const vrmCard = requiredElement<HTMLElement>("vrm-card");
+  const vrmName = requiredElement<HTMLElement>("vrm-name");
+  const vrmDetail = requiredElement<HTMLElement>("vrm-detail");
+  const vrmState = requiredElement<HTMLElement>("vrm-state");
+  const importVrm = requiredElement<HTMLButtonElement>("import-vrm");
+  const importVrmLabel = requiredElement<HTMLElement>("import-vrm-label");
+  const vrmFileInput = requiredElement<HTMLInputElement>("vrm-file-input");
+  const removeVrm = requiredElement<HTMLButtonElement>("remove-vrm");
+  const showVrm = requiredElement<HTMLInputElement>("show-vrm");
+  const vrmErrorBanner =
+    requiredElement<HTMLElement>("vrm-error-banner");
+  const vrmErrorMessage =
+    requiredElement<HTMLElement>("vrm-error-message");
+  const dismissVrmError =
+    requiredElement<HTMLButtonElement>("dismiss-vrm-error");
 
   fileInput.setAttribute("webkitdirectory", "");
   fileInput.setAttribute("directory", "");
@@ -1172,6 +912,7 @@ export function bootstrap(): void {
 
   let errorReturnFocus: HTMLElement | null = null;
   let modelErrorReturnFocus: HTMLElement | null = null;
+  let vrmErrorReturnFocus: HTMLElement | null = null;
   let viewer: SkeletonViewer | null = null;
   try {
     viewer = new SkeletonViewer(canvas);
@@ -1204,19 +945,18 @@ export function bootstrap(): void {
   let modelInfo: ModelLoadedEvent["model"] | null = null;
   let activeManifest: BrowserModelPackManifest | null = null;
   let pendingManifest: BrowserModelPackManifest | null = null;
-  let capabilities: RuntimeCapabilities | null = null;
   let generationProgressValue = 0;
   let modelProgressValue = 0;
   let loadingOverlayTimer = 0;
+  let generationReturnFocus: HTMLElement | null = null;
   let currentMotion: StructuredMotionResult | null = null;
   let referenceMotion: StructuredMotionResult | null = null;
   let currentContinuation: RuntimeContinuationState | null = null;
   let currentProvenance: MotionSessionProvenance = {};
   let editorState = cloneEditorState(DEFAULT_EDITOR_STATE);
-  let runtimeConstraints = new Map<string, MotionConstraint>();
-  let rebuildConstraintsAfterModelLoad = false;
-  let selectedTrack: RuntimeConstraintKind = "root";
   let pendingNewSession = false;
+  let activeVrmLoad = 0;
+  let currentVrmInfo: VrmModelInfo | null = null;
 
   const postCommand = (command: WorkerCommand): void =>
     worker.postMessage(command);
@@ -1235,7 +975,7 @@ export function bootstrap(): void {
   ): number {
     const safeFraction = Math.max(0, Math.min(1, fraction));
     const percent = Math.round(safeFraction * 100);
-    fill.style.transform = `scaleX(${safeFraction})`;
+    fill.style.transform = `scaleX(${Math.max(0.001, safeFraction)})`;
     progressbar.setAttribute("aria-valuenow", String(percent));
     return percent;
   }
@@ -1324,6 +1064,76 @@ export function bootstrap(): void {
     modelErrorReturnFocus = null;
   }
 
+  function vrmDetailText(info: VrmModelInfo): string {
+    const details = [
+      info.metaVersion === "0" ? "VRM 0.x" : "VRM 1.0",
+      info.version ? `model ${info.version}` : "",
+      info.authors.length > 0 ? `by ${info.authors.join(", ")}` : "",
+      "local preview",
+    ].filter(Boolean);
+    return details.join(" · ");
+  }
+
+  function setVrmStatus(info: VrmModelInfo | null): void {
+    currentVrmInfo = info;
+    vrmCard.dataset.state = info ? "ready" : "missing";
+    vrmState.dataset.state = info ? "ready" : "missing";
+    vrmName.textContent = info?.name ?? "No avatar loaded";
+    vrmDetail.textContent = info
+      ? vrmDetailText(info)
+      : "Load a VRM 0.x or 1.0 file for local preview.";
+    vrmState.textContent = info
+      ? info.metaVersion === "0"
+        ? "VRM 0.x"
+        : "VRM 1.0"
+      : "Optional";
+    importVrmLabel.textContent = info ? "Replace VRM" : "Load VRM";
+    removeVrm.disabled = !info;
+    showVrm.disabled = !info;
+  }
+
+  function setVrmLoading(loading: boolean): void {
+    vrmCard.toggleAttribute("aria-busy", loading);
+    vrmState.dataset.state = loading
+      ? "loading"
+      : currentVrmInfo
+        ? "ready"
+        : "missing";
+    vrmState.textContent = loading
+      ? "Loading"
+      : currentVrmInfo
+        ? currentVrmInfo.metaVersion === "0"
+          ? "VRM 0.x"
+          : "VRM 1.0"
+        : "Optional";
+    importVrm.disabled = loading || viewer === null;
+    removeVrm.disabled = loading || currentVrmInfo === null;
+    showVrm.disabled = loading || currentVrmInfo === null;
+    importVrmLabel.textContent = loading
+      ? "Loading VRM…"
+      : currentVrmInfo
+        ? "Replace VRM"
+        : "Load VRM";
+  }
+
+  function showVrmError(message: string): void {
+    vrmErrorReturnFocus =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : importVrm;
+    previewSettings.open = true;
+    vrmErrorMessage.textContent = message;
+    vrmErrorBanner.hidden = false;
+    vrmErrorBanner.focus();
+    announce(`VRM import failed: ${message}`);
+  }
+
+  function clearVrmError(restoreFocus = false): void {
+    vrmErrorBanner.hidden = true;
+    if (restoreFocus) vrmErrorReturnFocus?.focus();
+    vrmErrorReturnFocus = null;
+  }
+
   function updatePrompt(): void {
     promptCount.textContent = `${prompt.value.length} / 280`;
     if (prompt.getAttribute("aria-invalid") === "true") {
@@ -1395,13 +1205,6 @@ export function bootstrap(): void {
     streamGeneration.disabled =
       generationBusy ||
       (currentMotion !== null && currentContinuation === null);
-    addConstraint.disabled =
-      !modelReady ||
-      !activeManifest ||
-      !currentMotion?.normalizedMotion ||
-      generating;
-    addWaypoint.disabled = !modelReady || generating;
-    applyTargetVelocity.disabled = !modelReady || generating;
     exportSession.disabled = currentMotion === null;
     exportMotion.disabled = currentMotion === null;
 
@@ -1447,6 +1250,10 @@ export function bootstrap(): void {
   }
 
   function setGenerationBusy(active: boolean, background = false): void {
+    const returnFocus =
+      !active && document.activeElement === cancelGeneration
+        ? generationReturnFocus
+        : null;
     generationProgressElement.dataset.state = active
       ? "active"
       : generationProgressValue >= 1
@@ -1478,6 +1285,12 @@ export function bootstrap(): void {
       loadingOverlay.hidden = true;
     }
     updateGenerateAvailability();
+    if (!active) {
+      generationReturnFocus = null;
+      if (returnFocus?.isConnected) {
+        window.requestAnimationFrame(() => returnFocus.focus());
+      }
+    }
   }
 
   function setEditor(next: MotionEditorState): void {
@@ -1489,53 +1302,6 @@ export function bootstrap(): void {
         "Could not update editor",
         error instanceof Error ? error.message : String(error),
       );
-    }
-    updateConstraintTimeline();
-  }
-
-  function updateInitialTransform(): void {
-    const x = finiteInput(initialX, 0);
-    const z = finiteInput(initialZ, 0);
-    const headingRadians =
-      (finiteInput(initialHeading, 0, -180, 180) * Math.PI) / 180;
-    setEditor({
-      ...editorState,
-      initialTransform: {
-        position: [x, 0, z],
-        headingRadians,
-      },
-    });
-  }
-
-  function updateConstraintTimeline(): void {
-    const extent = Math.max(
-      1,
-      currentMotion?.frameCount ?? 0,
-      ...editorState.constraints.map((constraint) => constraint.endFrame + 1),
-      ...editorState.waypoints.map((waypoint) => waypoint.frame + 1),
-    );
-    for (const { runtimeKind } of TRACK_DEFINITIONS) {
-      const button = trackButtons.get(runtimeKind)!;
-      const matching = editorState.constraints.filter(
-        (marker) => markerRuntimeKind(marker) === runtimeKind,
-      );
-      const latest = matching.at(-1);
-      button.setAttribute(
-        "aria-pressed",
-        String(runtimeKind === selectedTrack),
-      );
-      button.dataset.hasConstraint = String(matching.length > 0);
-      if (latest) {
-        const position = Math.max(
-          0,
-          Math.min(100, (latest.startFrame / Math.max(1, extent - 1)) * 100),
-        );
-        button.style.setProperty("--track-position", `${position}%`);
-        button.title = `${matching.length} constraint${matching.length === 1 ? "" : "s"}; latest at frame ${latest.startFrame}`;
-      } else {
-        button.style.removeProperty("--track-position");
-        button.title = "No constraints on this track";
-      }
     }
   }
 
@@ -1587,14 +1353,6 @@ export function bootstrap(): void {
     currentTime.textContent = elapsed;
     totalTime.textContent = total;
     timeline.setAttribute("aria-valuetext", `${elapsed} of ${total}`);
-    if (
-      document.activeElement !== constraintFrame &&
-      document.activeElement !== constraintEndFrame &&
-      state.frameCount > 0
-    ) {
-      constraintFrame.value = String(state.frame);
-      constraintEndFrame.value = String(state.frame);
-    }
     maybeAutoReplan(state);
   }
 
@@ -1774,32 +1532,10 @@ export function bootstrap(): void {
       requestId: requestId("reset"),
       seed: integerInput(seed, 2, 0, UINT32_MAX),
       initialTranslation: new Float32Array(
-        editorState.initialTransform.position,
+        DEFAULT_EDITOR_STATE.initialTransform.position,
       ),
-      initialHeading: editorState.initialTransform.headingRadians,
+      initialHeading: DEFAULT_EDITOR_STATE.initialTransform.headingRadians,
     });
-  }
-
-  function applyCapabilities(next: RuntimeCapabilities): void {
-    capabilities = next;
-    const constraintAvailable = next.constraints;
-    for (const button of trackButtons.values()) {
-      button.disabled = !constraintAvailable;
-    }
-    constraintType.disabled = !constraintAvailable;
-    constraintFrame.disabled = !constraintAvailable;
-    constraintEndFrame.disabled = !constraintAvailable;
-    clearConstraints.disabled = !constraintAvailable;
-    waypointMode.disabled = !constraintAvailable;
-    waypointInterval.disabled = !constraintAvailable;
-    waypointDense.disabled = !constraintAvailable;
-    targetVelocity.disabled = !constraintAvailable;
-    targetHeading.disabled = !constraintAvailable;
-    postprocessEnabled.disabled = !next.richMotionOutputs;
-    if (!constraintAvailable && waypointMode.checked) {
-      waypointMode.checked = false;
-      if (viewer) viewer.onGroundClick = null;
-    }
   }
 
   function handleModelLoaded(event: ModelLoadedEvent): void {
@@ -1823,16 +1559,11 @@ export function bootstrap(): void {
       `${event.model.id} · ${modelBackend} · ${event.model.fps} FPS`,
       "Ready",
     );
-    applyCapabilities(event.model.capabilities);
     const incompatibleContinuation =
       currentContinuation !== null &&
       !isContinuationModelCompatible(currentProvenance, event.model);
     if (incompatibleContinuation) {
       markCurrentMotionPlaybackOnly();
-    }
-    if (rebuildConstraintsAfterModelLoad) {
-      rebuildRuntimeConstraintsFromEditor();
-      rebuildConstraintsAfterModelLoad = false;
     }
     removeModel.hidden = !cachedPack && !packPendingCache;
     updateGenerateAvailability();
@@ -1915,159 +1646,6 @@ export function bootstrap(): void {
     );
   }
 
-  function allRuntimeConstraints(): MotionConstraint[] {
-    const result = [...runtimeConstraints.values()];
-    if (activeManifest) {
-      const rootWaypoints = editorState.waypoints.flatMap((waypoint) =>
-        waypoint.enabled
-          ? [
-              {
-                id: waypoint.id,
-                frame: waypoint.frame,
-                x: waypoint.position[0],
-                z: waypoint.position[2],
-                heading: waypoint.headingRadians,
-              },
-            ]
-          : [],
-      );
-      result.push(
-        ...interpolateRootWaypoints(
-          activeManifest,
-          rootWaypoints,
-          waypointDense.checked,
-        ),
-      );
-    }
-    return result;
-  }
-
-  function runPostprocess(): boolean {
-    correctionMetric.hidden = true;
-    correctionMetric.removeAttribute("data-root-error-after");
-    correctionMetric.removeAttribute("data-foot-slide-after");
-    runtimeValue.removeAttribute("title");
-    if (
-      !postprocessEnabled.checked ||
-      !currentMotion ||
-      !activeManifest
-    ) {
-      return false;
-    }
-    const contacts =
-      currentMotion.contacts && currentMotion.contactsShape
-        ? {
-            values: currentMotion.contacts,
-            channels: currentMotion.contactsShape[1],
-            jointIndices: currentMotion.skeleton.contactJointIndices,
-          }
-        : undefined;
-    const roots =
-      currentMotion.roots && currentMotion.rootsShape
-        ? {
-            values: currentMotion.roots,
-            components: currentMotion.rootsShape[1],
-          }
-        : undefined;
-    const corrected = postprocessMotion(
-      {
-        positions: currentMotion.positions,
-        frameCount: currentMotion.frameCount,
-        jointCount: currentMotion.skeleton.jointNames.length,
-        rootJointIndex: currentMotion.skeleton.rootJointIndex,
-        roots,
-        contacts,
-        constraints: allRuntimeConstraints(),
-        constraintManifest: activeManifest,
-        frameOffset: 0,
-      },
-      {
-        rootMargin: finiteInput(rootHeightMargin, 0.04, 0, 1),
-        contactThreshold: finiteInput(contactThreshold, 0.5, 0, 1),
-      },
-    );
-    let normalizedMotion = currentMotion.normalizedMotion;
-    if (
-      corrected.roots &&
-      currentMotion.rootsShape &&
-      normalizedMotion &&
-      currentMotion.normalizedMotionShape &&
-      currentContinuation
-    ) {
-      const rootSlice = activeManifest.motion_layout?.root_pos;
-      const stats = activeManifest.stats?.motion;
-      if (
-        rootSlice &&
-        rootSlice[1] - rootSlice[0] >= 3 &&
-        stats &&
-        stats.mean.length >= rootSlice[0] + 3 &&
-        stats.normalization_denominator.length >= rootSlice[0] + 3
-      ) {
-        normalizedMotion = normalizedMotion.slice();
-        const continuationTokens =
-          currentContinuation.hybridTokens.slice();
-        const motionStride = currentMotion.normalizedMotionShape[1];
-        const rootStride = currentMotion.rootsShape[1];
-        const dimensions = activeManifest.dimensions;
-        const continuationFrames = Math.min(
-          currentMotion.frameCount,
-          currentContinuation.frameCount,
-          (continuationTokens.length / dimensions.hybrid_dim) *
-            dimensions.num_frames_per_token,
-        );
-        for (let frame = 0; frame < currentMotion.frameCount; frame += 1) {
-          for (let axis = 0; axis < 3; axis += 1) {
-            const feature = rootSlice[0] + axis;
-            const normalized = Math.fround(
-              (corrected.roots[frame * rootStride + axis] -
-                stats.mean[feature]) /
-                stats.normalization_denominator[feature],
-            );
-            normalizedMotion[frame * motionStride + feature] = normalized;
-            if (frame < continuationFrames) {
-              const token = Math.floor(
-                frame / dimensions.num_frames_per_token,
-              );
-              const frameInToken =
-                frame % dimensions.num_frames_per_token;
-              const rootFeature = feature - rootSlice[0];
-              continuationTokens[
-                token * dimensions.hybrid_dim +
-                  frameInToken * dimensions.root_features_per_frame +
-                  rootFeature
-              ] = normalized;
-            }
-          }
-        }
-        currentContinuation = {
-          ...currentContinuation,
-          hybridTokens: continuationTokens,
-        };
-      }
-    }
-    currentMotion = {
-      ...currentMotion,
-      positions: corrected.positions,
-      normalizedMotion,
-      roots: corrected.roots ?? currentMotion.roots,
-    };
-    runtimeValue.title =
-      `Foot slide ${corrected.metrics.footSlidingDistanceBefore.toFixed(3)} → ` +
-      `${corrected.metrics.footSlidingDistanceAfter.toFixed(3)} m`;
-    const rootBefore = corrected.metrics.rootConstraintMeanErrorBefore;
-    const rootAfter = corrected.metrics.rootConstraintMeanErrorAfter;
-    const slideBefore = corrected.metrics.footSlidingDistanceBefore;
-    const slideAfter = corrected.metrics.footSlidingDistanceAfter;
-    rootErrorValue.textContent =
-      `${rootBefore.toFixed(3)}→${rootAfter.toFixed(3)} m`;
-    footSlideValue.textContent =
-      `${slideBefore.toFixed(3)}→${slideAfter.toFixed(3)} m`;
-    correctionMetric.dataset.rootErrorAfter = String(rootAfter);
-    correctionMetric.dataset.footSlideAfter = String(slideAfter);
-    correctionMetric.hidden = false;
-    return true;
-  }
-
   function finishGeneration(event: GenerationCompleteEvent): void {
     if (event.requestId !== activeGeneration?.id) return;
     const active = activeGeneration;
@@ -2081,7 +1659,6 @@ export function bootstrap(): void {
         );
       }
       currentContinuation = event.result.continuation;
-      const continuationCorrected = runPostprocess();
       const playback = viewer?.getPlaybackState();
       const resetPresentation =
         active.mode === "replace" && !active.receivedChunk;
@@ -2101,9 +1678,6 @@ export function bootstrap(): void {
           : `${Math.round(event.result.timingsMs.total)} ms`;
       activeGeneration = null;
       setGenerationBusy(false);
-      if (continuationCorrected) {
-        restoreWorkerContinuation(false);
-      }
       announce(
         `Generation complete. The session contains ${event.sessionFrameCount} frames.`,
       );
@@ -2141,7 +1715,6 @@ export function bootstrap(): void {
       if (validation.promptError) {
         prompt.focus();
       } else if (validation.seedError) {
-        runtimeSettings.open = true;
         window.requestAnimationFrame(() => seed.focus());
       }
       return null;
@@ -2212,6 +1785,13 @@ export function bootstrap(): void {
           ? "Replanning motion"
           : "Generating motion";
     loadingDetail.textContent = "Encoding prompt…";
+    if (!background) {
+      generationReturnFocus =
+        document.activeElement instanceof HTMLElement &&
+        document.activeElement !== document.body
+          ? document.activeElement
+          : generate;
+    }
     setGenerationBusy(true, background);
     if (!background) {
       window.requestAnimationFrame(() => {
@@ -2223,10 +1803,8 @@ export function bootstrap(): void {
         }
       });
     }
-    const requestedFuture = integerInput(
-      futureCrop,
-      0,
-      0,
+    const requestedFuture = Math.min(
+      DEFAULT_FUTURE_CROP_FRAMES,
       modelInfo.constraintMaxFrames,
     );
     const command: WorkerCommand = {
@@ -2248,24 +1826,20 @@ export function bootstrap(): void {
             durationSeconds:
               options.durationSeconds ?? values.durationSeconds,
           }),
-      textCfgWeight: finiteInput(textCfg, 3.5, 0, 100),
-      constraintCfgWeight: finiteInput(constraintCfg, 1, 0, 100),
-      historyFrames: integerInput(
-        historyFrames,
-        40,
-        0,
-        activeManifest?.dimensions.history_frames ?? 40,
+      textCfgWeight: DEFAULT_TEXT_CFG_WEIGHT,
+      constraintCfgWeight: DEFAULT_CONSTRAINT_CFG_WEIGHT,
+      historyFrames: Math.min(
+        DEFAULT_HISTORY_FRAMES,
+        activeManifest?.dimensions.history_frames ?? DEFAULT_HISTORY_FRAMES,
       ),
       futureFrames: requestedFuture,
-      constraints: capabilities?.constraints
-        ? allRuntimeConstraints()
-        : undefined,
       ...(mode === "replace"
         ? {
             initialTranslation: new Float32Array(
-              editorState.initialTransform.position,
+              DEFAULT_EDITOR_STATE.initialTransform.position,
             ),
-            initialHeading: editorState.initialTransform.headingRadians,
+            initialHeading:
+              DEFAULT_EDITOR_STATE.initialTransform.headingRadians,
           }
         : {}),
     };
@@ -2292,10 +1866,8 @@ export function bootstrap(): void {
       return;
     }
     const remaining = state.frameCount - state.frame - 1;
-    const threshold = integerInput(
-      replanThreshold,
-      10,
-      1,
+    const threshold = Math.min(
+      DEFAULT_REPLAN_THRESHOLD_FRAMES,
       Math.max(1, Number(targetBuffer.value)),
     );
     if (remaining > threshold) return;
@@ -2315,8 +1887,6 @@ export function bootstrap(): void {
     referenceMotion = null;
     currentContinuation = null;
     currentProvenance = {};
-    runtimeConstraints.clear();
-    rebuildConstraintsAfterModelLoad = false;
     editorState = cloneEditorState(DEFAULT_EDITOR_STATE);
     viewer?.clearMotion();
     viewer?.applyEditorState(editorState);
@@ -2324,7 +1894,6 @@ export function bootstrap(): void {
     motionBadge.removeAttribute("data-state");
     motionBadge.textContent = "No motion";
     runtimeMetric.hidden = true;
-    correctionMetric.hidden = true;
     showReference.checked = false;
     showReference.disabled = true;
     viewer?.setReferenceMotion(null);
@@ -2332,189 +1901,7 @@ export function bootstrap(): void {
     exportSession.disabled = true;
     exportMotion.disabled = true;
     restartFromNow.disabled = true;
-    updateConstraintTimeline();
     updateGenerateAvailability();
-  }
-
-  function addWaypointAt(
-    frame: number,
-    position: Vector3Tuple,
-    headingRadians?: number,
-    prefix = "waypoint",
-  ): void {
-    const waypoint: MotionWaypoint = {
-      id: `${prefix}-${requestId("point")}`,
-      frame: Math.max(0, Math.round(frame)),
-      position,
-      headingRadians,
-      enabled: true,
-    };
-    setEditor({
-      ...editorState,
-      waypoints: [...editorState.waypoints, waypoint],
-    });
-  }
-
-  function rebuildRuntimeConstraintsFromEditor(): void {
-    runtimeConstraints.clear();
-    if (!activeManifest || !currentMotion?.normalizedMotion) return;
-    for (const marker of editorState.constraints) {
-      const kind = markerRuntimeKind(marker);
-      if (!kind) continue;
-      try {
-        if (kind === "root" && marker.position) {
-          const valueKind = markerValueKind(marker);
-          const base = createRootConstraint(activeManifest, {
-              id: marker.id,
-              frame: marker.startFrame,
-              x: marker.position[0],
-              z: marker.position[2],
-              heading:
-                valueKind === "position"
-                  ? undefined
-                  : headingFromQuaternion(marker.orientation),
-            });
-          runtimeConstraints.set(
-            marker.id,
-            filterConstraintValue(
-              { ...base, endFrame: marker.endFrame },
-              kind,
-              valueKind,
-              activeManifest,
-            ),
-          );
-        } else if (kind !== "root") {
-          const valueKind = markerValueKind(marker);
-          runtimeConstraints.set(
-            marker.id,
-            filterConstraintValue(
-              createCapturedConstraint(
-              activeManifest,
-              marker.id,
-              kind,
-              marker.startFrame,
-              currentMotion.normalizedMotion,
-              Math.min(marker.startFrame, currentMotion.frameCount - 1),
-              marker.endFrame,
-            ),
-              kind,
-              valueKind,
-              activeManifest,
-            ),
-          );
-        }
-      } catch {
-        // Imported playback remains usable even when its normalized feature
-        // layout is not compatible with the active generation pack.
-      }
-    }
-  }
-
-  function addCapturedConstraint(): void {
-    if (!activeManifest || !currentMotion?.normalizedMotion) {
-      showError(
-        "Constraint unavailable",
-        "Generate or import motion with normalized features first.",
-      );
-      return;
-    }
-    try {
-      const playbackFrame = viewer?.getPlaybackState().frame ?? 0;
-      const targetFrame = integerInput(
-        constraintFrame,
-        playbackFrame,
-        0,
-        1_000_000,
-      );
-      const targetEndFrame = integerInput(
-        constraintEndFrame,
-        targetFrame,
-        targetFrame,
-        1_000_000,
-      );
-      const valueKind =
-        selectedTrack === "full-body"
-          ? "pose"
-          : (constraintType.value as ConstraintValueKind);
-      const id = requestId(`constraint-${selectedTrack}`);
-      const joint = trackJointIndex(currentMotion, selectedTrack);
-      const position = jointPositionAt(currentMotion, playbackFrame, joint);
-      const orientation = jointOrientationAt(
-        currentMotion,
-        playbackFrame,
-        joint,
-      );
-      let runtimeConstraint: MotionConstraint;
-      if (selectedTrack === "root") {
-        const heading =
-          rootHeadingAt(currentMotion, activeManifest, playbackFrame) ??
-          headingFromQuaternion(orientation);
-        runtimeConstraint = filterConstraintValue(
-          {
-            ...createRootConstraint(activeManifest, {
-          id,
-          frame: targetFrame,
-          x: position[0],
-          z: position[2],
-              heading: valueKind === "position" ? undefined : heading,
-            }),
-            endFrame: targetEndFrame,
-          },
-          selectedTrack,
-          valueKind,
-          activeManifest,
-        );
-      } else {
-        runtimeConstraint = filterConstraintValue(
-          createCapturedConstraint(
-            activeManifest,
-            id,
-            selectedTrack,
-            targetFrame,
-            currentMotion.normalizedMotion,
-            playbackFrame,
-            targetEndFrame,
-          ),
-          selectedTrack,
-          valueKind,
-          activeManifest,
-        );
-      }
-      runtimeConstraints.set(id, runtimeConstraint);
-      const marker: MotionConstraintMarker = {
-        id,
-        kind:
-          selectedTrack === "root"
-            ? "root"
-            : valueKind === "position"
-              ? "position"
-              : valueKind === "rotation"
-                ? "orientation"
-                : "transform",
-        startFrame: targetFrame,
-        endFrame: targetEndFrame,
-        jointIndex: joint,
-        position:
-          selectedTrack === "root"
-            ? [position[0], 0, position[2]]
-            : position,
-        orientation: valueKind === "position" ? undefined : orientation,
-        label: markerLabel(selectedTrack, valueKind),
-        enabled: true,
-      };
-      setEditor({
-        ...editorState,
-        constraints: [...editorState.constraints, marker],
-      });
-      announce(
-        `Added a ${selectedTrack} ${valueKind} constraint at frames ${targetFrame}–${targetEndFrame}.`,
-      );
-    } catch (error) {
-      showError(
-        "Could not add constraint",
-        error instanceof Error ? error.message : String(error),
-      );
-    }
   }
 
   async function restoreSession(session: BrowserMotionSession): Promise<void> {
@@ -2531,16 +1918,11 @@ export function bootstrap(): void {
     if (incompatibleContinuation) {
       currentContinuation = null;
     }
-    editorState = cloneEditorState(session.editor);
+    editorState = sanitizeImportedEditorState(session.editor);
     if (session.provenance?.prompt) prompt.value = session.provenance.prompt;
     if (session.provenance?.seed !== undefined) {
       seed.value = String(session.provenance.seed);
     }
-    initialX.value = String(editorState.initialTransform.position[0]);
-    initialZ.value = String(editorState.initialTransform.position[2]);
-    initialHeading.value = String(
-      (editorState.initialTransform.headingRadians * 180) / Math.PI,
-    );
     showSkeleton.checked = editorState.outputVisibility.skeleton;
     showMesh.checked = editorState.outputVisibility.mesh;
     showReference.checked =
@@ -2550,18 +1932,6 @@ export function bootstrap(): void {
     showTrajectory.checked = editorState.outputVisibility.trajectory;
     updatePrompt();
     updateSeed();
-    if (session.generationConstraints !== undefined) {
-      runtimeConstraints = new Map(
-        session.generationConstraints.map((constraint) => [
-          constraint.id,
-          cloneRuntimeConstraint(constraint),
-        ]),
-      );
-      rebuildConstraintsAfterModelLoad = false;
-    } else {
-      rebuildRuntimeConstraintsFromEditor();
-      rebuildConstraintsAfterModelLoad = activeManifest === null;
-    }
     refreshViewer(0, false, true, true);
     if (currentContinuation === null) {
       markCurrentMotionPlaybackOnly();
@@ -2683,7 +2053,7 @@ export function bootstrap(): void {
             event.status.state === "ready" ||
             event.status.state === "generating"
           ) {
-            applyCapabilities(event.status.capabilities);
+            modelReady = true;
           }
           updateGenerateAvailability();
           break;
@@ -2735,7 +2105,6 @@ export function bootstrap(): void {
         }
         case "disposed":
           modelReady = false;
-          capabilities = null;
           resetRuntimeBadge();
           updateGenerateAvailability();
           break;
@@ -2743,26 +2112,31 @@ export function bootstrap(): void {
           break;
       }
     },
+    { signal: lifecycle.signal },
   );
 
-  worker.addEventListener("error", (event) => {
-    modelLoading = false;
-    modelReady = false;
-    activeGeneration = null;
-    setGenerationBusy(false);
-    modelCard.removeAttribute("aria-busy");
-    resetRuntimeBadge();
-    setModelStatus(
-      "missing",
-      "Inference worker unavailable",
-      "Reload the page to try again.",
-      "Error",
-    );
-    showModelError(
-      "Inference worker stopped",
-      event.message || "An unexpected worker error occurred.",
-    );
-  });
+  worker.addEventListener(
+    "error",
+    (event) => {
+      modelLoading = false;
+      modelReady = false;
+      activeGeneration = null;
+      setGenerationBusy(false);
+      modelCard.removeAttribute("aria-busy");
+      resetRuntimeBadge();
+      setModelStatus(
+        "missing",
+        "Inference worker unavailable",
+        "Reload the page to try again.",
+        "Error",
+      );
+      showModelError(
+        "Inference worker stopped",
+        event.message || "An unexpected worker error occurred.",
+      );
+    },
+    { signal: lifecycle.signal },
+  );
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -2781,7 +2155,7 @@ export function bootstrap(): void {
     prompt.value = event.detail;
     updatePrompt();
     prompt.focus();
-  });
+  }, { signal: lifecycle.signal });
 
   randomizeSeed.addEventListener("click", () => {
     const random = new Uint32Array(1);
@@ -2902,7 +2276,7 @@ export function bootstrap(): void {
       return;
     }
     const playback = viewer?.getPlaybackState();
-    const buffer = integerInput(replanBuffer, 20, 0, 1000);
+    const buffer = DEFAULT_REPLAN_BUFFER_FRAMES;
     const branchFrame = Math.min(
       currentMotion.frameCount,
       (playback?.frame ?? 0) + buffer,
@@ -2963,7 +2337,6 @@ export function bootstrap(): void {
         {
           motion: currentMotion,
           editor: editorState,
-          generationConstraints: [...runtimeConstraints.values()],
           provenance: currentProvenance,
           continuation: currentContinuation ?? undefined,
         },
@@ -2990,158 +2363,6 @@ export function bootstrap(): void {
         error instanceof Error ? error.message : String(error),
       );
     }
-  });
-
-  for (const [kind, button] of trackButtons) {
-    button.addEventListener("click", () => {
-      selectedTrack = kind;
-      for (const option of constraintType.options) {
-        option.disabled =
-          kind === "full-body"
-            ? option.value !== "pose"
-            : false;
-      }
-      if (kind === "full-body") constraintType.value = "pose";
-      updateConstraintTimeline();
-      announce(`Selected the ${button.textContent?.trim() ?? kind} constraint track.`);
-    });
-  }
-  addConstraint.addEventListener("click", addCapturedConstraint);
-  constraintFrame.addEventListener("input", () => {
-    if (document.activeElement !== constraintEndFrame) {
-      constraintEndFrame.value = constraintFrame.value;
-    }
-  });
-  deleteConstraint.addEventListener("click", () => {
-    const targetFrame = integerInput(
-      constraintFrame,
-      viewer?.getPlaybackState().frame ?? 0,
-      0,
-      1_000_000,
-    );
-    const matching = editorState.constraints
-      .filter((marker) => markerRuntimeKind(marker) === selectedTrack)
-      .sort(
-        (left, right) =>
-          Math.abs(left.startFrame - targetFrame) -
-          Math.abs(right.startFrame - targetFrame),
-      );
-    const selected = matching[0];
-    if (!selected) {
-      announce(`No ${selectedTrack} constraint is available to delete.`);
-      return;
-    }
-    runtimeConstraints.delete(selected.id);
-    setEditor({
-      ...editorState,
-      constraints: editorState.constraints.filter(
-        (marker) => marker.id !== selected.id,
-      ),
-    });
-    announce(`Deleted the ${selectedTrack} constraint at frame ${selected.startFrame}.`);
-  });
-  clearConstraints.addEventListener("click", () => {
-    if (
-      (editorState.constraints.length > 0 ||
-        editorState.waypoints.length > 0) &&
-      !window.confirm("Clear every kinematic constraint?")
-    ) {
-      return;
-    }
-    runtimeConstraints.clear();
-    setEditor({ ...editorState, constraints: [], waypoints: [] });
-    announce("Cleared all kinematic constraints.");
-  });
-
-  [initialX, initialZ, initialHeading].forEach((input) =>
-    input.addEventListener("change", updateInitialTransform),
-  );
-
-  addWaypoint.addEventListener("click", () => {
-    const state = viewer?.getPlaybackState();
-    const frame =
-      (state?.frame ?? 0) +
-      integerInput(waypointInterval, 20, 1, 10_000);
-    const root = rootPositionAt(currentMotion, state?.frame ?? 0);
-    addWaypointAt(
-      frame,
-      root,
-      (finiteInput(targetHeading, 0, -180, 180) * Math.PI) / 180,
-    );
-    announce(`Added a root waypoint at frame ${frame}.`);
-  });
-
-  const handleGroundWaypoint = (point: Vector3Tuple): void => {
-    if (!waypointMode.checked || !modelReady) return;
-    const state = viewer?.getPlaybackState();
-    const frame =
-      (state?.frame ?? 0) +
-      integerInput(waypointInterval, 20, 1, 10_000);
-    addWaypointAt(
-      frame,
-      point,
-      (finiteInput(targetHeading, 0, -180, 180) * Math.PI) / 180,
-      "canvas-waypoint",
-    );
-    announce(`Added a ground-plane waypoint at frame ${frame}.`);
-  };
-  waypointMode.addEventListener("change", () => {
-    if (viewer) {
-      viewer.onGroundClick = waypointMode.checked
-        ? handleGroundWaypoint
-        : null;
-    }
-    announce(
-      waypointMode.checked
-        ? "Waypoint placement enabled. Click the ground plane to add a target."
-        : "Waypoint placement disabled.",
-    );
-  });
-  if (viewer) viewer.onGroundClick = null;
-
-  applyTargetVelocity.addEventListener("click", () => {
-    const state = viewer?.getPlaybackState();
-    const frame = state?.frame ?? 0;
-    const root = rootPositionAt(currentMotion, frame);
-    const fps = currentMotion?.fps ?? modelInfo?.fps ?? 20;
-    const previousRoot = rootPositionAt(
-      currentMotion,
-      Math.max(0, frame - 1),
-    );
-    const speed = finiteInput(targetVelocity, 0, 0, 10);
-    const heading =
-      (finiteInput(targetHeading, 0, -180, 180) * Math.PI) / 180;
-    const waypoints = waypointsFromTargetVelocity({
-      startFrame: frame,
-      startX: root[0],
-      startZ: root[2],
-      startVelocityX: frame > 0 ? (root[0] - previousRoot[0]) * fps : 0,
-      startVelocityZ: frame > 0 ? (root[2] - previousRoot[2]) * fps : 0,
-      velocityX: Math.sin(heading) * speed,
-      velocityZ: Math.cos(heading) * speed,
-      fps,
-      durationSeconds:
-        integerInput(targetBuffer, 80, 1, 1000) / fps,
-      transitionSeconds: 2,
-      intervalFrames: integerInput(waypointInterval, 20, 1, 10_000),
-      includeHeading: true,
-    }).map<MotionWaypoint>((waypoint) => ({
-      id: waypoint.id,
-      frame: waypoint.frame,
-      position: [waypoint.x, 0, waypoint.z],
-      headingRadians: waypoint.heading,
-      enabled: true,
-    }));
-    setEditor({
-      ...editorState,
-      waypoints: [
-        ...editorState.waypoints.filter(
-          (waypoint) => !waypoint.id.startsWith(`velocity:${frame}:`),
-        ),
-        ...waypoints,
-      ],
-    });
-    announce(`Added ${waypoints.length} velocity waypoints.`);
   });
 
   const outputControls: Array<
@@ -3171,9 +2392,52 @@ export function bootstrap(): void {
       ),
     );
   });
+  importVrm.addEventListener("click", () => vrmFileInput.click());
+  vrmFileInput.addEventListener("change", () => {
+    const file = vrmFileInput.files?.[0];
+    vrmFileInput.value = "";
+    if (!file) return;
+    const request = ++activeVrmLoad;
+    clearVrmError();
+    setVrmLoading(true);
+    void (async () => {
+      try {
+        if (!viewer) {
+          throw new Error("The 3D preview is unavailable in this browser.");
+        }
+        const info = await viewer.loadVrm(file);
+        if (request !== activeVrmLoad) return;
+        showVrm.checked = true;
+        viewer.setVrmVisible(true);
+        setVrmStatus(info);
+        announce(`Loaded VRM avatar ${info.name}.`);
+      } catch (error) {
+        if (request !== activeVrmLoad) return;
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setVrmStatus(currentVrmInfo);
+        showVrmError(error instanceof Error ? error.message : String(error));
+      } finally {
+        if (request === activeVrmLoad) setVrmLoading(false);
+      }
+    })();
+  });
+  removeVrm.addEventListener("click", () => {
+    activeVrmLoad += 1;
+    viewer?.clearVrm();
+    showVrm.checked = true;
+    clearVrmError();
+    setVrmStatus(null);
+    setVrmLoading(false);
+    announce("Removed the VRM avatar.");
+  });
+  showVrm.addEventListener("change", () => {
+    viewer?.setVrmVisible(showVrm.checked);
+    announce(showVrm.checked ? "VRM avatar shown." : "VRM avatar hidden.");
+  });
 
   dismissError.addEventListener("click", () => clearError(true));
   dismissModelError.addEventListener("click", () => clearModelError(true));
+  dismissVrmError.addEventListener("click", () => clearVrmError(true));
   playPause.addEventListener("click", () => viewer?.togglePlaying());
   timeline.addEventListener("input", () =>
     viewer?.seek(Number(timeline.value)),
@@ -3210,81 +2474,99 @@ export function bootstrap(): void {
       );
     }
   };
-  reducedMotion.addEventListener("change", handleReducedMotionChange);
-
-  document.addEventListener("keydown", (event) => {
-    const target = event.target as HTMLElement | null;
-    if (event.isComposing || event.repeat) return;
-    if (
-      (event.metaKey || event.ctrlKey) &&
-      !event.altKey &&
-      event.key === "Enter"
-    ) {
-      event.preventDefault();
-      if (!generate.disabled) form.requestSubmit();
-      return;
-    }
-    if (event.key === "Escape" && activeGeneration) {
-      cancelGeneration.click();
-      return;
-    }
-    if (
-      target !== canvas ||
-      event.metaKey ||
-      event.ctrlKey ||
-      event.altKey
-    ) {
-      return;
-    }
-    if (event.shiftKey && event.key.startsWith("Arrow")) {
-      event.preventDefault();
-      const horizontal =
-        event.key === "ArrowLeft" ? 1 : event.key === "ArrowRight" ? -1 : 0;
-      const vertical =
-        event.key === "ArrowUp" ? 1 : event.key === "ArrowDown" ? -1 : 0;
-      viewer?.orbit(horizontal, vertical);
-      return;
-    }
-    if (event.key === " ") {
-      event.preventDefault();
-      viewer?.togglePlaying();
-    } else if (event.key === "ArrowLeft") {
-      event.preventDefault();
-      const state = viewer?.getPlaybackState();
-      if (state) viewer?.seek(state.frame - 1);
-    } else if (event.key === "ArrowRight") {
-      event.preventDefault();
-      const state = viewer?.getPlaybackState();
-      if (state) viewer?.seek(state.frame + 1);
-    } else if (event.key === "+" || event.key === "=") {
-      event.preventDefault();
-      viewer?.zoom("in");
-    } else if (event.key === "-") {
-      event.preventDefault();
-      viewer?.zoom("out");
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      viewer?.resetCamera();
-    }
+  reducedMotion.addEventListener("change", handleReducedMotionChange, {
+    signal: lifecycle.signal,
   });
 
-  window.addEventListener("beforeunload", () => {
-    postCommand({ type: "dispose", requestId: requestId("dispose") });
-    worker.terminate();
-    reducedMotion.removeEventListener(
-      "change",
-      handleReducedMotionChange,
-    );
-    viewer?.dispose();
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      const target = event.target as HTMLElement | null;
+      if (event.isComposing || event.repeat) return;
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        !event.altKey &&
+        event.key === "Enter"
+      ) {
+        event.preventDefault();
+        if (!generate.disabled) form.requestSubmit();
+        return;
+      }
+      if (event.key === "Escape" && activeGeneration) {
+        cancelGeneration.click();
+        return;
+      }
+      if (
+        target !== canvas ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey
+      ) {
+        return;
+      }
+      if (event.shiftKey && event.key.startsWith("Arrow")) {
+        event.preventDefault();
+        const horizontal =
+          event.key === "ArrowLeft" ? 1 : event.key === "ArrowRight" ? -1 : 0;
+        const vertical =
+          event.key === "ArrowUp" ? 1 : event.key === "ArrowDown" ? -1 : 0;
+        viewer?.orbit(horizontal, vertical);
+        return;
+      }
+      if (event.key === " ") {
+        event.preventDefault();
+        viewer?.togglePlaying();
+      } else if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        const state = viewer?.getPlaybackState();
+        if (state) viewer?.seek(state.frame - 1);
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        const state = viewer?.getPlaybackState();
+        if (state) viewer?.seek(state.frame + 1);
+      } else if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        viewer?.zoom("in");
+      } else if (event.key === "-") {
+        event.preventDefault();
+        viewer?.zoom("out");
+      } else if (event.key === "Home") {
+        event.preventDefault();
+        viewer?.resetCamera();
+      }
+    },
+    { signal: lifecycle.signal },
+  );
+
+  const cleanup = (): void => {
+    if (disposed) return;
+    disposed = true;
+    activeVrmLoad += 1;
+    if (loadingOverlayTimer) {
+      window.clearTimeout(loadingOverlayTimer);
+      loadingOverlayTimer = 0;
+    }
+    try {
+      postCommand({ type: "dispose", requestId: requestId("dispose") });
+    } catch {
+      // The worker may already have stopped after a fatal runtime error.
+    } finally {
+      worker.terminate();
+      lifecycle.abort();
+      viewer?.dispose();
+    }
+  };
+  window.addEventListener("beforeunload", cleanup, {
+    signal: lifecycle.signal,
   });
 
   updatePrompt();
   updateDuration();
   updateSeed();
   updateTargetBuffer();
-  updateInitialTransform();
-  updateConstraintTimeline();
   syncOutputVisibility();
+  setVrmStatus(null);
+  setVrmLoading(false);
   modelCard.setAttribute("aria-busy", "true");
   setModelStatus(
     "loading",
@@ -3294,6 +2576,7 @@ export function bootstrap(): void {
   );
   void readCachedModelPack()
     .then(async (files) => {
+      if (disposed) return;
       if (files) {
         cachedPack = true;
         removeModel.hidden = false;
@@ -3309,6 +2592,7 @@ export function bootstrap(): void {
       }
     })
     .catch((error) => {
+      if (disposed) return;
       modelCard.removeAttribute("aria-busy");
       setModelStatus(
         "missing",
@@ -3321,4 +2605,5 @@ export function bootstrap(): void {
         error instanceof Error ? error.message : String(error),
       );
     });
+  return cleanup;
 }

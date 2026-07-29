@@ -65,18 +65,14 @@ body {
 summary:focus-visible,
 input[type="range"]:focus-visible,
 input[type="checkbox"]:focus-visible,
-#motion-canvas:focus-visible,
-.constraint-track:focus-visible {
+#motion-canvas:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
 
 .workspace {
   display: grid;
-  grid-template-columns:
-    minmax(20rem, 23rem)
-    minmax(30rem, 1fr)
-    minmax(20rem, 23rem);
+  grid-template-columns: minmax(20rem, 23rem) minmax(0, 1fr);
   height: calc(100vh - 3.75rem);
   min-height: 0;
 }
@@ -91,10 +87,6 @@ input[type="checkbox"]:focus-visible,
 
 .generation-panel {
   border-right: 1px solid var(--border);
-}
-
-.inspector-panel {
-  border-left: 1px solid var(--border);
 }
 
 .setup-note {
@@ -223,13 +215,11 @@ input[role="switch"]:checked::before {
   transform: translateX(1.05rem);
 }
 
-.settings-details,
-.tool-section {
+.settings-details {
   border-bottom: 1px solid var(--border);
 }
 
-.settings-details summary,
-.tool-section summary {
+.settings-details summary {
   min-height: 2.75rem;
   padding-inline: 0.75rem;
   color: var(--muted-foreground);
@@ -240,25 +230,21 @@ input[role="switch"]:checked::before {
   cursor: pointer;
 }
 
-.settings-details summary::-webkit-details-marker,
-.tool-section summary::-webkit-details-marker {
+.settings-details summary::-webkit-details-marker {
   display: none;
 }
 
-.settings-details summary::after,
-.tool-section summary::after {
+.settings-details summary::after {
   float: right;
   content: "+";
   font-family: var(--demo-mono);
 }
 
-.settings-details[open] summary::after,
-.tool-section[open] summary::after {
+.settings-details[open] summary::after {
   content: "−";
 }
 
-.details-body,
-.tool-section__body {
+.details-body {
   display: grid;
   gap: 0.75rem;
   padding: 0 0.75rem 0.875rem;
@@ -275,7 +261,7 @@ input[role="switch"]:checked::before {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   background: var(--background);
 }
 
@@ -318,163 +304,55 @@ input[role="switch"]:checked::before {
   width: 4.5rem;
 }
 
-.constraint-timeline {
-  overflow: hidden;
-  border: 1px solid var(--border);
-}
-
-.constraint-ruler {
-  display: grid;
-  grid-template-columns: 5.25rem repeat(4, 1fr);
-  min-height: 1.75rem;
-  align-items: center;
-  padding-inline: 0.45rem;
-  color: var(--muted-foreground);
-  border-bottom: 1px solid var(--border);
-  font-family: var(--demo-mono);
-  font-size: 0.5625rem;
-  font-variant-numeric: tabular-nums;
-}
-
-.constraint-ruler span:not(:first-child) {
-  text-align: right;
-}
-
-.constraint-track {
-  display: grid;
-  grid-template-columns: 5.25rem minmax(0, 1fr);
-  width: 100%;
-  min-height: 2.75rem;
-  align-items: center;
-  gap: 0.5rem;
-  padding-inline: 0.45rem;
-  color: var(--muted-foreground);
-  background: transparent;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  font-family: var(--demo-mono);
-  font-size: 0.625rem;
-  text-align: left;
-  cursor: pointer;
-}
-
-.constraint-track:last-child {
-  border-bottom: 0;
-}
-
-.constraint-track[aria-pressed="true"] {
-  color: var(--accent-foreground);
-  background: var(--accent);
-}
-
-.track-lane {
-  position: relative;
-  height: 0.3rem;
-  background:
-    repeating-linear-gradient(
-      90deg,
-      var(--border) 0,
-      var(--border) 1px,
-      transparent 1px,
-      transparent 25%
-    );
-}
-
-.track-lane::before {
-  position: absolute;
-  top: 50%;
-  left: var(--track-position, 0%);
-  width: 0.45rem;
-  height: 0.45rem;
-  content: "";
-  background: var(--muted-foreground);
-  border-radius: 50%;
-  opacity: 0;
-  transform: translate(-50%, -50%);
-}
-
-.constraint-track[data-has-constraint="true"] .track-lane::before {
-  opacity: 1;
-}
-
-.constraint-track[aria-pressed="true"] .track-lane::before {
-  background: var(--accent-foreground);
-}
-
 @media (hover: hover) and (pointer: fine) {
-  .constraint-track:hover,
   summary:hover {
     background: var(--accent);
   }
 }
 
-@media (max-width: 1220px) {
+@media (max-width: 840px) {
   body {
     overflow: auto;
   }
 
   .workspace {
-    grid-template-columns: minmax(20rem, 23rem) minmax(30rem, 1fr);
-    height: auto;
-    min-height: calc(100vh - 3.75rem);
-  }
-
-  .generation-panel {
-    max-height: calc(100vh - 3.75rem);
-  }
-
-  .viewport-panel {
-    min-height: calc(100vh - 3.75rem);
-  }
-
-  .inspector-panel {
-    grid-column: 1 / -1;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    border-top: 1px solid var(--border);
-    border-left: 0;
-  }
-
-  .inspector-panel > :first-child {
-    grid-column: 1 / -1;
-  }
-
-  .tool-section:nth-of-type(odd) {
-    border-right: 1px solid var(--border);
-  }
-}
-
-@media (max-width: 760px) {
-  .workspace {
     display: block;
-    min-height: 0;
+    height: auto;
+    min-height: calc(100dvh - 3.75rem);
   }
 
   .generation-panel,
-  .viewport-panel,
-  .inspector-panel {
-    min-height: auto;
+  .viewport-panel {
+    min-height: 0;
     max-height: none;
     border: 0;
     border-bottom: 1px solid var(--border);
   }
 
+  .generation-panel {
+    overflow-y: visible;
+  }
+
   .viewport-panel {
+    height: auto;
+    grid-template-rows: auto auto auto auto;
+  }
+
+  .viewport {
     height: min(78dvh, 42rem);
-    min-height: 30rem;
+    min-height: 24rem;
   }
 
-  .inspector-panel {
-    display: block;
-  }
-
-  .tool-section:nth-of-type(odd) {
-    border-right: 0;
+  [data-slot="input"],
+  [data-slot="textarea"],
+  [data-slot="native-select"],
+  [data-slot="select-trigger"] {
+    font-size: 1rem;
   }
 }
 
 @media (max-width: 520px) {
-  .viewport-panel {
+  .viewport {
     height: 35rem;
   }
 
@@ -504,14 +382,6 @@ input[role="switch"]:checked::before {
   #reset-camera {
     grid-column: 5;
   }
-
-  .constraint-ruler {
-    grid-template-columns: 4.75rem repeat(4, minmax(0, 1fr));
-  }
-
-  .constraint-track {
-    grid-template-columns: 4.75rem minmax(0, 1fr);
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -522,7 +392,6 @@ input[role="switch"]:checked::before {
   [data-slot="native-select"],
   [data-slot="select-trigger"],
   [data-slot="select-content"],
-  .constraint-track,
   #model-progress-fill,
   #generation-progress-fill,
   input[type="range"],

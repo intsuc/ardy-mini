@@ -2,29 +2,35 @@
 
 The browser app runs ARDY Mini locally from prompt to playback: WordPiece
 tokenization, the specialized MiniLM condition encoder, deterministic DDIM
-sampling, optional kinematic constraints, autoregressive
-recentering/requantization, structured motion decoding, optional JavaScript
-postprocessing, and three.js visualization. After the static page and a local
-model pack have loaded, no Python process or inference API is involved.
+sampling, autoregressive recentering/requantization, structured motion
+decoding, and three.js visualization. After the static page and a local model
+pack have loaded, no Python process or inference API is involved.
 
 The interface is a deliberately simple technical demo rather than a marketing
-page or a feature-for-feature copy of the Python/Viser application. Its three
-working areas keep prompt/session controls, the 3D preview and playback
-timeline, and the less frequently used planning/output controls visibly
-separate.
+page or a feature-for-feature copy of the Python/Viser application. It has two
+working areas: the **Input** pane contains model, prompt, clip, and generation
+controls; the **Output** pane contains export, view settings, the 3D preview,
+and the playback timeline. The panes stack vertically at narrow viewport
+widths.
 
 The shell uses React and shadcn/ui preset `buFzUhO`: Lyra components, the
 neutral theme, Noto Sans, and Tabler icons on Tailwind CSS v4. Stock shadcn
 component styles own regular controls and surfaces. Custom CSS is limited to
-the three-pane workspace, canvas, native range/switch controls, constraint
-timeline, and responsive behavior specific to this technical demo.
+the two-pane workspace, canvas, native range/switch controls, and responsive
+behavior specific to this technical demo.
 
 The supported model artifact is intentionally narrow:
 
 - `ARDY-Core-RP-20FPS-Horizon40`;
 - the MiniLM student trained specifically for that checkpoint;
 - well-formed, typo-free English motion prompts;
-- 20 FPS and a 40-frame (2-second) generation horizon.
+- 20 FPS and a 40-frame (2-second) generation horizon;
+- the current structured-output browser contract (`runtime.contract_revision`
+  `2`) with decoder-local and decoder-global rotation tracks.
+
+The form accepts any non-empty prompt of at most 280 characters, but that
+validation does not expand the trained model's supported language. Prompts
+outside well-formed English are accepted as input with no quality guarantee.
 
 One request may generate 40–200 frames. A browser generation session can grow
 beyond that by appending additional 40-frame chunks.
@@ -38,57 +44,47 @@ entire requested clip. Core40 produces at most 40 new frames per window.
 
 | Operation | Effect |
 |---|---|
-| Replace / **Restart** | Reset the random stream, initial transform, history, and generated motion, then generate a new session. |
-| Append / continuous generation | Continue from the current session end while retaining the selected recent history. |
+| Replace / **Restart** | Reset the random stream, fixed zero root transform, history, and generated motion, then generate a new session. |
+| Append / continuous generation | Continue from the current session end while retaining up to 40 recent history frames. |
 | Branch / **Restart from now** | Discard motion after the playhead and continue from that point. |
-| **Apply live** prompt | Preserve motion through the configured replan buffer, discard the later future, and continue statefully with the updated prompt. |
+| **Apply live** prompt | Preserve motion through a fixed 20-frame replan buffer, discard the later future, and continue statefully with the updated prompt. |
 
 ARDY hybrid tokens represent four motion frames. A branch therefore rounds
 down to the nearest complete four-frame token. For example, branching at frame
 19 continues from frame 16. The browser has no motion encoder with which to
 re-encode an incomplete token.
 
-The initial transform supplies root X/Z translation and heading before the
-first window. The history control selects up to the preceding 40 frames.
-Future crop controls how far beyond the current 40-frame generation horizon
-constraints are exposed to the constraint graph, subject to the fixed
-200-frame conditioned graph capacity.
+### Fixed generation policy
 
-### Constraints and guidance
+The browser UI intentionally has no advanced **Motion parameters** panel.
+Generation commands use these fixed internal values:
 
-The constraint-aware denoiser (one of the pack's four ONNX graphs) provides
-the separated conditioning categories needed for interactive planning:
+| Setting | Internal value |
+|---|---:|
+| Text CFG | `3.5` |
+| Constraint CFG | `1.0` |
+| History | up to `40` frames, clamped to the manifest capacity |
+| Future window | `80` frames, clamped to the pack capacity |
+| Live-prompt replan buffer | `20` frames |
+| Automatic-extension threshold | `10` frames |
+| Initial root translation / heading | `[0, 0, 0]` / `0` radians |
 
-- root position and optional heading;
-- sparse or densely interpolated root waypoints/trajectory;
-- full-body pose keyframes captured from generated motion;
-- left/right hand and left/right foot end-effector (EE)
-  position/orientation constraints;
-- start/end constraint intervals and constraints beyond the current generation
-  horizon;
-- root waypoint sequences derived from a target speed and heading, with the
-  same two-second current-to-target velocity transition used by Viser.
+Duration (2–10 seconds), seed, backend, continuous generation, and its target
+buffer remain normal user controls. The constraint CFG and future-window
+values remain part of the worker/model contract, but the current application
+sends no user-authored kinematic constraints and uses the unconstrained
+denoiser path.
 
-With three or more root waypoints, **Dense trajectory** applies a bounded
-browser-native smoothing pass after interpolation. It keeps every sample
-within the native path smoother's six-centimetre deviation envelope while
-removing sharp corners.
-
-Text CFG and constraint CFG have independent controls. A window with no active
-kinematic constraint uses the unconstrained denoiser graph. A window
-with active constraints uses the constraint-aware graph with separate
-history, generation, and future masks.
-
-Constraints guide generation; they do not turn the diffusion model into a
-general inverse-kinematics solver. In particular, the browser does not
-implement the native Viser demo's rotation-space IK correction. End-effector
-positions and rotations are diffusion-conditioning targets. The optional
-lightweight postprocess can tighten root/full-body position targets and reduce
-visible foot sliding after decoding.
+The browser application does not expose or apply root/full-body/end-effector
+constraints, waypoints, dense trajectories, target velocity/heading, an
+initial-transform editor, or browser postprocess parameters. These remain
+Python/Viser features. When an older browser session contains removed editor
+state or generation constraints, import preserves its motion for playback but
+sanitizes those fields before any later generation or export.
 
 ### Structured output and viewer
 
-The decoder can return all of the following for every emitted chunk:
+The current decoder returns all of the following for every emitted chunk:
 
 - normalized `[T, 330]` ARDY motion features;
 - world-space joint positions `[T, J, 3]`;
@@ -100,31 +96,48 @@ The viewer consumes dynamic skeleton names, parents, root index, and contact
 metadata instead of assuming one fixed topology. The current compatible pack
 describes Core27, while imported motion/session data may carry another
 validated skeleton. Display controls expose the skeleton, root trajectory,
-predicted contacts, joint orientation axes, constraints, initial transform,
-and waypoints. The optional **Body proxy** is generated directly from the
-active skeleton as joint spheres and bone capsules, so it adapts to validated
-dynamic skeleton metadata without an external character asset.
+predicted contacts, joint orientation axes, body proxy, and reference overlay.
+The optional **Body proxy** is generated directly from the active skeleton as
+joint spheres and bone capsules, so it adapts to validated dynamic skeleton
+metadata without an external character asset.
 
-The body proxy is not an SMPL body, a skinned character mesh, or a replacement
-for a production character renderer. The browser app does not import scene
-meshes. Its reference overlay instead accepts a compatible structured motion
-JSON or browser session and draws a time-aligned reference skeleton; no
-separate mesh asset is required.
+Under **View settings**, **Load VRM** accepts a local VRM 0.x or 1.x humanoid
+file. [`@pixiv/three-vrm`](https://github.com/pixiv/three-vrm) loads the avatar
+only after the user selects it, and the viewer supports show/hide, replacement,
+and removal without reloading the motion. Core27 hips translation is scaled to
+the avatar, and Core27 joint rotations are retargeted onto the normalized VRM
+humanoid. Missing optional VRM bones are skipped.
 
-### Browser postprocessing versus native correction
+The body proxy is not an SMPL body or a production character renderer. A VRM
+is the supported skinned-avatar format; the app has no general scene-mesh
+importer. The reference overlay separately accepts a compatible structured
+motion JSON or browser session and draws a time-aligned reference skeleton.
 
-The optional browser postprocess is TypeScript/JavaScript code applied to
-decoded joint/root positions. It can:
+### VRM rotation-track requirement
 
-- blend horizontal root corrections around constrained frames;
-- preserve full-body root targets;
-- reduce contact-run foot sliding with bounded whole-body translations;
-- report root-error and foot-sliding metrics without mutating its input.
+VRM bone animation requires either `globalRotations` or `localRotations` in the
+motion. The current exported pack supplies both. The manifest should contain:
 
-It is not the native C++ motion-correction extension used by the Python
-pipeline, and that extension is not embedded in the ONNX pack. The manifest
-therefore reports `motion_correction_included: false`. Do not treat the
-browser postprocess and native correction as numerically equivalent.
+```json
+{
+  "runtime": { "contract_revision": 2 },
+  "graphs": {
+    "decoder": {
+      "outputs": {
+        "localRotations": "local_rotations",
+        "globalRotations": "global_rotations"
+      }
+    }
+  }
+}
+```
+
+Do not use `schema_version` alone to distinguish old and current packs. With an
+older positions-only pack or session, the skeleton still animates and the VRM
+hips follows position, but the avatar bones remain in their rest/T pose. This
+is intentional: the browser does not guess bone rotations from positions.
+Regenerate the pack with the current exporter rather than adding a positional
+fallback.
 
 ## Architecture
 
@@ -136,7 +149,7 @@ separate WebAssembly sessions if WebGPU session creation fails.
 |---|---|---|
 | `text_encoder.onnx` | WordPiece IDs, attention mask, token types | direct 2,048-D root/body condition (two 1,024-D branches) |
 | `denoiser.onnx` | text CFG, up to 40 history frames, 40 generation frames, text condition, timestep | clean 148-D hybrid tokens for unconstrained windows |
-| `denoiser_constraints.onnx` | independent text/constraint CFG, history/generation/future masks, text condition, sparse observed motion | clean 148-D hybrid tokens for constrained windows |
+| `denoiser_constraints.onnx` | independent text/constraint CFG, history/generation/future masks, text condition, sparse observed motion | retained in the exported contract for constrained-runtime compatibility; the current UI does not select it |
 | `decoder.onnx` | hybrid tokens, valid-token mask, accumulated root translation | normalized motion, joints, local/global rotations, roots/headings, contacts |
 
 The JavaScript runtime supplies a reproducible portable Gaussian random stream
@@ -145,9 +158,11 @@ retains global hybrid tokens, recenters the latest history, and requantizes
 the latent body features with the manifest's FSQ constants.
 
 The worker protocol supports replace, append, branch, chunk progress,
-continuation restore, future constraints, rich motion arrays, and capability
-reporting. Typed-array snapshots are transferred to the main thread so
-streaming cannot detach state that the worker still needs.
+continuation restore, rich motion arrays, and capability reporting. Its schema
+still understands the constraint-capable pack contract, but the current
+application does not construct or send a kinematic-constraint set. Typed-array
+snapshots are transferred to the main thread so streaming cannot detach state
+that the worker still needs.
 
 ## Export a local model pack
 
@@ -173,6 +188,20 @@ compares each graph with its PyTorch source through ONNX Runtime CPU.
 quantization constants, normalization statistics, motion layout, skeleton
 metadata, capabilities, file sizes, SHA-256 digests, model compatibility, and
 license notices.
+
+Confirm that the result is the current structured-output contract:
+
+```bash
+jq '{
+  contract_revision: .runtime.contract_revision,
+  local_rotations: .graphs.decoder.outputs.localRotations,
+  global_rotations: .graphs.decoder.outputs.globalRotations
+}' artifacts/browser/core40/manifest.json
+```
+
+The expected contract revision is `2`, and both output names must be present.
+If they are absent, the pack predates VRM rotation output and should be
+regenerated.
 
 The measured FP32 payload in this environment is 1,488,773,547 bytes
 (approximately 1.39 GiB, or 1.49 GB decimal):
@@ -205,6 +234,22 @@ Open the printed localhost URL, choose **Choose model pack**, and select the
 the manifest before creating inference sessions. When origin storage is
 available, it can retain the validated pack in the origin-private file system
 for later visits.
+
+The desktop UI has an **Input** pane and an **Output** pane:
+
+1. Load the model pack in **Input**, enter a prompt or select one of the
+   examples, choose clip duration/seed/backend, and generate.
+2. Use the Output pane's **View settings** disclosure for skeleton overlays,
+   contacts, orientation axes, trajectory, the body proxy, reference motion,
+   and a local VRM avatar.
+3. Select **Load VRM** and choose a `.vrm` file. The avatar stays local to the
+   current page and can be hidden, replaced, or removed.
+4. Use the timeline and playback controls, then export either the browser
+   session or motion JSON/CSV.
+
+There is no right-side Control/Motion-parameters inspector. Kinematic
+constraints and detailed planning controls belong to the separate
+Python/Viser demo.
 
 The header reports the backend that actually loaded:
 
@@ -243,13 +288,16 @@ pickle or executable Python objects.
 
 - Session import accepts the versioned browser-session JSON schema and the
   binary `.ardysession` container. The UI exports `.ardysession`, which stores
-  motion, skeleton metadata, exact normalized constraint values/masks, editor
-  state, waypoints, initial transform, output visibility, provenance, and
-  continuation data with little-endian typed-array payloads. This avoids JSON
-  number expansion for large arrays.
+  motion, skeleton metadata, output visibility, provenance, and continuation
+  data with little-endian typed-array payloads. This avoids JSON number
+  expansion for large arrays.
 - When a compatible continuation payload is present, append/branch generation
   can resume. Motion-only or incompatible imports remain playback-capable but
   require a generation restart.
+- The decoder continues to validate legacy session fields for compatibility,
+  but the current app discards imported editor constraints, waypoints, initial
+  transform controls, and normalized generation constraints. They are neither
+  shown nor silently applied to later generation.
 - **Export motion** downloads both a structured JSON file—which preserves
   normalized motion, rotations, roots, joints, contacts, and skeleton
   metadata—and a flat CSV with frame/time, per-joint XYZ positions, root
@@ -258,15 +306,22 @@ pickle or executable Python objects.
   The reference must use a skeleton compatible with the active clip.
 
 Import reconstructs known fields and validates versions, shapes, finite
-values, skeleton topology, array sizes, constraint ranges, and continuation
-dimensions. Unknown objects are not evaluated. Downloads are assembled with
-browser `Blob` URLs and remain local.
+values, skeleton topology, array sizes, legacy constraint ranges, and
+continuation dimensions. Unknown objects are not evaluated. Downloads are
+assembled with browser `Blob` URLs and remain local.
 
 ## Privacy and hosting
 
-Prompts, seeds, constraints, generation state, imported sessions, and generated
-motion remain in the browser. Model selection reads local files; inference
-does not upload them. The app has no inference service dependency.
+Prompts, seeds, model-pack files, selected VRM avatars, generation state,
+imported sessions, reference motion, and generated motion remain in the
+browser. Model and avatar selection read local files; inference does not upload
+them. VRM object URLs are revoked after loading. The app has no inference
+service dependency.
+
+The validated model pack may be retained in origin-private storage when the
+browser permits it. A selected VRM avatar is not persisted, embedded in a
+session, or included in motion export; select it again after reloading the
+page.
 
 Vite development and preview send:
 
@@ -311,8 +366,11 @@ CPU errors:
 | Root positions / headings / contacts | `0` |
 
 Browser runtime and memory measurements are device-, browser-, driver-, and
-execution-provider-specific. Measurements made before constraint-graph support
-do not describe the present pack and should not be used as requirements.
+execution-provider-specific. The current size includes the constraint-aware
+graph for pack/runtime contract compatibility even though the application does
+not expose or apply kinematic constraints. Measurements from older three-graph
+or positions-only packs do not describe the present pack and should not be
+used as requirements.
 
 An opt-in real-pack Playwright run can force either provider:
 
@@ -335,19 +393,28 @@ Set `ARDY_BROWSER_REDUCED_MOTION=1` to exercise paused initial playback.
 - The trained MiniLM condition heads are checkpoint-specific. This pack is not
   interchangeable with Core8, G1, SOMA, or another 2,048-D model.
 - Prompt support is limited to well-formed, typo-free English motion
-  descriptions.
+  descriptions. The form accepts other text but does not promise useful output.
 - Branching crops to the preceding complete four-frame token; a partial token
   cannot be continued exactly.
 - Each generation call is limited to 40–200 frames. Longer sessions are built
   through append/streaming operations.
-- The optional JavaScript position postprocess is not the native C++ motion
-  correction used by Python ARDY and does not implement the native Viser
-  rotation-space IK correction.
-- The pack supplies Core27 skeleton metadata and no character mesh. The
-  built-in body proxy is a joint-driven sphere/capsule visualization—not SMPL
-  or a skinned mesh—and the browser has no scene-mesh importer.
+- The app has no detailed motion-parameter editor, kinematic-constraint
+  authoring, waypoint/target-velocity planning, JavaScript motion-correction
+  pass, or native Viser rotation-space IK.
+- VRM retargeting is designed for the current Core27 skeleton names and a VRM
+  humanoid rig. Missing optional VRM bones are skipped; expressions and
+  non-humanoid animation are not driven.
+- VRM animation requires local or global rotation tracks. Positions-only
+  motion moves the hips but leaves the avatar in its rest/T pose; there is no
+  position-derived rotation fallback.
+- The pack supplies Core27 skeleton metadata and no bundled character mesh.
+  The built-in body proxy is a joint-driven sphere/capsule visualization—not
+  SMPL or a skinned mesh. VRM is the only supported local character format;
+  the browser has no general scene-mesh importer.
 - Reference visualization is a compatible motion/session skeleton overlay, not
   a reference character mesh.
+- A loaded VRM is page-local and is not persisted in `.ardysession` or motion
+  exports.
 - WASM is a fallback, not a performance promise. Four large graph sessions can
   require considerably more RAM than the on-disk pack.
 
@@ -363,6 +430,10 @@ Keep local exports under the ignored `artifacts/` directory unless you have
 separately reviewed and satisfied every applicable model and data term. See
 [THIRD_PARTY_MODELS_AND_DATA.md](../THIRD_PARTY_MODELS_AND_DATA.md) before
 sharing a pack.
+
+No VRM asset is bundled with the repository or static build. Loading one
+locally does not grant redistribution or usage rights for that avatar; follow
+the permissions and attribution metadata embedded by its author.
 
 The manifest's SHA-256 hashes detect corruption and file substitution relative
 to that manifest; they are not a digital signature. Import packs only from a

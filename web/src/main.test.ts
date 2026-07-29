@@ -9,9 +9,11 @@ import {
   canonicalizePackFiles,
   formatBytes,
   formatTime,
+  sanitizeImportedEditorState,
   shouldAutoplayMotion,
   validateGenerationForm,
 } from "./main";
+import type { MotionEditorState } from "./editor-state";
 
 function directoryFile(path: string, contents = "x"): File {
   const file = new File([contents], path.split("/").at(-1) ?? path);
@@ -101,5 +103,62 @@ describe("display formatting", () => {
   it("does not autoplay generated motion when reduced motion is requested", () => {
     expect(shouldAutoplayMotion(false)).toBe(true);
     expect(shouldAutoplayMotion(true)).toBe(false);
+  });
+});
+
+describe("removed motion parameters", () => {
+  it("keeps display preferences but discards hidden imported controls", () => {
+    const imported = {
+      initialTransform: {
+        position: [4, 2, -3],
+        headingRadians: Math.PI / 2,
+      },
+      waypoints: [
+        {
+          id: "old-waypoint",
+          frame: 12,
+          position: [1, 0, 2],
+          enabled: true,
+        },
+      ],
+      constraints: [
+        {
+          id: "old-constraint",
+          kind: "root",
+          startFrame: 4,
+          endFrame: 8,
+          position: [3, 0, 1],
+          enabled: true,
+        },
+      ],
+      outputVisibility: {
+        skeleton: false,
+        mesh: true,
+        reference: true,
+        trajectory: false,
+        contacts: false,
+        orientationAxes: true,
+        constraints: true,
+        initialTransform: true,
+        waypoints: true,
+      },
+    } satisfies MotionEditorState;
+
+    const sanitized = sanitizeImportedEditorState(imported);
+
+    expect(sanitized.initialTransform).toEqual({
+      position: [0, 0, 0],
+      headingRadians: 0,
+    });
+    expect(sanitized.waypoints).toEqual([]);
+    expect(sanitized.constraints).toEqual([]);
+    expect(sanitized.outputVisibility).toMatchObject({
+      skeleton: false,
+      mesh: true,
+      reference: false,
+      trajectory: false,
+      contacts: false,
+      orientationAxes: true,
+    });
   });
 });

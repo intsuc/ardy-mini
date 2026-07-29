@@ -180,9 +180,6 @@ test.describe("real browser model-pack", () => {
     } else if (configuredBackend === "webgpu") {
       await expect(page.locator("#model-detail")).toContainText("WebGPU");
     }
-    await expect(page.locator("#constraint-track-root")).toBeEnabled();
-    await expect(page.locator("#postprocess-enabled")).toBeEnabled();
-
     const prompt = page.getByLabel("Motion description");
     const seed = page.getByRole("spinbutton", { name: "Seed" });
     await prompt.fill("人物が歩く。");
@@ -201,8 +198,6 @@ test.describe("real browser model-pack", () => {
 
     await setRange(page, "#duration", 2);
     await page.locator("#stream-generation").uncheck();
-    await page.getByText("Postprocess", { exact: true }).click();
-    await page.locator("#postprocess-enabled").check();
     await page.evaluate(() => {
       const stage = document.querySelector("#generation-stage");
       const badge = document.querySelector("#motion-badge");
@@ -258,6 +253,7 @@ test.describe("real browser model-pack", () => {
       () => page.locator("#generate").click(),
       40,
     );
+    await expect(page.locator("#generate")).toBeFocused();
     const firstGenerationUi = await page.evaluate(() => ({
       stages:
         (
@@ -280,10 +276,14 @@ test.describe("real browser model-pack", () => {
     );
     await expect(page.locator("#generation-progress")).toBeVisible();
     await expect(page.locator("#runtime-metric")).toBeVisible();
-    await expect(page.locator("#runtime-value")).toHaveAttribute(
-      "title",
-      /Foot slide/,
-    );
+    const previewSettings = page.locator("#preview-settings");
+    if (
+      !(await previewSettings.evaluate((element) =>
+        (element as HTMLDetailsElement).hasAttribute("open"),
+      ))
+    ) {
+      await previewSettings.locator(":scope > summary").click();
+    }
     await expect(page.locator("#show-contacts")).toBeChecked();
     await page.locator("#show-orientations").check();
     await expect(page.locator("#show-orientations")).toBeChecked();
@@ -296,23 +296,6 @@ test.describe("real browser model-pack", () => {
     }
     await expect(playPause).toHaveAttribute("aria-label", "Play motion");
 
-    await page.locator("#constraint-track-root").click();
-    await page.locator("#constraint-type").selectOption("position");
-    await page.locator("#constraint-frame").fill("60");
-    await page.locator("#constraint-end-frame").fill("60");
-    await page.locator("#add-constraint").click();
-    await expect(page.locator("#constraint-track-root")).toHaveAttribute(
-      "data-has-constraint",
-      "true",
-    );
-    await expect(page.locator("#constraint-track-root")).toHaveAttribute(
-      "title",
-      /frame 60/,
-    );
-    await expect(page.locator("#app-status")).toContainText(
-      "root position constraint at frames 60–60",
-    );
-
     await setRange(page, "#target-buffer", 40);
     await setRange(page, "#timeline", 39);
     timings.appendWallMs = await runGeneration(
@@ -320,16 +303,6 @@ test.describe("real browser model-pack", () => {
       () => page.locator("#stream-generation").check(),
       80,
     );
-    const rootErrorAfter = Number(
-      await page
-        .locator("#correction-metric")
-        .getAttribute("data-root-error-after"),
-    );
-    expect(Number.isFinite(rootErrorAfter)).toBe(true);
-    expect(rootErrorAfter).toBeLessThanOrEqual(0.041);
-    await expect(page.locator("#correction-metric")).toBeVisible();
-    await expect(page.locator("#root-error-value")).toContainText("→");
-    await expect(page.locator("#foot-slide-value")).toContainText("→");
     await page.locator("#stream-generation").uncheck();
     if ((await playPause.getAttribute("aria-label")) === "Pause motion") {
       await playPause.click();
@@ -344,12 +317,11 @@ test.describe("real browser model-pack", () => {
       56,
     );
 
-    await page.locator("#replan-buffer").fill("4");
     await prompt.fill("A person turns left and waves.");
     timings.livePromptWallMs = await runGeneration(
       page,
       () => page.locator("#apply-prompt").click(),
-      60,
+      76,
     );
     await expect(prompt).toHaveValue("A person turns left and waves.");
 
@@ -396,20 +368,6 @@ test.describe("real browser model-pack", () => {
       runtimeTitle:
         document.querySelector("#runtime-value")?.getAttribute("title") ?? "",
       status: document.querySelector("#app-status")?.textContent ?? "",
-      rootConstraint:
-        document
-          .querySelector("#constraint-track-root")
-          ?.getAttribute("title") ?? "",
-      correction:
-        document.querySelector("#correction-metric")?.textContent ?? "",
-      rootErrorAfter:
-        document
-          .querySelector("#correction-metric")
-          ?.getAttribute("data-root-error-after") ?? "",
-      footSlideAfter:
-        document
-          .querySelector("#correction-metric")
-          ?.getAttribute("data-foot-slide-after") ?? "",
     }));
     await testInfo.attach("real-model-metrics.json", {
       body: Buffer.from(
@@ -420,7 +378,6 @@ test.describe("real browser model-pack", () => {
             launchArgs: webGpuLaunchArgs,
             loadWallMs,
             timings,
-            constraintRootErrorAfter: rootErrorAfter,
             environment,
             modelLoadStages,
             firstGenerationUi,
