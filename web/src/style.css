@@ -89,19 +89,6 @@ input[type="checkbox"]:focus-visible,
   border-right: 1px solid var(--border);
 }
 
-.setup-note {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: 0.75rem;
-  line-height: 1.5;
-}
-
-.setup-note code {
-  color: var(--foreground);
-  font-family: var(--demo-mono);
-}
-
-.setup-note a,
 .details-body a {
   display: inline-flex;
   min-height: 2.75rem;

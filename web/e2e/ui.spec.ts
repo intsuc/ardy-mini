@@ -47,7 +47,7 @@ test("renders the two-pane technical workspace without motion parameters", async
       { exact: true },
     ),
   ).toHaveCount(0);
-  await expect(page.locator(".setup-note")).toContainText(
+  await expect(page.locator("#model-setup-help")).toContainText(
     "about 1.4 GiB, four ONNX graphs",
   );
   await expect(page.locator("#privacy-badge")).toContainText("Local");
@@ -511,6 +511,8 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
   );
   await prompt.fill("A person walks forward confidently.");
   await expect(page.locator("#prompt-count")).toHaveText("35 / 280");
+  await page.locator("#prompt-count").click();
+  await expect(prompt).toBeFocused();
 
   await setRange(page, "#duration", 8);
   await expect(page.locator("#duration-output")).toHaveText("8 seconds");
@@ -618,6 +620,20 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   await page.keyboard.press("Shift+ArrowLeft");
   await page.keyboard.press("=");
   await page.keyboard.press("Home");
+
+  const loopToggle = page.locator("#loop-toggle");
+  await page.evaluate(async () => {
+    const { LOOP_CONTROL_STATE_EVENT } = await import("/src/ui-events.ts");
+    document.dispatchEvent(
+      new CustomEvent(LOOP_CONTROL_STATE_EVENT, {
+        detail: { disabled: false },
+      }),
+    );
+  });
+  await expect(loopToggle).toBeEnabled();
+  await loopToggle.click();
+  await expect(loopToggle).toHaveAttribute("aria-pressed", "false");
+  await expect(loopToggle).toBeDisabled();
 });
 
 test("keeps invalid model-pack errors beside the model setup action", async ({

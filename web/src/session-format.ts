@@ -23,7 +23,6 @@ export const MOTION_FILE_FORMAT = "ardy-browser-motion";
 export const MOTION_FILE_VERSION = 1;
 export const SESSION_FILE_FORMAT = "ardy-browser-session";
 export const SESSION_FILE_VERSION = 1;
-export const SESSION_BINARY_EXTENSION = ".ardysession";
 
 const SESSION_BINARY_MAGIC = "ARDYSES1";
 const SESSION_BINARY_HEADER_BYTES = 16;

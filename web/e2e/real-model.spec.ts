@@ -93,7 +93,7 @@ test.describe("real browser model-pack", () => {
     if (reducedMotion) await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto("/");
     await page.waitForFunction(() => document.querySelector("#backend") !== null);
-    await expect(page.locator(".setup-note")).toContainText(
+    await expect(page.locator("#model-setup-help")).toContainText(
       "about 1.4 GiB, four ONNX graphs",
     );
 

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
 import {
   IconCameraRotate,
   IconPlayerPause,
@@ -66,11 +66,17 @@ import {
 import { Progress } from "@/components/ui/progress"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
+import { Toggle } from "@/components/ui/toggle"
 import {
   PROMPT_EXAMPLES,
   PROMPT_EXAMPLE_EVENT,
 } from "@/prompt-examples"
 import { bootstrap } from "@/main"
+import {
+  LOOP_CONTROL_CHANGE_EVENT,
+  LOOP_CONTROL_STATE_EVENT,
+  type LoopControlState,
+} from "@/ui-events"
 
 function EmptyFieldError({
   id,
@@ -94,7 +100,7 @@ function selectPrompt(prompt: string) {
 
 function PromptExampleSelect() {
   return (
-    <Field className="min-w-0 gap-1.5">
+    <Field className="min-w-0">
       <FieldLabel id="prompt-example-label">
         Example prompt
       </FieldLabel>
@@ -233,24 +239,26 @@ function ModelSection() {
           </div>
         </CardHeader>
         <CardFooter id="model-setup-help">
-          <p className="setup-note">
+          <CardDescription>
             Select <code>artifacts/browser/core40</code> (about 1.4 GiB,
             four ONNX graphs). The pack is stored only in this browser.{" "}
-            <a
-              href="https://github.com/intsuc/ardy-mini#fully-in-browser-minilm-demo"
-              target="_blank"
-              rel="noreferrer"
-            >
-              Export instructions
-            </a>
-          </p>
+            <Button variant="link" size="xs" asChild>
+              <a
+                href="https://github.com/intsuc/ardy-mini#fully-in-browser-minilm-demo"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Export instructions
+              </a>
+            </Button>
+          </CardDescription>
         </CardFooter>
       </Card>
 
       <div className="grid min-w-0 gap-1.5 min-[360px]:grid-cols-[minmax(0,1fr)_auto]">
         <Button
           id="import-model"
-          className="w-full min-w-0"
+          className="min-w-0"
           variant="secondary"
           size="lg"
           type="button"
@@ -266,7 +274,7 @@ function ModelSection() {
         />
         <Button
           id="remove-model"
-          className="w-full min-w-0"
+          className="min-w-0"
           variant="destructive"
           size="lg"
           type="button"
@@ -318,7 +326,7 @@ function PromptSection() {
       </div>
 
       <FieldGroup>
-        <Field className="field-group">
+        <Field>
           <FieldLabel htmlFor="prompt">
             Motion description
           </FieldLabel>
@@ -381,7 +389,7 @@ function ClipSection() {
       </div>
 
       <FieldGroup>
-        <Field className="field-group">
+        <Field>
           <FieldLabel htmlFor="duration">Duration</FieldLabel>
           <input
             id="duration"
@@ -404,7 +412,7 @@ function ClipSection() {
         </Field>
 
         <FieldGroup className="grid grid-cols-2 gap-2.5 max-[520px]:grid-cols-1">
-          <Field className="field-group">
+          <Field>
             <FieldLabel htmlFor="seed">Seed</FieldLabel>
             <InputGroup>
               <InputGroupInput
@@ -435,7 +443,7 @@ function ClipSection() {
             <EmptyFieldError id="seed-error" />
           </Field>
 
-          <Field className="field-group">
+          <Field>
             <FieldLabel htmlFor="backend">Backend</FieldLabel>
             <NativeSelect
               id="backend"
@@ -477,7 +485,7 @@ function ClipSection() {
           />
         </label>
 
-        <Field className="field-group">
+        <Field>
           <div className="flex items-center justify-between gap-3">
             <FieldLabel htmlFor="target-buffer">
               Target buffer
@@ -555,7 +563,6 @@ function GenerationActionsSection() {
 
       <Button
         id="generate"
-        className="w-full"
         size="lg"
         type="submit"
         aria-describedby="generate-help"
@@ -654,6 +661,54 @@ function GenerationMessages() {
         </div>
       </details>
     </>
+  )
+}
+
+function LoopToggle() {
+  const [state, setState] = useState({
+    pressed: true,
+    disabled: true,
+  })
+
+  useEffect(() => {
+    const updateState = (event: Event) => {
+      if (!(event instanceof CustomEvent)) return
+      const detail = event.detail as LoopControlState
+      setState((current) => {
+        const next = {
+          pressed: detail.pressed ?? current.pressed,
+          disabled: detail.disabled ?? current.disabled,
+        }
+        return next.pressed === current.pressed &&
+          next.disabled === current.disabled
+          ? current
+          : next
+      })
+    }
+    document.addEventListener(LOOP_CONTROL_STATE_EVENT, updateState)
+    return () =>
+      document.removeEventListener(LOOP_CONTROL_STATE_EVENT, updateState)
+  }, [])
+
+  return (
+    <Toggle
+      id="loop-toggle"
+      variant="outline"
+      size="lg"
+      pressed={state.pressed}
+      disabled={state.disabled}
+      onPressedChange={(pressed) => {
+        setState((current) => ({ ...current, pressed }))
+        document.dispatchEvent(
+          new CustomEvent<boolean>(LOOP_CONTROL_CHANGE_EVENT, {
+            detail: pressed,
+          })
+        )
+      }}
+      aria-label="Loop playback"
+    >
+      <IconRepeat data-icon="inline-start" aria-hidden="true" />
+    </Toggle>
   )
 }
 
@@ -781,18 +836,7 @@ function ViewportPanel() {
             <NativeSelectOption value="2">2×</NativeSelectOption>
           </NativeSelect>
         </label>
-        <Button
-          id="loop-toggle"
-          className="aria-pressed:bg-accent aria-pressed:text-accent-foreground"
-          variant="outline"
-          size="icon-lg"
-          type="button"
-          aria-pressed="true"
-          aria-label="Loop playback"
-          disabled
-        >
-          <IconRepeat data-icon="inline-start" aria-hidden="true" />
-        </Button>
+        <LoopToggle />
         <Button
           id="reset-camera"
           variant="ghost"

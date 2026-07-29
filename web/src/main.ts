@@ -40,6 +40,11 @@ import {
   type VrmModelInfo,
 } from "./viewer";
 import { PROMPT_EXAMPLE_EVENT } from "./prompt-examples";
+import {
+  LOOP_CONTROL_CHANGE_EVENT,
+  LOOP_CONTROL_STATE_EVENT,
+  type LoopControlState,
+} from "./ui-events";
 
 const UINT32_MAX = 0xffff_ffff;
 const ALLOWED_DURATIONS = new Set([2, 4, 6, 8, 10]);
@@ -960,6 +965,28 @@ export function bootstrap(): () => void {
     });
   }
 
+  function updateLoopControl(next: LoopControlState): void {
+    const detail: LoopControlState = {};
+    if (
+      next.pressed !== undefined &&
+      loopToggle.getAttribute("aria-pressed") !== String(next.pressed)
+    ) {
+      detail.pressed = next.pressed;
+    }
+    if (
+      next.disabled !== undefined &&
+      loopToggle.disabled !== next.disabled
+    ) {
+      detail.disabled = next.disabled;
+    }
+    if (detail.pressed === undefined && detail.disabled === undefined) return;
+    document.dispatchEvent(
+      new CustomEvent<LoopControlState>(LOOP_CONTROL_STATE_EVENT, {
+        detail,
+      }),
+    );
+  }
+
   function setProgress(
     fill: HTMLElement,
     progressbar: HTMLElement,
@@ -1182,7 +1209,7 @@ export function bootstrap(): () => void {
 
   function updateTargetBuffer(): void {
     const output = targetBuffer
-      .closest(".field-group")
+      .closest('[data-slot="field"]')
       ?.querySelector<HTMLOutputElement>("output");
     if (output) output.value = `${targetBuffer.value} frames`;
     const min = Number(targetBuffer.min);
@@ -1316,6 +1343,9 @@ export function bootstrap(): () => void {
       contacts: showContacts.checked,
       orientationAxes: showOrientations.checked,
       trajectory: showTrajectory.checked,
+      constraints: false,
+      initialTransform: false,
+      waypoints: false,
     };
   }
 
@@ -1332,7 +1362,7 @@ export function bootstrap(): () => void {
     timeline.disabled = state.frameCount === 0;
     playPause.disabled = state.frameCount < 2;
     playbackSpeed.disabled = state.frameCount === 0;
-    loopToggle.disabled = state.frameCount < 2;
+    updateLoopControl({ disabled: state.frameCount < 2 });
     playPause.dataset.playing = String(state.playing);
     playPause.setAttribute(
       "aria-label",
@@ -1598,8 +1628,7 @@ export function bootstrap(): () => void {
     if (resetPresentation) {
       const loop = !streamGeneration.checked && !reducedMotion.matches;
       viewer.setLoop(loop);
-      loopToggle.setAttribute("aria-pressed", String(loop));
-      loopToggle.classList.toggle("is-active", loop);
+      updateLoopControl({ pressed: loop });
     }
     emptyState.hidden = true;
     motionBadge.dataset.state = "ready";
@@ -2251,18 +2280,21 @@ export function bootstrap(): () => void {
   playbackSpeed.addEventListener("change", () =>
     viewer?.setSpeed(Number(playbackSpeed.value)),
   );
-  loopToggle.addEventListener("click", () => {
-    const loop = loopToggle.getAttribute("aria-pressed") !== "true";
-    loopToggle.setAttribute("aria-pressed", String(loop));
-    loopToggle.classList.toggle("is-active", loop);
-    viewer?.setLoop(loop);
-  });
+  document.addEventListener(
+    LOOP_CONTROL_CHANGE_EVENT,
+    (event) => {
+      if (!(event instanceof CustomEvent) || typeof event.detail !== "boolean") {
+        return;
+      }
+      viewer?.setLoop(event.detail);
+    },
+    { signal: lifecycle.signal },
+  );
   resetCamera.addEventListener("click", () => viewer?.resetCamera());
   streamGeneration.addEventListener("change", () => {
     if (streamGeneration.checked) {
       viewer?.setLoop(false);
-      loopToggle.setAttribute("aria-pressed", "false");
-      loopToggle.classList.remove("is-active");
+      updateLoopControl({ pressed: false });
       const state = viewer?.getPlaybackState();
       if (state) maybeAutoReplan(state);
     }
@@ -2273,8 +2305,7 @@ export function bootstrap(): () => void {
     if (event.matches) {
       viewer?.setPlaying(false);
       viewer?.setLoop(false);
-      loopToggle.setAttribute("aria-pressed", "false");
-      loopToggle.classList.remove("is-active");
+      updateLoopControl({ pressed: false });
       announce(
         "Reduced motion enabled. Playback is paused and looping is off.",
       );
