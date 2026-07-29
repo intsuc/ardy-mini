@@ -5,8 +5,14 @@ import { describe, expect, it } from "vitest";
 
 import { sha256Hex } from "./hash";
 import {
+  GRAPH_PRECISION_CONTRACT,
+  MIXED_PRECISION_FORMAT,
+  MIXED_PRECISION_POLICY_VERSION,
+  MIXED_PRECISION_PUBLIC_IO_DTYPE,
   MODEL_PACK_FORMAT,
   MODEL_PACK_SCHEMA_VERSION,
+  REQUIRED_WEBGPU_FEATURE,
+  type BrowserGraphPrecisionSummary,
   type BrowserModelPackManifest,
   validateModelPackManifest,
 } from "./manifest";
@@ -170,7 +176,9 @@ async function fixture(): Promise<{
   const assets = new Map<string, Uint8Array>([
     ["tokenizer/tokenizer.json", encoder.encode("{}")],
     ["tokenizer/tokenizer_config.json", encoder.encode("{}")],
-    ["graphs.onnx", encoder.encode("fake onnx")],
+    ["text_encoder.onnx", encoder.encode("fake text encoder onnx")],
+    ["denoiser.onnx", encoder.encode("fake denoiser onnx")],
+    ["decoder.onnx", encoder.encode("fake decoder onnx")],
   ]);
   const files: BrowserModelPackManifest["files"] = {};
   for (const [path, bytes] of assets) {
@@ -188,7 +196,7 @@ async function fixture(): Promise<{
     tokenizer: { directory: "tokenizer", max_length: 128 },
     graphs: {
       text_encoder: {
-        model: "graphs.onnx",
+        model: "text_encoder.onnx",
         inputs: {
           inputIds: "input_ids",
           attentionMask: "attention_mask",
@@ -197,7 +205,7 @@ async function fixture(): Promise<{
         outputs: { textConditions: "text_conditions" },
       },
       denoiser: {
-        model: "graphs.onnx",
+        model: "denoiser.onnx",
         inputs: {
           cfgWeight: "cfg_weight",
           x: "x",
@@ -214,7 +222,7 @@ async function fixture(): Promise<{
         outputs: { predX0: "pred_x0" },
       },
       decoder: {
-        model: "graphs.onnx",
+        model: "decoder.onnx",
         inputs: {
           hybridTokens: "hybrid_tokens",
           motionPadMask: "motion_pad_mask",
@@ -231,6 +239,80 @@ async function fixture(): Promise<{
         },
       },
     },
+    precision: ((): BrowserModelPackManifest["precision"] => {
+      const summary = <
+        GraphName extends keyof BrowserModelPackManifest["graphs"],
+      >(
+        graphName: GraphName,
+        modelPath: string,
+      ): BrowserGraphPrecisionSummary<GraphName> => {
+        const outputSize = files[modelPath].size_bytes;
+        const isIdentity =
+          GRAPH_PRECISION_CONTRACT[graphName].conversion_mode ===
+          "fp32-identity";
+        const sourceSize = isIdentity ? outputSize : outputSize * 2;
+        const sourceInitializers = {
+          count_by_dtype: { float: 1 },
+          bytes_by_dtype: { float: 4 },
+          total_count: 1,
+          total_bytes: 4,
+        };
+        const outputInitializers = isIdentity
+          ? sourceInitializers
+          : {
+              count_by_dtype: { float16: 1 },
+              bytes_by_dtype: { float16: 2 },
+              total_count: 1,
+              total_bytes: 2,
+            };
+        return {
+          schema_version: 1,
+          graph_name: graphName,
+          policy_id: GRAPH_PRECISION_CONTRACT[graphName].policy_id,
+          conversion_mode:
+            GRAPH_PRECISION_CONTRACT[graphName].conversion_mode,
+          source_sha256: isIdentity
+            ? files[modelPath].sha256
+            : "f".repeat(64),
+          output_sha256: files[modelPath].sha256,
+          source_size_bytes: sourceSize,
+          output_size_bytes: outputSize,
+          size_reduction_bytes: sourceSize - outputSize,
+          size_reduction_fraction: (sourceSize - outputSize) / sourceSize,
+          source_initializers: sourceInitializers,
+          output_initializers: outputInitializers,
+        };
+      };
+      const precisionGraphs = {
+        text_encoder: summary("text_encoder", "text_encoder.onnx"),
+        denoiser: summary("denoiser", "denoiser.onnx"),
+        decoder: summary("decoder", "decoder.onnx"),
+      };
+      const sourceBytes = Object.values(precisionGraphs).reduce(
+        (total, graph) => total + graph.source_size_bytes,
+        0,
+      );
+      const mixedBytes = Object.values(precisionGraphs).reduce(
+        (total, graph) => total + graph.output_size_bytes,
+        0,
+      );
+      return {
+        format: MIXED_PRECISION_FORMAT,
+        policy_version: MIXED_PRECISION_POLICY_VERSION,
+        public_io_dtype: MIXED_PRECISION_PUBLIC_IO_DTYPE,
+        required_webgpu_features: [REQUIRED_WEBGPU_FEATURE],
+        source_onnx_bytes: sourceBytes,
+        mixed_onnx_bytes: mixedBytes,
+        saved_onnx_bytes: sourceBytes - mixedBytes,
+        saved_onnx_fraction: (sourceBytes - mixedBytes) / sourceBytes,
+        toolchain: {
+          torch: "fixture-torch",
+          onnx: "fixture-onnx",
+          onnxruntime: "fixture-onnxruntime",
+        },
+        graphs: precisionGraphs,
+      };
+    })(),
     dimensions: {
       fps: 20,
       num_frames_per_token: 4,
@@ -274,6 +356,7 @@ async function fixture(): Promise<{
     runtime: {
       contract_revision: 3,
       text_only: true,
+      required_webgpu_features: [REQUIRED_WEBGPU_FEATURE],
     },
     notices: ["fixture only"],
     license_notices: [
@@ -293,23 +376,25 @@ describe("model-pack validation", () => {
       progress.push(`${event.stage}:${event.completed}/${event.total}`),
     );
     expect(pack.manifest.model.id).toBe("fixture");
-    expect(new TextDecoder().decode(await pack.read("graphs.onnx"))).toBe(
-      "fake onnx",
+    expect(new TextDecoder().decode(await pack.read("denoiser.onnx"))).toBe(
+      "fake denoiser onnx",
     );
-    expect(progress.some((value) => value.startsWith("hashing-pack:3/3"))).toBe(
+    expect(progress.some((value) => value.startsWith("hashing-pack:5/5"))).toBe(
       true,
     );
   });
 
   it("rejects tampered bytes and ascending sampler timesteps", async () => {
     const { entries, manifest } = await fixture();
-    entries.set("graphs.onnx", encoder.encode("tampered!"));
+    const tampered = entries.get("denoiser.onnx")!.slice();
+    tampered[0] ^= 1;
+    entries.set("denoiser.onnx", tampered);
     await expect(
       loadModelPackFromTarGzip(await archiveFor(entries)),
     ).rejects.toThrow(
       /SHA-256 mismatch/,
     );
-    entries.set("graphs.onnx", encoder.encode("wrong size"));
+    entries.set("denoiser.onnx", encoder.encode("wrong size"));
     await expect(
       loadModelPackFromTarGzip(await archiveFor(entries)),
     ).rejects.toThrow(/Size mismatch/);
@@ -431,6 +516,356 @@ describe("model-pack validation", () => {
     ).toThrow(/browser Core40 runtime/);
   });
 
+  it("requires the current mixed-FP16 precision contract and toolchain", async () => {
+    const { manifest } = await fixture();
+    expect(validateModelPackManifest(manifest).precision.format).toBe(
+      "mixed-fp16",
+    );
+
+    const { precision: _precision, ...withoutPrecision } = manifest;
+    expect(() => validateModelPackManifest(withoutPrecision)).toThrow(
+      /precision must be an object/,
+    );
+
+    const invalidPrecisionValues: Array<
+      readonly [string, Record<string, unknown>]
+    > = [
+      ["precision.format", { ...manifest.precision, format: "fp32" }],
+      [
+        "precision.policy_version",
+        { ...manifest.precision, policy_version: 999 },
+      ],
+      [
+        "precision.public_io_dtype",
+        { ...manifest.precision, public_io_dtype: "float16" },
+      ],
+      [
+        "precision.toolchain.onnxruntime",
+        {
+          ...manifest.precision,
+          toolchain: {
+            ...manifest.precision.toolchain,
+            onnxruntime: "",
+          },
+        },
+      ],
+      [
+        "precision.graphs",
+        {
+          ...manifest.precision,
+          graphs: {
+            text_encoder: manifest.precision.graphs.text_encoder,
+            denoiser: manifest.precision.graphs.denoiser,
+          },
+        },
+      ],
+      [
+        "precision.graphs.text_encoder.graph_name",
+        {
+          ...manifest.precision,
+          graphs: {
+            ...manifest.precision.graphs,
+            text_encoder: {
+              ...manifest.precision.graphs.text_encoder,
+              graph_name: "denoiser",
+            },
+          },
+        },
+      ],
+      [
+        "precision.graphs.text_encoder.policy_id",
+        {
+          ...manifest.precision,
+          graphs: {
+            ...manifest.precision.graphs,
+            text_encoder: {
+              ...manifest.precision.graphs.text_encoder,
+              policy_id: "unreviewed-policy",
+            },
+          },
+        },
+      ],
+      [
+        "precision.graphs.decoder.conversion_mode",
+        {
+          ...manifest.precision,
+          graphs: {
+            ...manifest.precision.graphs,
+            decoder: {
+              ...manifest.precision.graphs.decoder,
+              conversion_mode: "fp32-identity",
+            },
+          },
+        },
+      ],
+    ];
+    for (const [path, precision] of invalidPrecisionValues) {
+      expect(
+        () => validateModelPackManifest({ ...manifest, precision }),
+        path,
+      ).toThrow(path);
+    }
+  });
+
+  it("enforces FP32 denoiser identity and initializer precision", async () => {
+    const { manifest } = await fixture();
+    const precision = manifest.precision;
+    const denoiser = precision.graphs.denoiser;
+    const decoder = precision.graphs.decoder;
+    const textEncoder = precision.graphs.text_encoder;
+
+    const invalidSummaries: Array<
+      readonly [string, keyof typeof precision.graphs, Record<string, unknown>]
+    > = [
+      [
+        "fp32-identity conversion must have zero byte reduction",
+        "denoiser",
+        {
+          ...denoiser,
+          source_size_bytes: denoiser.source_size_bytes + 1,
+          size_reduction_bytes: 1,
+          size_reduction_fraction: 1 / (denoiser.source_size_bytes + 1),
+        },
+      ],
+      [
+        "source_sha256 must equal output_sha256",
+        "denoiser",
+        {
+          ...denoiser,
+          source_sha256: "0".repeat(64),
+        },
+      ],
+      [
+        "output_initializers must not contain float16",
+        "denoiser",
+        {
+          ...denoiser,
+          output_initializers: {
+            count_by_dtype: { float16: 1 },
+            bytes_by_dtype: { float16: 2 },
+            total_count: 1,
+            total_bytes: 2,
+          },
+        },
+      ],
+      [
+        "output_initializers must not contain bfloat16",
+        "decoder",
+        {
+          ...decoder,
+          output_initializers: {
+            count_by_dtype: { bfloat16: 1 },
+            bytes_by_dtype: { bfloat16: 2 },
+            total_count: 1,
+            total_bytes: 2,
+          },
+        },
+      ],
+      [
+        "source_initializers must not contain float16",
+        "text_encoder",
+        {
+          ...textEncoder,
+          source_initializers: {
+            count_by_dtype: { float16: 1 },
+            bytes_by_dtype: { float16: 2 },
+            total_count: 1,
+            total_bytes: 2,
+          },
+        },
+      ],
+      [
+        "total_bytes must equal the sum",
+        "decoder",
+        {
+          ...decoder,
+          output_initializers: {
+            ...decoder.output_initializers,
+            total_bytes: decoder.output_initializers.total_bytes + 1,
+          },
+        },
+      ],
+      [
+        "output_sha256 must match",
+        "decoder",
+        {
+          ...decoder,
+          output_sha256: "0".repeat(64),
+        },
+      ],
+    ];
+
+    for (const [message, graphName, summary] of invalidSummaries) {
+      expect(
+        () =>
+          validateModelPackManifest({
+            ...manifest,
+            precision: {
+              ...precision,
+              graphs: {
+                ...precision.graphs,
+                [graphName]: summary,
+              },
+            },
+          }),
+        `${graphName}: ${message}`,
+      ).toThrow(message);
+    }
+  });
+
+  it("rejects inconsistent mixed-FP16 byte accounting", async () => {
+    const { manifest } = await fixture();
+    const precision = manifest.precision;
+    expect(() =>
+      validateModelPackManifest({
+        ...manifest,
+        precision: {
+          ...precision,
+          saved_onnx_bytes: precision.saved_onnx_bytes + 1,
+        },
+      }),
+    ).toThrow(/source_onnx_bytes - mixed_onnx_bytes/);
+    expect(() =>
+      validateModelPackManifest({
+        ...manifest,
+        precision: { ...precision, saved_onnx_fraction: 1.1 },
+      }),
+    ).toThrow(/between 0 and 1/);
+    expect(() =>
+      validateModelPackManifest({
+        ...manifest,
+        precision: { ...precision, saved_onnx_fraction: 0.4 },
+      }),
+    ).toThrow(/does not match the declared byte reduction/);
+
+    const decoder = precision.graphs.decoder;
+    expect(() =>
+      validateModelPackManifest({
+        ...manifest,
+        precision: {
+          ...precision,
+          graphs: {
+            ...precision.graphs,
+            decoder: {
+              ...decoder,
+              size_reduction_bytes: decoder.size_reduction_bytes + 1,
+            },
+          },
+        },
+      }),
+    ).toThrow(/size_reduction_bytes must equal/);
+
+    const smallerOutput = decoder.output_size_bytes - 1;
+    const largerFileReduction = decoder.source_size_bytes - smallerOutput;
+    expect(() =>
+      validateModelPackManifest({
+        ...manifest,
+        precision: {
+          ...precision,
+          graphs: {
+            ...precision.graphs,
+            decoder: {
+              ...decoder,
+              output_size_bytes: smallerOutput,
+              size_reduction_bytes: largerFileReduction,
+              size_reduction_fraction:
+                largerFileReduction / decoder.source_size_bytes,
+            },
+          },
+        },
+      }),
+    ).toThrow(/must match files\.decoder\.onnx\.size_bytes/);
+
+    const largerSource = decoder.source_size_bytes + 1;
+    const largerReduction = largerSource - decoder.output_size_bytes;
+    expect(() =>
+      validateModelPackManifest({
+        ...manifest,
+        precision: {
+          ...precision,
+          graphs: {
+            ...precision.graphs,
+            decoder: {
+              ...decoder,
+              source_size_bytes: largerSource,
+              size_reduction_bytes: largerReduction,
+              size_reduction_fraction: largerReduction / largerSource,
+            },
+          },
+        },
+      }),
+    ).toThrow(/precision graph source total/);
+
+    const largerOutput = decoder.output_size_bytes + 1;
+    const smallerReduction = decoder.source_size_bytes - largerOutput;
+    expect(() =>
+      validateModelPackManifest({
+        ...manifest,
+        files: {
+          ...manifest.files,
+          "decoder.onnx": {
+            ...manifest.files["decoder.onnx"],
+            size_bytes: largerOutput,
+          },
+        },
+        precision: {
+          ...precision,
+          graphs: {
+            ...precision.graphs,
+            decoder: {
+              ...decoder,
+              output_size_bytes: largerOutput,
+              size_reduction_bytes: smallerReduction,
+              size_reduction_fraction:
+                smallerReduction / decoder.source_size_bytes,
+            },
+          },
+        },
+      }),
+    ).toThrow(/precision graph output total/);
+  });
+
+  it("rejects missing, duplicate, and unknown required WebGPU features", async () => {
+    const { manifest } = await fixture();
+    for (const features of [
+      undefined,
+      [],
+      ["shader-f16", "shader-f16"],
+      ["unknown-feature"],
+    ]) {
+      expect(
+        () =>
+          validateModelPackManifest({
+            ...manifest,
+            runtime: {
+              ...manifest.runtime,
+              required_webgpu_features: features,
+            },
+          }),
+        JSON.stringify(features),
+      ).toThrow(/runtime\.required_webgpu_features/);
+    }
+
+    for (const features of [
+      undefined,
+      [],
+      ["shader-f16", "shader-f16"],
+      ["unknown-feature"],
+    ]) {
+      expect(
+        () =>
+          validateModelPackManifest({
+            ...manifest,
+            precision: {
+              ...manifest.precision,
+              required_webgpu_features: features,
+            },
+          }),
+        JSON.stringify(features),
+      ).toThrow(/precision\.required_webgpu_features/);
+    }
+  });
+
   it("requires every revision-3 structured motion output", async () => {
     const { manifest } = await fixture();
     expect(() =>
@@ -456,8 +891,7 @@ describe("model-pack validation", () => {
         detailed_motion_outputs: true,
       },
       runtime: {
-        contract_revision: 3 as const,
-        text_only: true as const,
+        ...manifest.runtime,
         onnx_opset: 18,
         batch_size: 1,
         detailed_motion_outputs: true,

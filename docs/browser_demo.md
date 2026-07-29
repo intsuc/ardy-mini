@@ -130,8 +130,10 @@ the current exporter.
 
 Inference runs in a dedicated Web Worker so ONNX execution does not block the
 main UI. ONNX Runtime Web creates all three sessions with only the `webgpu`
-execution provider. If WebGPU is unavailable or session creation fails, the
-error is reported without creating replacement CPU/WebAssembly sessions.
+execution provider. The selected mixed-FP16 policy requires a WebGPU adapter
+that exposes native `shader-f16`. If WebGPU, `shader-f16`, or session creation
+is unavailable, the error is reported without creating replacement
+CPU/WebAssembly sessions.
 
 | Graph | Main inputs | Outputs |
 |---|---|---|
@@ -167,8 +169,13 @@ uv run --extra browser python scripts/export_browser.py \
   --output artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz
 ```
 
-The exporter checks all three ONNX files and, unless `--skip-verify` is passed,
-compares each graph with its PyTorch source through ONNX Runtime CPU.
+The exporter first checks all three FP32 ONNX exports and, unless
+`--skip-verify` is passed, compares each graph with its PyTorch source through
+ONNX Runtime CPU. It then applies the graph-specific mixed-FP16 policy, checks
+the three converted graphs, and compares mixed-FP16 outputs with the verified
+FP32 ONNX exports through ONNX Runtime CPU with graph optimizations disabled.
+`--skip-verify` skips both numerical comparison stages; it does not skip ONNX
+checking or mixed-FP16 conversion.
 `manifest.json` records graph contracts, tensor dimensions, diffusion and
 quantization constants, normalization statistics, motion layout, skeleton
 metadata, capabilities, file sizes, SHA-256 digests, model compatibility, and
@@ -185,36 +192,45 @@ tar -xOzf artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz manifest.json |
 jq '{
   schema_version,
   contract_revision: .runtime.contract_revision,
+  precision_policy: .precision.policy_version,
+  required_webgpu_features: .runtime.required_webgpu_features,
   local_rotations: .graphs.decoder.outputs.localRotations,
   global_rotations: .graphs.decoder.outputs.globalRotations
 }'
 ```
 
-The expected schema/contract revisions are `2` and `3`, and both rotation
+The expected schema, runtime-contract, and precision-policy revisions are `2`,
+`3`, and `3`; the required feature list is `["shader-f16"]`, and both rotation
 output names must be present. The archive contains exactly one manifest, three
 ONNX graphs, and two tokenizer files.
 
-The verified export produced in this environment is 718,137,762 bytes
-(684.87 MiB, 0.6688 GiB) as `.tar.gz`. Its member payload is 775,577,052
-bytes. The archive SHA-256 is
-`4962bc2c3b7135e8181de1229fc816924ebcd60e3d5ff1d9f5cc02b8505e8663`,
+The verified mixed-FP16 export produced in this environment is 684,835,577
+bytes (653.11 MiB, 0.6378 GiB) as `.tar.gz`. Its member payload is
+740,127,046 bytes. The archive SHA-256 is
+`145995ff6216076d2ee06d7a62a741c6d9a02434278d645a0446cd357aa95868`,
 and its manifest identifies MiniLM artifact
 `b2e4af890d4a733049a377b96355eb1f3a5716378f9304010906823cf6af7fcb`.
 The member sizes are:
 
 | Asset | Bytes |
 |---|---:|
-| MiniLM condition encoder | 112,430,592 |
-| Specialized unconstrained ARDY denoiser | 590,701,706 |
-| Structured motion decoder | 71,642,198 |
+| FP32 MiniLM condition encoder | 112,430,592 |
+| FP32 specialized unconstrained ARDY denoiser | 590,701,706 |
+| Mixed-FP16 structured motion decoder | 36,181,508 |
 | Tokenizer files | 712,243 |
-| Manifest | 90,313 |
+| Manifest | 100,997 |
 
-The former four-graph directory occupied 1,488,867,166 bytes in the same
-environment. Removing its constraint graph and specializing the remaining
-denoiser saves 713,290,114 bytes (680.25 MiB, 0.6643 GiB) before compression;
-the final gzip file is 770,729,404 bytes (0.7178 GiB) smaller than that
-directory. Small exporter/version differences can change the exact byte count.
+The corresponding three-graph FP32 export contains 774,774,496 ONNX bytes and
+produces a 718,137,762-byte gzip pack with SHA-256
+`4962bc2c3b7135e8181de1229fc816924ebcd60e3d5ff1d9f5cc02b8505e8663`.
+The selected precision policy reduces the ONNX payload to 739,313,806 bytes,
+saving 35,460,690 bytes (4.58%), and reduces the gzip pack by 33,302,185 bytes
+(4.64%). Continuation-rollout ablation keeps the text encoder and
+autoregressive denoiser byte-identical to FP32; only the decoder uses mixed
+FP16, reducing that graph by 49.50%. Small exporter/version differences can
+change the exact archive and manifest byte counts. See the
+[mixed-FP16 ablation report](browser_fp16.md) for the retained FP32 regions,
+fidelity measurements, and reproduction command.
 
 ## Run the app
 
@@ -248,9 +264,10 @@ constraints and detailed planning controls belong to the separate
 Python/Viser demo.
 
 The **Model** card reports WebGPU requirements before model selection. WebGPU
-is required; the app checks the secure context, `navigator.gpu`, and adapter
-availability before reading or decompressing the model archive. Use HTTPS or
-localhost on a browser and device with WebGPU.
+with native `shader-f16` is required; the app checks the secure context,
+`navigator.gpu`, adapter availability, and that adapter feature before reading
+or decompressing the model archive. Use HTTPS or localhost on a browser and
+device with WebGPU FP16 shader support.
 
 The preview supports drag/swipe orbit, wheel/pinch zoom, and keyboard
 operation. The camera follows the generated root position while preserving the
@@ -327,18 +344,36 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-The current exported pack records these maximum PyTorch-versus-ONNX Runtime
-CPU errors:
+Export verification has two numerical stages. The current pack records these
+maximum FP32 PyTorch-versus-FP32 ONNX Runtime CPU errors:
 
 | Output | Maximum absolute error |
 |---|---:|
 | MiniLM text conditions | `1.14e-5` |
-| Unconstrained denoiser tokens | `9.98e-6` |
-| Normalized motion | `1.51e-3` |
-| Posed joints | `1.23e-4 m` |
-| Local rotations | `9.36e-4` |
-| Global rotations | `1.09e-3` |
+| Unconstrained denoiser tokens | `1.60e-5` |
+| Normalized motion | `2.43e-5` |
+| Posed joints | `1.70e-6 m` |
+| Local rotations | `7.93e-6` |
+| Global rotations | `7.99e-6` |
 | Root positions / headings / contacts | `0` |
+
+The second stage compares the FP32 ONNX exports with mixed-FP16 ONNX through
+CPU ONNX Runtime with graph optimizations disabled:
+
+| Output | Mixed-FP16 RMSE |
+|---|---:|
+| MiniLM text conditions | `0` |
+| Unconstrained denoiser tokens | `0` |
+| Normalized motion | `2.77e-3` |
+| Posed joints | `2.35e-4 m` |
+| Local rotations | `8.15e-4` |
+| Global rotations | `7.90e-4` |
+| Root positions / headings | `0` |
+
+Foot-contact agreement is `100%` in that export check. The larger paired
+64-prompt × 3-seed rollout evaluation, which measures accumulated
+mixed-precision motion error, is in the
+[mixed-FP16 ablation report](browser_fp16.md).
 
 Browser runtime and memory measurements are device-, browser-, and
 driver-specific. The current pack has three graphs; measurements
@@ -379,8 +414,9 @@ Set `ARDY_BROWSER_REDUCED_MOTION=1` to exercise paused initial playback.
   VRM is the only supported local character format; the browser has no general
   scene-mesh importer.
 - A loaded VRM is page-local and must be selected again after a reload.
-- WebGPU is required. There is no CPU or WebAssembly execution-provider
-  fallback when WebGPU initialization or session creation fails.
+- WebGPU with native `shader-f16` is required. There is no CPU or WebAssembly
+  execution-provider fallback when WebGPU initialization, feature validation,
+  or session creation fails.
 
 ## Distribution and trust
 

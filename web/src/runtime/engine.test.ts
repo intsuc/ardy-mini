@@ -7,9 +7,74 @@ import {
   BrowserArdyGenerationSession,
   type RuntimeContinuationState,
 } from "./engine";
-import type { BrowserModelPackManifest } from "./manifest";
+import {
+  GRAPH_PRECISION_CONTRACT,
+  MIXED_PRECISION_FORMAT,
+  MIXED_PRECISION_POLICY_VERSION,
+  MIXED_PRECISION_PUBLIC_IO_DTYPE,
+  REQUIRED_WEBGPU_FEATURE,
+  type BrowserGraphPrecisionSummary,
+  type BrowserModelPackManifest,
+} from "./manifest";
 import { ort, type RuntimeSessions } from "./sessions";
 import type { LocalTokenizer } from "./tokenizer";
+
+function precision(): BrowserModelPackManifest["precision"] {
+  const summary = <GraphName extends keyof BrowserModelPackManifest["graphs"]>(
+    graphName: GraphName,
+  ): BrowserGraphPrecisionSummary<GraphName> => {
+    const isIdentity =
+      GRAPH_PRECISION_CONTRACT[graphName].conversion_mode ===
+      "fp32-identity";
+    const sourceInitializers = {
+      count_by_dtype: { float: 1 },
+      bytes_by_dtype: { float: 4 },
+      total_count: 1,
+      total_bytes: 4,
+    };
+    return {
+      schema_version: 1,
+      graph_name: graphName,
+      policy_id: GRAPH_PRECISION_CONTRACT[graphName].policy_id,
+      conversion_mode: GRAPH_PRECISION_CONTRACT[graphName].conversion_mode,
+      source_sha256: isIdentity ? "1".repeat(64) : "0".repeat(64),
+      output_sha256: "1".repeat(64),
+      source_size_bytes: isIdentity ? 1 : 2,
+      output_size_bytes: 1,
+      size_reduction_bytes: isIdentity ? 0 : 1,
+      size_reduction_fraction: isIdentity ? 0 : 0.5,
+      source_initializers: sourceInitializers,
+      output_initializers: isIdentity
+        ? sourceInitializers
+        : {
+            count_by_dtype: { float16: 1 },
+            bytes_by_dtype: { float16: 2 },
+            total_count: 1,
+            total_bytes: 2,
+          },
+    };
+  };
+  return {
+    format: MIXED_PRECISION_FORMAT,
+    policy_version: MIXED_PRECISION_POLICY_VERSION,
+    public_io_dtype: MIXED_PRECISION_PUBLIC_IO_DTYPE,
+    required_webgpu_features: [REQUIRED_WEBGPU_FEATURE],
+    source_onnx_bytes: 5,
+    mixed_onnx_bytes: 3,
+    saved_onnx_bytes: 2,
+    saved_onnx_fraction: 0.4,
+    toolchain: {
+      torch: "fixture",
+      onnx: "fixture",
+      onnxruntime: "fixture",
+    },
+    graphs: {
+      text_encoder: summary("text_encoder"),
+      denoiser: summary("denoiser"),
+      decoder: summary("decoder"),
+    },
+  };
+}
 
 function manifest(): BrowserModelPackManifest {
   return {
@@ -19,6 +84,7 @@ function manifest(): BrowserModelPackManifest {
     files: {},
     tokenizer: { directory: "tokenizer", max_length: 8 },
     graphs: {} as BrowserModelPackManifest["graphs"],
+    precision: precision(),
     dimensions: {
       fps: 20,
       num_frames_per_token: 4,
@@ -59,7 +125,11 @@ function manifest(): BrowserModelPackManifest {
       mean: new Array(128).fill(0),
       std: new Array(128).fill(1),
     },
-    runtime: { contract_revision: 3, text_only: true },
+    runtime: {
+      contract_revision: 3,
+      text_only: true,
+      required_webgpu_features: [REQUIRED_WEBGPU_FEATURE],
+    },
   };
 }
 
@@ -201,6 +271,7 @@ function generationManifest(): BrowserModelPackManifest {
         },
       },
     },
+    precision: precision(),
     dimensions: {
       fps: 20,
       num_frames_per_token: 1,
@@ -241,7 +312,11 @@ function generationManifest(): BrowserModelPackManifest {
       mean: [0],
       std: [1],
     },
-    runtime: { contract_revision: 3, text_only: true },
+    runtime: {
+      contract_revision: 3,
+      text_only: true,
+      required_webgpu_features: [REQUIRED_WEBGPU_FEATURE],
+    },
   };
 }
 

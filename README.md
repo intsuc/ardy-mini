@@ -155,7 +155,8 @@ measurements from the completed run are in
 The Core40 MiniLM path runs end to end in the browser. A dedicated Web Worker
 uses ONNX Runtime Web's WebGPU execution provider exclusively; there is no CPU
 or WebAssembly execution-provider fallback. The app checks for a secure
-context and a usable WebGPU adapter before opening the model pack.
+context and a WebGPU adapter exposing native `shader-f16` before opening the
+model pack.
 WordPiece tokenization, text conditioning, DDIM diffusion, autoregressive
 recentering/requantization, structured motion decoding, and three.js playback
 all remain on the user's device. The app is deliberately presented as a simple
@@ -210,11 +211,17 @@ npm run dev
 Choose `artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz` with the demo's
 **Choose model pack** button. The browser accepts this single `.tar.gz` format
 only; it streams the archive through gzip/ustar validation before creating
-three ONNX sessions. The verified export in this environment is 718,137,762
-bytes (684.87 MiB), down from 1,488,867,166 bytes for the former four-graph
-directory. The static web build contains no model weights, and inference does
-not send prompts, model-pack files, VRM files, generation state, or motion to a
-server.
+three ONNX sessions. The verified mixed-FP16 export in this environment is
+684,835,577 bytes (653.11 MiB); its three ONNX graphs total 739,313,806 bytes.
+That is 33,302,185 bytes (4.64%) smaller than the corresponding
+718,137,762-byte FP32 gzip export. Continuation-rollout ablation keeps both the
+text encoder and autoregressive denoiser byte-identical to FP32 and converts
+only the structured decoder selectively. The decoder itself is 49.50%
+smaller. The precision boundaries and paired motion-fidelity results are
+documented in the
+[browser mixed-FP16 report](docs/browser_fp16.md). The static web build
+contains no model weights, and inference does not send prompts, model-pack
+files, VRM files, generation state, or motion to a server.
 
 VRM animation requires a current structured-output pack. Its
 `manifest.json` must use schema version `2`, report

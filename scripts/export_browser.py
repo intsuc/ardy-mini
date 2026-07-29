@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 # SPDX-License-Identifier: Apache-2.0
-"""Export the compressed MiniLM Core40 model pack used by the browser app."""
+"""Export the mixed-FP16 MiniLM Core40 model pack used by the browser app."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Export the MiniLM condition encoder, text-conditioned ARDY "
-            "denoiser, and structured motion decoder for ONNX Runtime Web."
+            "denoiser, and structured motion decoder as a mixed-FP16 model "
+            "pack for ONNX Runtime Web."
         )
     )
     parser.add_argument(
@@ -60,7 +61,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-verify",
         action="store_true",
-        help="Skip PyTorch-vs-ONNX Runtime CPU comparison for the three graphs (ONNX checker still runs).",
+        help=(
+            "Skip both CPU numerical comparisons (PyTorch vs FP32 ONNX and "
+            "FP32 ONNX vs mixed-FP16 ONNX); ONNX checking and mixed-FP16 "
+            "conversion still run."
+        ),
     )
     return parser.parse_args()
 

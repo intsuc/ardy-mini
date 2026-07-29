@@ -1,0 +1,822 @@
+{
+  "continuation_coverage": {
+    "decoded_world_translation_norm_max": 13.47151572571169,
+    "first_heading_abs_max": 3.1391735802242393,
+    "first_heading_abs_min": 0.0023743816457473406,
+    "generation_token_offsets_observed": [
+      0,
+      10
+    ],
+    "history_frames_observed": [
+      0,
+      40
+    ],
+    "nonzero_first_heading_count": 1920
+  },
+  "contract_validation": {
+    "candidate_graph_sha256": {
+      "decoder": "37085139b5572ed0536e9e231c1e7af023d7cd98e536495708258fa1642e9b1d",
+      "denoiser": "7fd49903ec65c0831e2fa692081fd64d8818c6d1f62320d2f2b5e71467a3ca64",
+      "text_encoder": "e378788c22ab6175a8e8e453bab3ad0c2062ee9feacce44468a1147c7ae80648"
+    },
+    "candidate_policy_version": 3,
+    "candidate_precision_format": "mixed-fp16",
+    "graph_conversion_modes": {
+      "decoder": "mixed-fp16",
+      "denoiser": "fp32-identity",
+      "text_encoder": "fp32-identity"
+    },
+    "graph_policy_ids": {
+      "decoder": "decoder-qk-norm-io-geometry-v3",
+      "denoiser": "denoiser-continuation-fp32-v3",
+      "text_encoder": "text-continuation-fp32-v3"
+    },
+    "identity_graphs_byte_identical": [
+      "denoiser",
+      "text_encoder"
+    ],
+    "non_precision_contract_equal": true,
+    "non_precision_contract_sha256": "de9d4af1716738279a49fd601d1100e5854b8979d551a20c5f29f51bb02bb6b0",
+    "reference_graph_sha256": {
+      "decoder": "1fcd909b2997002edca559ba016ab3accc5b2d5e5ba0c7e85a6ab54d2100a80f",
+      "denoiser": "7fd49903ec65c0831e2fa692081fd64d8818c6d1f62320d2f2b5e71467a3ca64",
+      "text_encoder": "e378788c22ab6175a8e8e453bab3ad0c2062ee9feacce44468a1147c7ae80648"
+    },
+    "tokenizer_payload_sha256": {
+      "tokenizer/tokenizer.json": "2fc687b11de0bc1b3d8348f92e3b49ef1089a621506c7661fbf3248fcd54947e",
+      "tokenizer/tokenizer_config.json": "872b6936be955bc3aea75ed599264d865626d68feede7e58b01e378e6332bd74"
+    },
+    "tokenizer_payloads_equal": true
+  },
+  "cpu_timing": {
+    "candidate_mean_seconds_per_case": 1.3131881899989821,
+    "candidate_total_seconds": 252.13213247980457,
+    "note": "CPU FP16 timing is diagnostic only; the deployment backend is WebGPU. Each case includes every consecutive window.",
+    "reference_mean_seconds_per_case": 1.2577322693202102,
+    "reference_total_seconds": 241.48459570948035,
+    "windows_per_case": 5
+  },
+  "method": {
+    "candidate": "mixed-FP16 ONNX Runtime CPU with graph optimizations disabled",
+    "case_count": 192,
+    "cfg_weight": 3.5,
+    "frames_per_case": 200,
+    "initial_heading": 0.35,
+    "initial_translation": [
+      1.25,
+      0.20000000298023224,
+      -0.75
+    ],
+    "noise_generator": "browser PortableRandom (Mulberry32 + Marsaglia polar)",
+    "prompt_count": 64,
+    "prompt_sha256": "d5236372be39787d93f5bdf3e1129372630538f24e31873bd43bce7a90861258",
+    "prompt_split": "test",
+    "reference": "FP32 ONNX Runtime CPU with graph optimizations disabled",
+    "rollout": "5 consecutive browser windows, 10-step deterministic DDIM per window, 40-frame history, recenter, FSQ requantize, heading, and accumulated world translation",
+    "seeds": [
+      12031,
+      987654,
+      20260729
+    ],
+    "window_count": 5
+  },
+  "motion_fidelity": {
+    "contact_agreement": {
+      "max": 1.0,
+      "mean": 0.99994140625,
+      "p95": 1.0
+    },
+    "contact_f1": 0.9999618108448715,
+    "contact_iou": 0.9999236246064546,
+    "global_rotation_error_degrees": {
+      "max": 0.10633338242769241,
+      "mean": 0.0793205366935581,
+      "p95": 0.09576009325683113
+    },
+    "heading_error_degrees": {
+      "max": 0.009634108282625675,
+      "mean": 0.006927070319458532,
+      "p95": 0.008295179344713688
+    },
+    "joint_velocity_error_mps": {
+      "max": 0.004994866321794689,
+      "mean": 0.003285620153595422,
+      "p95": 0.004245545671437866
+    },
+    "local_rotation_error_degrees": {
+      "max": 0.10311786085367203,
+      "mean": 0.07073767229060952,
+      "p95": 0.08359995521605015
+    },
+    "mpjpe_m": {
+      "max": 0.0004645706503652036,
+      "mean": 0.0002783119482501206,
+      "p95": 0.00035143343848176295
+    },
+    "normalized_motion_cosine": {
+      "max": 0.9999993656706898,
+      "mean": 0.9999955214179544,
+      "p95": 0.9999974631255135
+    },
+    "normalized_motion_rmse": {
+      "max": 0.007762995082885027,
+      "mean": 0.0028462169830163475,
+      "p95": 0.0040114534785971045
+    },
+    "root_ade_m": {
+      "max": 0.0,
+      "mean": 0.0,
+      "p95": 0.0
+    },
+    "root_aligned_mpjpe_m": {
+      "max": 0.00046457070857286453,
+      "mean": 0.00027831194627954875,
+      "p95": 0.00035143348650308316
+    },
+    "root_fde_m": {
+      "max": 0.0,
+      "mean": 0.0,
+      "p95": 0.0
+    }
+  },
+  "motion_fidelity_by_window": [
+    {
+      "generation_token_offset": 0,
+      "history_frames": 0,
+      "motion_fidelity": {
+        "contact_agreement": {
+          "max": 1.0,
+          "mean": 0.99990234375,
+          "p95": 1.0
+        },
+        "contact_f1": 0.9999348831151917,
+        "contact_iou": 0.9998697747102487,
+        "global_rotation_error_degrees": {
+          "max": 0.22089220583438873,
+          "mean": 0.08430679115311553,
+          "p95": 0.10707916505634785
+        },
+        "heading_error_degrees": {
+          "max": 0.014787049032747746,
+          "mean": 0.006962207802037786,
+          "p95": 0.009560265485197304
+        },
+        "joint_velocity_error_mps": {
+          "max": 0.012825013836845756,
+          "mean": 0.003457813329532655,
+          "p95": 0.004546912285150028
+        },
+        "local_rotation_error_degrees": {
+          "max": 0.10828008502721786,
+          "mean": 0.07505845241636659,
+          "p95": 0.09202131181955335
+        },
+        "mpjpe_m": {
+          "max": 0.0006709671579301357,
+          "mean": 0.0002992407344966826,
+          "p95": 0.0003883922559907658
+        },
+        "normalized_motion_cosine": {
+          "max": 0.9999994833727835,
+          "mean": 0.99999491368414,
+          "p95": 0.9999978631830293
+        },
+        "normalized_motion_rmse": {
+          "max": 0.016719764098525047,
+          "mean": 0.0030284183121693786,
+          "p95": 0.0043522547697648385
+        },
+        "root_ade_m": {
+          "max": 0.0,
+          "mean": 0.0,
+          "p95": 0.0
+        },
+        "root_aligned_mpjpe_m": {
+          "max": 0.0006709670997224748,
+          "mean": 0.0002992407169131184,
+          "p95": 0.00038839190528960877
+        },
+        "root_fde_m": {
+          "max": 0.0,
+          "mean": 0.0,
+          "p95": 0.0
+        }
+      },
+      "window_index": 0
+    },
+    {
+      "generation_token_offset": 10,
+      "history_frames": 40,
+      "motion_fidelity": {
+        "contact_agreement": {
+          "max": 1.0,
+          "mean": 0.9999674479166667,
+          "p95": 1.0
+        },
+        "contact_f1": 0.9999788489604264,
+        "contact_iou": 0.9999576988155668,
+        "global_rotation_error_degrees": {
+          "max": 0.13706396520137787,
+          "mean": 0.07906406700688724,
+          "p95": 0.09694453105330465
+        },
+        "heading_error_degrees": {
+          "max": 0.011482329107820988,
+          "mean": 0.007055350721202558,
+          "p95": 0.009866137057542801
+        },
+        "joint_velocity_error_mps": {
+          "max": 0.006109386449679732,
+          "mean": 0.0032645988017065974,
+          "p95": 0.004298658794141373
+        },
+        "local_rotation_error_degrees": {
+          "max": 0.11955346167087555,
+          "mean": 0.07069319343039145,
+          "p95": 0.0842582233250141
+        },
+        "mpjpe_m": {
+          "max": 0.000547628675121814,
+          "mean": 0.000279229533968343,
+          "p95": 0.0003834437215118669
+        },
+        "normalized_motion_cosine": {
+          "max": 0.9999992994538718,
+          "mean": 0.9999957508682845,
+          "p95": 0.9999975754914062
+        },
+        "normalized_motion_rmse": {
+          "max": 0.008283191360533237,
+          "mean": 0.0028132162745653964,
+          "p95": 0.00346180071355775
+        },
+        "root_ade_m": {
+          "max": 0.0,
+          "mean": 0.0,
+          "p95": 0.0
+        },
+        "root_aligned_mpjpe_m": {
+          "max": 0.0005476287333294749,
+          "mean": 0.0002792295467012688,
+          "p95": 0.00038344348431564864
+        },
+        "root_fde_m": {
+          "max": 0.0,
+          "mean": 0.0,
+          "p95": 0.0
+        }
+      },
+      "window_index": 1
+    },
+    {
+      "generation_token_offset": 10,
+      "history_frames": 40,
+      "motion_fidelity": {
+        "contact_agreement": {
+          "max": 1.0,
+          "mean": 0.9999348958333334,
+          "p95": 1.0
+        },
+        "contact_f1": 0.9999588324893993,
+        "contact_iou": 0.9999176683681871,
+        "global_rotation_error_degrees": {
+          "max": 0.12123407423496246,
+          "mean": 0.07454391871578991,
+          "p95": 0.0942016791552305
+        },
+        "heading_error_degrees": {
+          "max": 0.012953488156199455,
+          "mean": 0.00685395621136801,
+          "p95": 0.010051052551716563
+        },
+        "joint_velocity_error_mps": {
+          "max": 0.005746542010456324,
+          "mean": 0.0029652431726390205,
+          "p95": 0.004224736214382574
+        },
+        "local_rotation_error_degrees": {
+          "max": 0.1030285432934761,
+          "mean": 0.06583464611321688,
+          "p95": 0.0811836838722229
+        },
+        "mpjpe_m": {
+          "max": 0.000494276755489409,
+          "mean": 0.0002534446076272919,
+          "p95": 0.0003468915005214512
+        },
+        "normalized_motion_cosine": {
+          "max": 0.9999995555769668,
+          "mean": 0.9999956876492408,
+          "p95": 0.9999976313770822
+        },
+        "normalized_motion_rmse": {
+          "max": 0.006996145471930504,
+          "mean": 0.0026064822959597223,
+          "p95": 0.0033925716183148325
+        },
+        "root_ade_m": {
+          "max": 0.0,
+          "mean": 0.0,
+          "p95": 0.0
+        },
+        "root_aligned_mpjpe_m": {
+          "max": 0.0004942768136970699,
+          "mean": 0.0002534445998207957,
+          "p95": 0.0003468914990662597
+        },
+        "root_fde_m": {
+          "max": 0.0,
+          "mean": 0.0,
+          "p95": 0.0
+        }
+      },
+      "window_index": 2
+    },
+    {
+      "generation_token_offset": 10,
+      "history_frames": 40,
+      "motion_fidelity": {
+        "contact_agreement": {
+          "max": 1.0,
+          "mean": 1.0,
+          "p95": 1.0
+        },
+        "contact_f1": 1.0,
+        "contact_iou": 1.0,
+        "global_rotation_error_degrees": {
+          "max": 0.13086974620819092,
+          "mean": 0.08037874826307718,
+          "p95": 0.10489813536405562
+        },
+        "heading_error_degrees": {
+          "max": 0.011240286752581596,
+          "mean": 0.006751634683193212,
+          "p95": 0.009274022700265049
+        },
+        "joint_velocity_error_mps": {
+          "max": 0.005452465848065913,
+          "mean": 0.0032821617999919304,
+          "p95": 0.004517529639997519
+        },
+        "local_rotation_error_degrees": {
+          "max": 0.10512641817331314,
+          "mean": 0.07147477305261418,
+          "p95": 0.0868205662816763
+        },
+        "mpjpe_m": {
+          "max": 0.000451371306553483,
+          "mean": 0.0002808602693373056,
+          "p95": 0.0003602677097660489
+        },
+        "normalized_motion_cosine": {
+          "max": 0.9999993769687232,
+          "mean": 0.9999957569872754,
+          "p95": 0.9999977392642546
+        },
+        "normalized_motion_rmse": {
+          "max": 0.0057920957915484905,
+          "mean": 0.0028350213021136974,
+          "p95": 0.004056242434307932
+        },
+        "root_ade_m": {
+          "max": 0.0,
+          "mean": 0.0,
+          "p95": 0.0
+        },
+        "root_aligned_mpjpe_m": {
+          "max": 0.0004513714520726353,
+          "mean": 0.00028086028025124204,
+          "p95": 0.0003602677097660489
+        },
+        "root_fde_m": {
+          "max": 0.0,
+          "mean": 0.0,
+          "p95": 0.0
+        }
+      },
+      "window_index": 3
+    },
+    {
+      "generation_token_offset": 10,
+      "history_frames": 40,
+      "motion_fidelity": {
+        "contact_agreement": {
+          "max": 1.0,
+          "mean": 0.99990234375,
+          "p95": 1.0
+        },
+        "contact_f1": 0.9999361090405707,
+        "contact_iou": 0.9998722262447294,
+        "global_rotation_error_degrees": {
+          "max": 0.13196493685245514,
+          "mean": 0.07830915943486616,
+          "p95": 0.10016722418367863
+        },
+        "heading_error_degrees": {
+          "max": 0.01178419217467308,
+          "mean": 0.007012202449307854,
+          "p95": 0.010180456470698117
+        },
+        "joint_velocity_error_mps": {
+          "max": 0.007651040214113891,
+          "mean": 0.00321598158886142,
+          "p95": 0.004017589701106772
+        },
+        "local_rotation_error_degrees": {
+          "max": 0.12314102053642273,
+          "mean": 0.07062729828370114,
+          "p95": 0.08481712378561497
+        },
+        "mpjpe_m": {
+          "max": 0.0005989585188217461,
+          "mean": 0.00027878459074296796,
+          "p95": 0.000361915938265156
+        },
+        "normalized_motion_cosine": {
+          "max": 0.9999994647153758,
+          "mean": 0.9999959380571123,
+          "p95": 0.9999976395486461
+        },
+        "normalized_motion_rmse": {
+          "max": 0.007323876488953829,
+          "mean": 0.002768729370776176,
+          "p95": 0.0035224454011768096
+        },
+        "root_ade_m": {
+          "max": 0.0,
+          "mean": 0.0,
+          "p95": 0.0
+        },
+        "root_aligned_mpjpe_m": {
+          "max": 0.0005989585188217461,
+          "mean": 0.0002787845870291979,
+          "p95": 0.0003619158567744307
+        },
+        "root_fde_m": {
+          "max": 0.0,
+          "mean": 0.0,
+          "p95": 0.0
+        }
+      },
+      "window_index": 4
+    }
+  ],
+  "packs": {
+    "candidate": {
+      "file": "ardy-minilm-core40-browser-v1.tar.gz",
+      "sha256": "145995ff6216076d2ee06d7a62a741c6d9a02434278d645a0446cd357aa95868",
+      "size_bytes": 684835577
+    },
+    "reference": {
+      "file": "ardy-minilm-core40-browser-v1-fp32-reference.tar.gz",
+      "sha256": "4962bc2c3b7135e8181de1229fc816924ebcd60e3d5ff1d9f5cc02b8505e8663",
+      "size_bytes": 718137762
+    },
+    "saved_bytes": 33302185,
+    "saved_fraction": 0.0463729757188287
+  },
+  "schema_version": 2,
+  "text_conditions": {
+    "cosine_mean": 1.0,
+    "cosine_min": 0.9999998807907104,
+    "mae": 0.0,
+    "max_abs": 0.0,
+    "rmse": 0.0
+  },
+  "worst_cases": {
+    "accumulated": {
+      "contact_agreement": {
+        "paired_seed": 8987678,
+        "prompt": "figure crouching and moving backwards diagonally to the left",
+        "prompt_index": 8,
+        "scope": "accumulated",
+        "seed": 987654,
+        "value": 0.99875,
+        "window_count": 5,
+        "window_index": 4
+      },
+      "global_rotation_error_degrees": {
+        "paired_seed": 27012112,
+        "prompt": "person leaps over a 2-meter tall obstacle in a single fluid motion",
+        "prompt_index": 27,
+        "scope": "accumulated",
+        "seed": 12031,
+        "value": 0.10633338242769241,
+        "window_count": 5,
+        "window_index": 4
+      },
+      "heading_error_degrees": {
+        "paired_seed": 56260837,
+        "prompt": "picks up medium big light object with two hands from low right side and puts it away to the right side medium",
+        "prompt_index": 36,
+        "scope": "accumulated",
+        "seed": 20260729,
+        "value": 0.009634108282625675,
+        "window_count": 5,
+        "window_index": 4
+      },
+      "joint_velocity_error_mps": {
+        "paired_seed": 17012082,
+        "prompt": "person fans someone using hand fan",
+        "prompt_index": 17,
+        "scope": "accumulated",
+        "seed": 12031,
+        "value": 0.004994866321794689,
+        "window_count": 5,
+        "window_index": 4
+      },
+      "local_rotation_error_degrees": {
+        "paired_seed": 39260786,
+        "prompt": "stop doing a handstand as you turn to the left",
+        "prompt_index": 19,
+        "scope": "accumulated",
+        "seed": 20260729,
+        "value": 0.10311786085367203,
+        "window_count": 5,
+        "window_index": 4
+      },
+      "mpjpe_m": {
+        "paired_seed": 19987711,
+        "prompt": "stop doing a handstand as you turn to the left",
+        "prompt_index": 19,
+        "scope": "accumulated",
+        "seed": 987654,
+        "value": 0.0004645706503652036,
+        "window_count": 5,
+        "window_index": 4
+      },
+      "normalized_motion_cosine": {
+        "paired_seed": 43012160,
+        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
+        "prompt_index": 43,
+        "scope": "accumulated",
+        "seed": 12031,
+        "value": 0.9999482552481354,
+        "window_count": 5,
+        "window_index": 4
+      },
+      "normalized_motion_rmse": {
+        "paired_seed": 43012160,
+        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
+        "prompt_index": 43,
+        "scope": "accumulated",
+        "seed": 12031,
+        "value": 0.007762995082885027,
+        "window_count": 5,
+        "window_index": 4
+      },
+      "root_ade_m": {
+        "paired_seed": 12031,
+        "prompt": "A person walks forward and dodges to both sides to avoid bumping into someone, then continues walking.",
+        "prompt_index": 0,
+        "scope": "accumulated",
+        "seed": 12031,
+        "value": 0.0,
+        "window_count": 5,
+        "window_index": 4
+      },
+      "root_aligned_mpjpe_m": {
+        "paired_seed": 19987711,
+        "prompt": "stop doing a handstand as you turn to the left",
+        "prompt_index": 19,
+        "scope": "accumulated",
+        "seed": 987654,
+        "value": 0.00046457070857286453,
+        "window_count": 5,
+        "window_index": 4
+      },
+      "root_fde_m": {
+        "paired_seed": 12031,
+        "prompt": "A person walks forward and dodges to both sides to avoid bumping into someone, then continues walking.",
+        "prompt_index": 0,
+        "scope": "accumulated",
+        "seed": 12031,
+        "value": 0.0,
+        "window_count": 5,
+        "window_index": 4
+      }
+    },
+    "per_window": {
+      "contact_agreement": {
+        "candidate_first_heading_angle": 0.35,
+        "candidate_world_translation": [
+          1.4391669034957886,
+          0.20000000298023224,
+          -0.6651365756988525
+        ],
+        "paired_seed": 15012076,
+        "prompt": "step with crossing of feet and throw of the free leg in direction of movement, 120 bpm",
+        "prompt_index": 15,
+        "reference_first_heading_angle": 0.35,
+        "reference_world_translation": [
+          1.4391669034957886,
+          0.20000000298023224,
+          -0.6651365756988525
+        ],
+        "seed": 12031,
+        "value": 0.99375,
+        "window_index": 0
+      },
+      "global_rotation_error_degrees": {
+        "candidate_first_heading_angle": 0.35,
+        "candidate_world_translation": [
+          1.2460267543792725,
+          0.20000000298023224,
+          -0.7494738101959229
+        ],
+        "paired_seed": 43012160,
+        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
+        "prompt_index": 43,
+        "reference_first_heading_angle": 0.35,
+        "reference_world_translation": [
+          1.2460267543792725,
+          0.20000000298023224,
+          -0.7494738101959229
+        ],
+        "seed": 12031,
+        "value": 0.22089220583438873,
+        "window_index": 0
+      },
+      "heading_error_degrees": {
+        "candidate_first_heading_angle": 0.35,
+        "candidate_world_translation": [
+          1.2442917823791504,
+          0.20000000298023224,
+          -0.9189022183418274
+        ],
+        "paired_seed": 38260783,
+        "prompt": "person discovers a lost item",
+        "prompt_index": 18,
+        "reference_first_heading_angle": 0.35,
+        "reference_world_translation": [
+          1.2442917823791504,
+          0.20000000298023224,
+          -0.9189022183418274
+        ],
+        "seed": 20260729,
+        "value": 0.014787049032747746,
+        "window_index": 0
+      },
+      "joint_velocity_error_mps": {
+        "candidate_first_heading_angle": 0.35,
+        "candidate_world_translation": [
+          1.2460267543792725,
+          0.20000000298023224,
+          -0.7494738101959229
+        ],
+        "paired_seed": 43012160,
+        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
+        "prompt_index": 43,
+        "reference_first_heading_angle": 0.35,
+        "reference_world_translation": [
+          1.2460267543792725,
+          0.20000000298023224,
+          -0.7494738101959229
+        ],
+        "seed": 12031,
+        "value": 0.012825013836845756,
+        "window_index": 0
+      },
+      "local_rotation_error_degrees": {
+        "candidate_first_heading_angle": 0.39548301363159677,
+        "candidate_world_translation": [
+          4.59614896774292,
+          0.20000000298023224,
+          5.996219635009766
+        ],
+        "paired_seed": 27012112,
+        "prompt": "person leaps over a 2-meter tall obstacle in a single fluid motion",
+        "prompt_index": 27,
+        "reference_first_heading_angle": 0.39548301363159677,
+        "reference_world_translation": [
+          4.59614896774292,
+          0.20000000298023224,
+          5.996219635009766
+        ],
+        "seed": 12031,
+        "value": 0.12314102053642273,
+        "window_index": 4
+      },
+      "mpjpe_m": {
+        "candidate_first_heading_angle": 0.35,
+        "candidate_world_translation": [
+          1.2460267543792725,
+          0.20000000298023224,
+          -0.7494738101959229
+        ],
+        "paired_seed": 43012160,
+        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
+        "prompt_index": 43,
+        "reference_first_heading_angle": 0.35,
+        "reference_world_translation": [
+          1.2460267543792725,
+          0.20000000298023224,
+          -0.7494738101959229
+        ],
+        "seed": 12031,
+        "value": 0.0006709671579301357,
+        "window_index": 0
+      },
+      "normalized_motion_cosine": {
+        "candidate_first_heading_angle": 0.35,
+        "candidate_world_translation": [
+          1.2460267543792725,
+          0.20000000298023224,
+          -0.7494738101959229
+        ],
+        "paired_seed": 43012160,
+        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
+        "prompt_index": 43,
+        "reference_first_heading_angle": 0.35,
+        "reference_world_translation": [
+          1.2460267543792725,
+          0.20000000298023224,
+          -0.7494738101959229
+        ],
+        "seed": 12031,
+        "value": 0.9997957750089619,
+        "window_index": 0
+      },
+      "normalized_motion_rmse": {
+        "candidate_first_heading_angle": 0.35,
+        "candidate_world_translation": [
+          1.2460267543792725,
+          0.20000000298023224,
+          -0.7494738101959229
+        ],
+        "paired_seed": 43012160,
+        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
+        "prompt_index": 43,
+        "reference_first_heading_angle": 0.35,
+        "reference_world_translation": [
+          1.2460267543792725,
+          0.20000000298023224,
+          -0.7494738101959229
+        ],
+        "seed": 12031,
+        "value": 0.016719764098525047,
+        "window_index": 0
+      },
+      "root_ade_m": {
+        "candidate_first_heading_angle": 0.35,
+        "candidate_world_translation": [
+          1.9300754070281982,
+          0.20000000298023224,
+          1.0900776386260986
+        ],
+        "paired_seed": 12031,
+        "prompt": "A person walks forward and dodges to both sides to avoid bumping into someone, then continues walking.",
+        "prompt_index": 0,
+        "reference_first_heading_angle": 0.35,
+        "reference_world_translation": [
+          1.9300754070281982,
+          0.20000000298023224,
+          1.0900776386260986
+        ],
+        "seed": 12031,
+        "value": 0.0,
+        "window_index": 0
+      },
+      "root_aligned_mpjpe_m": {
+        "candidate_first_heading_angle": 0.35,
+        "candidate_world_translation": [
+          1.2460267543792725,
+          0.20000000298023224,
+          -0.7494738101959229
+        ],
+        "paired_seed": 43012160,
+        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
+        "prompt_index": 43,
+        "reference_first_heading_angle": 0.35,
+        "reference_world_translation": [
+          1.2460267543792725,
+          0.20000000298023224,
+          -0.7494738101959229
+        ],
+        "seed": 12031,
+        "value": 0.0006709670997224748,
+        "window_index": 0
+      },
+      "root_fde_m": {
+        "candidate_first_heading_angle": 0.35,
+        "candidate_world_translation": [
+          1.9300754070281982,
+          0.20000000298023224,
+          1.0900776386260986
+        ],
+        "paired_seed": 12031,
+        "prompt": "A person walks forward and dodges to both sides to avoid bumping into someone, then continues walking.",
+        "prompt_index": 0,
+        "reference_first_heading_angle": 0.35,
+        "reference_world_translation": [
+          1.9300754070281982,
+          0.20000000298023224,
+          1.0900776386260986
+        ],
+        "seed": 12031,
+        "value": 0.0,
+        "window_index": 0
+      }
+    }
+  }
+}

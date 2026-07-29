@@ -4,6 +4,10 @@
 export const MODEL_PACK_FORMAT = "ardy-browser-model-pack";
 export const MODEL_PACK_SCHEMA_VERSION = 2;
 export const MODEL_PACK_MANIFEST_FILE = "manifest.json";
+export const MIXED_PRECISION_FORMAT = "mixed-fp16";
+export const MIXED_PRECISION_POLICY_VERSION = 3;
+export const MIXED_PRECISION_PUBLIC_IO_DTYPE = "float32";
+export const REQUIRED_WEBGPU_FEATURE = "shader-f16";
 
 export type Sha256Hex = string;
 
@@ -79,6 +83,27 @@ export interface BrowserGraphSpecs {
   denoiser: GraphSpec<DenoiserInputs, DenoiserOutputs>;
   decoder: GraphSpec<DecoderInputs, DecoderOutputs>;
 }
+
+export const GRAPH_PRECISION_CONTRACT = {
+  text_encoder: {
+    policy_id: "text-continuation-fp32-v3",
+    conversion_mode: "fp32-identity",
+  },
+  denoiser: {
+    policy_id: "denoiser-continuation-fp32-v3",
+    conversion_mode: "fp32-identity",
+  },
+  decoder: {
+    policy_id: "decoder-qk-norm-io-geometry-v3",
+    conversion_mode: "mixed-fp16",
+  },
+} as const satisfies Record<
+  keyof BrowserGraphSpecs,
+  {
+    policy_id: string;
+    conversion_mode: "mixed-fp16" | "fp32-identity";
+  }
+>;
 
 export interface BrowserDimensions {
   fps: number;
@@ -171,11 +196,65 @@ export interface BrowserStats {
 
 export type BrowserMotionLayout = Record<string, [number, number]>;
 
+export type BrowserRequiredWebGpuFeatures = [
+  typeof REQUIRED_WEBGPU_FEATURE,
+];
+
+export interface BrowserPrecisionToolchain {
+  torch: string;
+  onnx: string;
+  onnxruntime: string;
+}
+
+export interface BrowserInitializerPrecisionStats {
+  count_by_dtype: Record<string, number>;
+  bytes_by_dtype: Record<string, number>;
+  total_count: number;
+  total_bytes: number;
+}
+
+export interface BrowserGraphPrecisionSummary<
+  GraphName extends keyof BrowserGraphSpecs = keyof BrowserGraphSpecs,
+> {
+  schema_version: 1;
+  graph_name: GraphName;
+  policy_id: (typeof GRAPH_PRECISION_CONTRACT)[GraphName]["policy_id"];
+  conversion_mode: (typeof GRAPH_PRECISION_CONTRACT)[GraphName]["conversion_mode"];
+  source_sha256: Sha256Hex;
+  output_sha256: Sha256Hex;
+  source_size_bytes: number;
+  output_size_bytes: number;
+  size_reduction_bytes: number;
+  size_reduction_fraction: number;
+  source_initializers: BrowserInitializerPrecisionStats;
+  output_initializers: BrowserInitializerPrecisionStats;
+}
+
+export interface BrowserPrecisionGraphSummaries {
+  text_encoder: BrowserGraphPrecisionSummary<"text_encoder">;
+  denoiser: BrowserGraphPrecisionSummary<"denoiser">;
+  decoder: BrowserGraphPrecisionSummary<"decoder">;
+}
+
+export interface BrowserMixedPrecision {
+  format: typeof MIXED_PRECISION_FORMAT;
+  policy_version: typeof MIXED_PRECISION_POLICY_VERSION;
+  public_io_dtype: typeof MIXED_PRECISION_PUBLIC_IO_DTYPE;
+  required_webgpu_features: BrowserRequiredWebGpuFeatures;
+  source_onnx_bytes: number;
+  mixed_onnx_bytes: number;
+  saved_onnx_bytes: number;
+  saved_onnx_fraction: number;
+  toolchain: BrowserPrecisionToolchain;
+  graphs: BrowserPrecisionGraphSummaries;
+}
+
 export interface BrowserRuntimeCapabilities {
   onnx_opset?: number;
   contract_revision: 3;
   batch_size?: number;
   text_only: true;
+  required_webgpu_features: BrowserRequiredWebGpuFeatures;
   detailed_motion_outputs?: boolean;
   motion_correction_included?: boolean;
   global_translation_y_must_be_zero?: boolean;
@@ -198,6 +277,7 @@ export interface BrowserModelPackManifest {
   files: Record<string, ManifestFile>;
   tokenizer: BrowserTokenizerSpec;
   graphs: BrowserGraphSpecs;
+  precision: BrowserMixedPrecision;
   dimensions: BrowserDimensions;
   generation: BrowserGenerationConfig;
   diffusion: BrowserDiffusionSchedule;
@@ -220,6 +300,12 @@ export class ManifestValidationError extends Error {
 }
 
 const SHA256_RE = /^[0-9a-f]{64}$/;
+const EXPECTED_GRAPH_NAMES = [
+  "text_encoder",
+  "denoiser",
+  "decoder",
+] as const satisfies ReadonlyArray<keyof BrowserGraphSpecs>;
+const FRACTION_TOLERANCE = 1e-9;
 
 function fail(message: string): never {
   throw new ManifestValidationError(message);
@@ -268,6 +354,50 @@ function nonNegativeIntegerAt(value: unknown, path: string): number {
     fail(`${path} must be a non-negative safe integer`);
   }
   return number;
+}
+
+function fractionAt(value: unknown, path: string): number {
+  const number = finiteAt(value, path);
+  if (number < 0 || number > 1) {
+    fail(`${path} must be between 0 and 1`);
+  }
+  return number;
+}
+
+function validateFraction(
+  actual: number,
+  numerator: number,
+  denominator: number,
+  path: string,
+): void {
+  const expected = numerator / denominator;
+  if (Math.abs(actual - expected) > FRACTION_TOLERANCE) {
+    fail(`${path} does not match the declared byte reduction`);
+  }
+}
+
+function validateRequiredWebGpuFeatures(
+  value: unknown,
+  path: string,
+): BrowserRequiredWebGpuFeatures {
+  if (!Array.isArray(value)) {
+    fail(`${path} must be an array`);
+  }
+  const seen = new Set<string>();
+  for (const [index, rawFeature] of value.entries()) {
+    const feature = stringAt(rawFeature, `${path}[${index}]`);
+    if (seen.has(feature)) {
+      fail(`${path} must not contain duplicate feature ${JSON.stringify(feature)}`);
+    }
+    seen.add(feature);
+    if (feature !== REQUIRED_WEBGPU_FEATURE) {
+      fail(`${path} contains unknown WebGPU feature ${JSON.stringify(feature)}`);
+    }
+  }
+  if (!seen.has(REQUIRED_WEBGPU_FEATURE)) {
+    fail(`${path} must contain ${JSON.stringify(REQUIRED_WEBGPU_FEATURE)}`);
+  }
+  return value as BrowserRequiredWebGpuFeatures;
 }
 
 function rejectLegacyFields(
@@ -403,6 +533,341 @@ function validateManifestFiles(value: unknown): Set<string> {
     }
   }
   return normalizedPaths;
+}
+
+function validateSha256(value: unknown, path: string): Sha256Hex {
+  const sha256 = stringAt(value, path);
+  if (!SHA256_RE.test(sha256)) {
+    fail(`${path} must be a lowercase SHA-256 hex digest`);
+  }
+  return sha256;
+}
+
+function validateInitializerPrecisionStats(
+  value: unknown,
+  path: string,
+): BrowserInitializerPrecisionStats {
+  const stats = objectAt(value, path);
+  const countByDtype = objectAt(
+    stats.count_by_dtype,
+    `${path}.count_by_dtype`,
+  );
+  const bytesByDtype = objectAt(
+    stats.bytes_by_dtype,
+    `${path}.bytes_by_dtype`,
+  );
+  const countDtypes = Object.keys(countByDtype);
+  const byteDtypes = Object.keys(bytesByDtype);
+  if (
+    countDtypes.length !== byteDtypes.length ||
+    countDtypes.some((dtype) => !Object.hasOwn(bytesByDtype, dtype))
+  ) {
+    fail(`${path} dtype keys must match between count_by_dtype and bytes_by_dtype`);
+  }
+
+  let initializerCount = 0;
+  let initializerBytes = 0;
+  for (const dtype of countDtypes) {
+    if (dtype.trim().length === 0) {
+      fail(`${path}.count_by_dtype must not contain an empty dtype`);
+    }
+    initializerCount += positiveIntegerAt(
+      countByDtype[dtype],
+      `${path}.count_by_dtype.${dtype}`,
+    );
+    initializerBytes += nonNegativeIntegerAt(
+      bytesByDtype[dtype],
+      `${path}.bytes_by_dtype.${dtype}`,
+    );
+    if (
+      !Number.isSafeInteger(initializerCount) ||
+      !Number.isSafeInteger(initializerBytes)
+    ) {
+      fail(`${path} totals must be safe integers`);
+    }
+  }
+
+  const totalCount = nonNegativeIntegerAt(
+    stats.total_count,
+    `${path}.total_count`,
+  );
+  const totalBytes = nonNegativeIntegerAt(
+    stats.total_bytes,
+    `${path}.total_bytes`,
+  );
+  if (initializerCount !== totalCount) {
+    fail(`${path}.total_count must equal the sum of count_by_dtype`);
+  }
+  if (initializerBytes !== totalBytes) {
+    fail(`${path}.total_bytes must equal the sum of bytes_by_dtype`);
+  }
+  return stats as unknown as BrowserInitializerPrecisionStats;
+}
+
+function rejectInitializerDtype(
+  stats: BrowserInitializerPrecisionStats,
+  dtype: string,
+  path: string,
+): void {
+  if (
+    (stats.count_by_dtype[dtype] ?? 0) !== 0 ||
+    (stats.bytes_by_dtype[dtype] ?? 0) !== 0
+  ) {
+    fail(`${path} must not contain ${dtype} initializers`);
+  }
+}
+
+function initializerStatsEqual(
+  left: BrowserInitializerPrecisionStats,
+  right: BrowserInitializerPrecisionStats,
+): boolean {
+  if (
+    left.total_count !== right.total_count ||
+    left.total_bytes !== right.total_bytes
+  ) {
+    return false;
+  }
+  for (const field of ["count_by_dtype", "bytes_by_dtype"] as const) {
+    const leftEntries = Object.entries(left[field]).sort(([a], [b]) =>
+      a.localeCompare(b),
+    );
+    const rightEntries = Object.entries(right[field]).sort(([a], [b]) =>
+      a.localeCompare(b),
+    );
+    if (
+      leftEntries.length !== rightEntries.length ||
+      leftEntries.some(
+        ([dtype, amount], index) =>
+          dtype !== rightEntries[index]?.[0] ||
+          amount !== rightEntries[index]?.[1],
+      )
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function validateMixedPrecision(
+  value: unknown,
+  graphsValue: unknown,
+  filesValue: unknown,
+): BrowserMixedPrecision {
+  const precision = objectAt(value, "precision");
+  if (precision.format !== MIXED_PRECISION_FORMAT) {
+    fail(`precision.format must be ${JSON.stringify(MIXED_PRECISION_FORMAT)}`);
+  }
+  if (precision.policy_version !== MIXED_PRECISION_POLICY_VERSION) {
+    fail(`precision.policy_version must be ${MIXED_PRECISION_POLICY_VERSION}`);
+  }
+  if (precision.public_io_dtype !== MIXED_PRECISION_PUBLIC_IO_DTYPE) {
+    fail(
+      `precision.public_io_dtype must be ${JSON.stringify(MIXED_PRECISION_PUBLIC_IO_DTYPE)}`,
+    );
+  }
+  validateRequiredWebGpuFeatures(
+    precision.required_webgpu_features,
+    "precision.required_webgpu_features",
+  );
+
+  const toolchain = objectAt(precision.toolchain, "precision.toolchain");
+  for (const name of ["torch", "onnx", "onnxruntime"] as const) {
+    stringAt(toolchain[name], `precision.toolchain.${name}`);
+  }
+
+  const sourceBytes = positiveIntegerAt(
+    precision.source_onnx_bytes,
+    "precision.source_onnx_bytes",
+  );
+  const mixedBytes = positiveIntegerAt(
+    precision.mixed_onnx_bytes,
+    "precision.mixed_onnx_bytes",
+  );
+  const savedBytes = nonNegativeIntegerAt(
+    precision.saved_onnx_bytes,
+    "precision.saved_onnx_bytes",
+  );
+  if (sourceBytes - mixedBytes !== savedBytes) {
+    fail(
+      "precision.saved_onnx_bytes must equal source_onnx_bytes - mixed_onnx_bytes",
+    );
+  }
+  const savedFraction = fractionAt(
+    precision.saved_onnx_fraction,
+    "precision.saved_onnx_fraction",
+  );
+  validateFraction(
+    savedFraction,
+    savedBytes,
+    sourceBytes,
+    "precision.saved_onnx_fraction",
+  );
+
+  const summaries = objectAt(precision.graphs, "precision.graphs");
+  const actualGraphNames = Object.keys(summaries);
+  if (
+    actualGraphNames.length !== EXPECTED_GRAPH_NAMES.length ||
+    EXPECTED_GRAPH_NAMES.some((name) => !Object.hasOwn(summaries, name))
+  ) {
+    fail(`precision.graphs must contain exactly ${EXPECTED_GRAPH_NAMES.join(", ")}`);
+  }
+
+  const graphs = objectAt(graphsValue, "graphs");
+  const files = objectAt(filesValue, "files");
+  let graphSourceBytes = 0;
+  let graphMixedBytes = 0;
+  let graphSavedBytes = 0;
+  for (const graphName of EXPECTED_GRAPH_NAMES) {
+    const path = `precision.graphs.${graphName}`;
+    const summary = objectAt(summaries[graphName], path);
+    if (summary.schema_version !== 1) {
+      fail(`${path}.schema_version must be 1`);
+    }
+    if (summary.graph_name !== graphName) {
+      fail(`${path}.graph_name must be ${JSON.stringify(graphName)}`);
+    }
+    const contract = GRAPH_PRECISION_CONTRACT[graphName];
+    if (summary.policy_id !== contract.policy_id) {
+      fail(`${path}.policy_id must be ${JSON.stringify(contract.policy_id)}`);
+    }
+    if (summary.conversion_mode !== contract.conversion_mode) {
+      fail(
+        `${path}.conversion_mode must be ${JSON.stringify(contract.conversion_mode)}`,
+      );
+    }
+    const sourceSha256 = validateSha256(
+      summary.source_sha256,
+      `${path}.source_sha256`,
+    );
+    const outputSha256 = validateSha256(
+      summary.output_sha256,
+      `${path}.output_sha256`,
+    );
+    const sourceInitializers = validateInitializerPrecisionStats(
+      summary.source_initializers,
+      `${path}.source_initializers`,
+    );
+    const outputInitializers = validateInitializerPrecisionStats(
+      summary.output_initializers,
+      `${path}.output_initializers`,
+    );
+    rejectInitializerDtype(
+      sourceInitializers,
+      "float16",
+      `${path}.source_initializers`,
+    );
+    rejectInitializerDtype(
+      sourceInitializers,
+      "bfloat16",
+      `${path}.source_initializers`,
+    );
+    rejectInitializerDtype(
+      outputInitializers,
+      "bfloat16",
+      `${path}.output_initializers`,
+    );
+
+    const sourceSize = positiveIntegerAt(
+      summary.source_size_bytes,
+      `${path}.source_size_bytes`,
+    );
+    const outputSize = positiveIntegerAt(
+      summary.output_size_bytes,
+      `${path}.output_size_bytes`,
+    );
+    const reductionSize = nonNegativeIntegerAt(
+      summary.size_reduction_bytes,
+      `${path}.size_reduction_bytes`,
+    );
+    if (sourceSize - outputSize !== reductionSize) {
+      fail(
+        `${path}.size_reduction_bytes must equal source_size_bytes - output_size_bytes`,
+      );
+    }
+    const reductionFraction = fractionAt(
+      summary.size_reduction_fraction,
+      `${path}.size_reduction_fraction`,
+    );
+    validateFraction(
+      reductionFraction,
+      reductionSize,
+      sourceSize,
+      `${path}.size_reduction_fraction`,
+    );
+
+    if (contract.conversion_mode === "fp32-identity") {
+      if (
+        sourceSize !== outputSize ||
+        reductionSize !== 0 ||
+        reductionFraction !== 0
+      ) {
+        fail(`${path} fp32-identity conversion must have zero byte reduction`);
+      }
+      if (sourceSha256 !== outputSha256) {
+        fail(`${path} fp32-identity source_sha256 must equal output_sha256`);
+      }
+      rejectInitializerDtype(
+        outputInitializers,
+        "float16",
+        `${path}.output_initializers`,
+      );
+      if (!initializerStatsEqual(sourceInitializers, outputInitializers)) {
+        fail(
+          `${path} fp32-identity source and output initializer statistics must match`,
+        );
+      }
+    } else {
+      if (reductionSize === 0) {
+        fail(`${path} mixed-fp16 conversion must reduce the ONNX byte size`);
+      }
+      if ((outputInitializers.count_by_dtype.float16 ?? 0) === 0) {
+        fail(`${path}.output_initializers must contain float16 initializers`);
+      }
+    }
+
+    const graph = objectAt(graphs[graphName], `graphs.${graphName}`);
+    const modelPath = normalizePackPath(
+      stringAt(graph.model, `graphs.${graphName}.model`),
+    );
+    const file = objectAt(files[modelPath], `files.${modelPath}`);
+    const declaredSize = nonNegativeIntegerAt(
+      file.size_bytes,
+      `files.${modelPath}.size_bytes`,
+    );
+    if (outputSize !== declaredSize) {
+      fail(`${path}.output_size_bytes must match files.${modelPath}.size_bytes`);
+    }
+    const declaredSha256 = validateSha256(
+      file.sha256,
+      `files.${modelPath}.sha256`,
+    );
+    if (outputSha256 !== declaredSha256) {
+      fail(`${path}.output_sha256 must match files.${modelPath}.sha256`);
+    }
+
+    graphSourceBytes += sourceSize;
+    graphMixedBytes += outputSize;
+    graphSavedBytes += reductionSize;
+    if (
+      !Number.isSafeInteger(graphSourceBytes) ||
+      !Number.isSafeInteger(graphMixedBytes) ||
+      !Number.isSafeInteger(graphSavedBytes)
+    ) {
+      fail("precision graph byte totals must be safe integers");
+    }
+  }
+
+  if (graphSourceBytes !== sourceBytes) {
+    fail("precision.source_onnx_bytes must equal the precision graph source total");
+  }
+  if (graphMixedBytes !== mixedBytes) {
+    fail("precision.mixed_onnx_bytes must equal the precision graph output total");
+  }
+  if (graphSavedBytes !== savedBytes) {
+    fail("precision.saved_onnx_bytes must equal the precision graph reduction total");
+  }
+
+  return precision as unknown as BrowserMixedPrecision;
 }
 
 function validateDimensions(value: unknown): BrowserDimensions {
@@ -565,14 +1030,13 @@ export function validateModelPackManifest(value: unknown): BrowserModelPackManif
   }
 
   const graphs = objectAt(manifest.graphs, "graphs");
-  const expectedGraphNames = ["text_encoder", "denoiser", "decoder"];
   const actualGraphNames = Object.keys(graphs);
   if (
-    actualGraphNames.length !== expectedGraphNames.length ||
-    expectedGraphNames.some((name) => !Object.hasOwn(graphs, name))
+    actualGraphNames.length !== EXPECTED_GRAPH_NAMES.length ||
+    EXPECTED_GRAPH_NAMES.some((name) => !Object.hasOwn(graphs, name))
   ) {
     fail(
-      `graphs must contain exactly ${expectedGraphNames.join(", ")}`,
+      `graphs must contain exactly ${EXPECTED_GRAPH_NAMES.join(", ")}`,
     );
   }
   const referencedFiles = new Set([
@@ -628,6 +1092,7 @@ export function validateModelPackManifest(value: unknown): BrowserModelPackManif
       fail(`files contains unreferenced asset ${JSON.stringify(file)}`);
     }
   }
+  validateMixedPrecision(manifest.precision, manifest.graphs, manifest.files);
 
   const dimensions = validateDimensions(manifest.dimensions);
   const generation = objectAt(manifest.generation, "generation");
@@ -847,6 +1312,10 @@ export function validateModelPackManifest(value: unknown): BrowserModelPackManif
   if (runtime.text_only !== true) {
     fail("runtime.text_only must be true");
   }
+  validateRequiredWebGpuFeatures(
+    runtime.required_webgpu_features,
+    "runtime.required_webgpu_features",
+  );
   for (const key of [
     "detailed_motion_outputs",
     "motion_correction_included",

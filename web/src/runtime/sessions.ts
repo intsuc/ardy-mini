@@ -3,9 +3,10 @@
 
 import * as ort from "onnxruntime-web/webgpu";
 
-import type {
-  BrowserGraphSpecs,
-  GraphSpec,
+import {
+  REQUIRED_WEBGPU_FEATURE,
+  type BrowserGraphSpecs,
+  type GraphSpec,
 } from "./manifest";
 import type { ModelPack } from "./model-pack";
 
@@ -24,13 +25,22 @@ export type SessionProgressCallback = (
 ) => void;
 
 interface WebGpuApi {
-  requestAdapter(): Promise<unknown | null>;
+  requestAdapter(): Promise<GPUAdapter | null>;
 }
 
-let webGpuReady = false;
+let webGpuAdapter: GPUAdapter | undefined;
+
+function configureOrtAdapter(adapter: GPUAdapter): void {
+  if (ort.env.webgpu.adapter !== adapter) {
+    ort.env.webgpu.adapter = adapter;
+  }
+}
 
 export async function assertWebGpuAvailable(): Promise<void> {
-  if (webGpuReady) return;
+  if (webGpuAdapter !== undefined) {
+    configureOrtAdapter(webGpuAdapter);
+    return;
+  }
   if (globalThis.isSecureContext === false) {
     throw new Error(
       "WebGPU requires HTTPS or localhost. Open this demo in a secure context and try again.",
@@ -44,7 +54,7 @@ export async function assertWebGpuAvailable(): Promise<void> {
       "WebGPU is required. Use a WebGPU-capable browser and device.",
     );
   }
-  let adapter: unknown | null;
+  let adapter: GPUAdapter | null;
   try {
     adapter = await navigatorWithGpu.gpu.requestAdapter();
   } catch (error) {
@@ -55,7 +65,13 @@ export async function assertWebGpuAvailable(): Promise<void> {
       "WebGPU is required, but no compatible GPU adapter is available.",
     );
   }
-  webGpuReady = true;
+  if (!adapter.features.has(REQUIRED_WEBGPU_FEATURE)) {
+    throw new Error(
+      `This model requires native WebGPU FP16 shader support (${REQUIRED_WEBGPU_FEATURE}), but the selected GPU adapter does not provide it.`,
+    );
+  }
+  webGpuAdapter = adapter;
+  configureOrtAdapter(adapter);
 }
 
 function runtimeAssetBaseUrl(): string {
@@ -83,20 +99,27 @@ async function createSession(
     Record<string, string | undefined>
   >,
 ): Promise<ort.InferenceSession> {
-  const [model, externalData] = await Promise.all([
-    pack.read(graph.model),
-    Promise.all(
-      (graph.external_data ?? []).map(async (spec) => ({
-        path: spec.path,
-        data: await pack.read(spec.file),
-      })),
-    ),
-  ]);
-  return ort.InferenceSession.create(model, {
-    executionProviders: ["webgpu"],
-    logSeverityLevel: 3,
-    ...(externalData.length === 0 ? {} : { externalData }),
-  });
+  try {
+    const [model, externalData] = await Promise.all([
+      pack.read(graph.model),
+      Promise.all(
+        (graph.external_data ?? []).map(async (spec) => ({
+          path: spec.path,
+          data: await pack.read(spec.file),
+        })),
+      ),
+    ]);
+    return await ort.InferenceSession.create(model, {
+      executionProviders: ["webgpu"],
+      logSeverityLevel: 3,
+      ...(externalData.length === 0 ? {} : { externalData }),
+    });
+  } finally {
+    pack.release(graph.model);
+    for (const external of graph.external_data ?? []) {
+      pack.release(external.file);
+    }
+  }
 }
 
 async function releaseSessions(sessions: ort.InferenceSession[]): Promise<void> {
@@ -111,15 +134,15 @@ async function createAll(
   const created: ort.InferenceSession[] = [];
   const total = 3;
   try {
-    const textEncoder = await createSession(pack, graphs.text_encoder);
-    created.push(textEncoder);
-    onProgress?.(1, total, "text_encoder.onnx");
-    const denoiser = await createSession(pack, graphs.denoiser);
-    created.push(denoiser);
-    onProgress?.(2, total, "denoiser.onnx");
     const decoder = await createSession(pack, graphs.decoder);
     created.push(decoder);
-    onProgress?.(total, total, "decoder.onnx");
+    onProgress?.(1, total, "decoder.onnx");
+    const textEncoder = await createSession(pack, graphs.text_encoder);
+    created.push(textEncoder);
+    onProgress?.(2, total, "text_encoder.onnx");
+    const denoiser = await createSession(pack, graphs.denoiser);
+    created.push(denoiser);
+    onProgress?.(total, total, "denoiser.onnx");
     return {
       textEncoder,
       denoiser,
@@ -131,31 +154,13 @@ async function createAll(
   }
 }
 
-function releaseGraphAssets(pack: ModelPack, graphs: BrowserGraphSpecs): void {
-  for (const graph of [
-    graphs.text_encoder,
-    graphs.denoiser,
-    graphs.decoder,
-  ]) {
-    pack.release(graph.model);
-    for (const external of graph.external_data ?? []) {
-      pack.release(external.file);
-    }
-  }
-}
-
 export async function createRuntimeSessions(
   pack: ModelPack,
   onProgress?: SessionProgressCallback,
 ): Promise<RuntimeSessions> {
   await assertWebGpuAvailable();
   configureOrt();
-  const graphs = pack.manifest.graphs;
-  try {
-    return await createAll(pack, graphs, onProgress);
-  } finally {
-    releaseGraphAssets(pack, graphs);
-  }
+  return createAll(pack, pack.manifest.graphs, onProgress);
 }
 
 export async function disposeRuntimeSessions(

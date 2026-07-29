@@ -72,11 +72,11 @@ trt = [
 browser = [
   # ONNX 1.19 uses ml-dtypes APIs unavailable in the NumPy<2-compatible
   # aarch64 wheel selected by this project.
-  "onnx>=1.18,<1.19",
-  "onnxconverter-common>=1.14,<2",
+  "onnx==1.18.0",
   # Match the browser runtime used for pack validation where its Python wheel
-  # is available; ORT 1.27 dropped Python 3.10.
-  "onnxruntime>=1.22,<1.27; python_version < '3.11'",
+  # is available; its transformer FP16 converter is also used by the exporter.
+  # ORT 1.27 dropped Python 3.10.
+  "onnxruntime==1.24.3; python_version < '3.11'",
   "onnxruntime==1.27.0; python_version >= '3.11'",
 ]
 all = [

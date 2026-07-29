@@ -15,6 +15,7 @@ import tempfile
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,11 @@ from ardy.model.minilm_encoder import (
 )
 from ardy.model.registry import resolve_model_name
 
+from .precision import (
+    MIXED_FP16_POLICY_VERSION,
+    MixedPrecisionReport,
+    convert_browser_onnx_to_mixed_fp16,
+)
 from .wrappers import (
     BrowserMiniLMEncoder,
     BrowserMotionDecoder,
@@ -52,6 +58,30 @@ _NUMERIC_ERROR_LIMITS = {
         "root_positions": 1e-3,
         "foot_contacts": 0.0,
         "global_root_heading": 1e-3,
+    },
+}
+_MIXED_PRECISION_LIMITS = {
+    "text_encoder": {
+        "text_conditions": {
+            "rmse": 2e-2,
+            "minimum_cosine_similarity": 0.9999,
+        },
+    },
+    "denoiser": {
+        "pred_x0": {
+            "rmse": 0.0,
+            "minimum_cosine_similarity": 1.0,
+            "require_exact": True,
+        },
+    },
+    "decoder": {
+        "normalized_motion": {"rmse": 6e-2},
+        "posed_joints": {"rmse": 2e-2},
+        "local_rotations": {"rmse": 8e-2},
+        "global_rotations": {"rmse": 8e-2},
+        "root_positions": {"rmse": 1e-6},
+        "foot_contacts": {"minimum_agreement": 1.0},
+        "global_root_heading": {"rmse": 1e-6},
     },
 }
 
@@ -326,52 +356,47 @@ def _make_text_dummy(tokenizer, max_length: int, device: torch.device):
 def _make_denoiser_dummy(
     model,
     max_tokens: int,
-    text_condition_dim: int,
+    text_conditions: torch.Tensor,
     device: torch.device,
 ) -> tuple[torch.Tensor, ...]:
     nfpt = int(model.num_frames_per_token)
     max_frames = max_tokens * nfpt
     generation_frames = int(model.gen_horizon_len)
     generation_tokens = generation_frames // nfpt
-    history_tokens = max_tokens - generation_tokens
-    history_frames = history_tokens * nfpt
+    history_frames = 0
 
     history_mask = torch.zeros(1, max_frames, device=device)
-    history_mask[:, :history_frames] = 1
     generation_mask = torch.zeros(1, max_frames, device=device)
-    generation_mask[:, history_frames : history_frames + generation_frames] = 1
+    generation_mask[:, :generation_frames] = 1
     history_token_mask = torch.zeros(1, max_tokens, device=device)
-    history_token_mask[:, :history_tokens] = 1
     generation_token_mask = torch.zeros(1, max_tokens, device=device)
-    generation_token_mask[
-        :,
-        history_tokens : history_tokens + generation_tokens,
-    ] = 1
+    generation_token_mask[:, :generation_tokens] = 1
 
     generator = torch.Generator(device=device)
     generator.manual_seed(20260728)
+    sample = torch.zeros(
+        1,
+        max_tokens,
+        model.denoiser.nframe_root_dim + model.denoiser.latent_embedding_dim,
+        device=device,
+    )
+    sample[:, :generation_tokens] = torch.randn(
+        1,
+        generation_tokens,
+        sample.shape[-1],
+        generator=generator,
+        device=device,
+    )
     return (
         torch.tensor([2.0], dtype=torch.float32, device=device),
-        torch.randn(
-            1,
-            max_tokens,
-            model.denoiser.nframe_root_dim + model.denoiser.latent_embedding_dim,
-            generator=generator,
-            device=device,
-        ),
+        sample,
         torch.tensor([history_frames], dtype=torch.int64, device=device),
         torch.tensor([generation_frames], dtype=torch.int64, device=device),
         history_mask,
         generation_mask,
         history_token_mask,
         generation_token_mask,
-        torch.randn(
-            1,
-            1,
-            text_condition_dim,
-            generator=generator,
-            device=device,
-        ),
+        text_conditions.detach().to(device=device, dtype=torch.float32),
         torch.tensor(
             [model.diffusion.num_base_steps - 1],
             dtype=torch.int64,
@@ -385,30 +410,46 @@ def _make_decoder_dummy(
     model,
     max_tokens: int,
     device: torch.device,
+    denoiser: torch.nn.Module,
+    denoiser_inputs: tuple[torch.Tensor, ...],
 ) -> tuple[torch.Tensor, ...]:
     nfpt = int(model.num_frames_per_token)
     max_frames = max_tokens * nfpt
-    generator = torch.Generator(device=device)
-    generator.manual_seed(20260729)
-    hybrid = torch.randn(
-        1,
-        max_tokens,
-        model.denoiser.nframe_root_dim + model.denoiser.latent_embedding_dim,
-        generator=generator,
-        device=device,
-    )
+    generation_tokens = int(model.gen_horizon_len) // nfpt
+    hybrid = denoiser_inputs[1].clone()
+    with torch.no_grad():
+        for timestep in range(int(model.diffusion.num_base_steps) - 1, -1, -1):
+            step_inputs = list(denoiser_inputs)
+            step_inputs[1] = hybrid
+            step_inputs[9] = torch.tensor(
+                [timestep],
+                dtype=torch.int64,
+                device=device,
+            )
+            prediction = denoiser(*step_inputs)
+            current_generation = hybrid[:, :generation_tokens]
+            predicted_generation = prediction[:, :generation_tokens]
+            next_generation = model.sampler(
+                current_generation,
+                predicted_generation,
+                step_inputs[9],
+            )
+            hybrid = hybrid.clone()
+            hybrid[:, :generation_tokens] = next_generation
+
     # Browser generation requantizes latent history before decoding.  Keeping
-    # the verification input on the FSQ grid avoids meaningless PyTorch-vs-ONNX
-    # differences when a random value sits exactly on a rounding boundary.
+    # the verification input on the FSQ grid also avoids meaningless
+    # PyTorch-vs-ONNX differences at a rounding boundary.
     root_tokens = hybrid[:, :, : model.denoiser.nframe_root_dim]
     latent_tokens = model.autoencoder.requantize(hybrid[:, :, model.denoiser.nframe_root_dim :])
     hybrid = torch.cat((root_tokens, latent_tokens), dim=-1)
-    motion_pad_mask = torch.ones(
+    motion_pad_mask = torch.zeros(
         1,
         max_frames,
         dtype=torch.float32,
         device=device,
     )
+    motion_pad_mask[:, : int(model.gen_horizon_len)] = 1
     global_translation = torch.zeros(
         1,
         3,
@@ -433,6 +474,8 @@ def _run_ort(
     path: Path,
     inputs: dict[str, torch.Tensor],
     expected_outputs: tuple[str, ...],
+    *,
+    disable_graph_optimizations: bool = False,
 ) -> dict[str, np.ndarray]:
     try:
         import onnxruntime as ort
@@ -444,6 +487,11 @@ def _run_ort(
         ) from error
 
     options = ort.SessionOptions()
+    if disable_graph_optimizations:
+        # CPU graph fusions such as com.microsoft.Gelu do not provide FP16
+        # kernels. Disabling optimizer-only fusions validates the portable
+        # ONNX primitive graph that WebGPU consumes.
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
     options.intra_op_num_threads = min(8, max(1, torch.get_num_threads()))
     session = ort.InferenceSession(
         str(path),
@@ -470,6 +518,139 @@ def _run_ort(
 def _max_abs(reference: torch.Tensor, actual: np.ndarray) -> float:
     expected = reference.detach().to(device="cpu", dtype=torch.float32).numpy()
     return float(np.max(np.abs(expected - actual)))
+
+
+def _verify_mixed_numeric(
+    reference_paths: dict[str, Path],
+    mixed_paths: dict[str, Path],
+    dummy_inputs: dict[str, tuple[torch.Tensor, ...]],
+) -> dict[str, Any]:
+    """Compare mixed graphs with the already verified FP32 ONNX exports."""
+    input_names = {
+        "text_encoder": (
+            "input_ids",
+            "attention_mask",
+            "token_type_ids",
+        ),
+        "denoiser": (
+            "cfg_weight",
+            "x",
+            "history_len",
+            "generation_len",
+            "history_mask",
+            "generation_mask",
+            "history_token_mask",
+            "generation_token_mask",
+            "text_conditions",
+            "timestep",
+            "first_heading_angle",
+        ),
+        "decoder": (
+            "hybrid_tokens",
+            "motion_pad_mask",
+            "global_translation",
+        ),
+    }
+    output_names = {
+        "text_encoder": ("text_conditions",),
+        "denoiser": ("pred_x0",),
+        "decoder": (
+            "normalized_motion",
+            "posed_joints",
+            "local_rotations",
+            "global_rotations",
+            "root_positions",
+            "foot_contacts",
+            "global_root_heading",
+        ),
+    }
+    results: dict[str, Any] = {
+        "backend": "onnxruntime-cpu-optimizations-disabled",
+        "reference": "fp32-onnx-export",
+        "limits": _MIXED_PRECISION_LIMITS,
+        "outputs": {},
+    }
+
+    for graph_name in ("text_encoder", "denoiser", "decoder"):
+        feeds = dict(zip(input_names[graph_name], dummy_inputs[graph_name]))
+        reference = _run_ort(
+            reference_paths[graph_name],
+            feeds,
+            output_names[graph_name],
+            disable_graph_optimizations=True,
+        )
+        mixed = _run_ort(
+            mixed_paths[graph_name],
+            feeds,
+            output_names[graph_name],
+            disable_graph_optimizations=True,
+        )
+        graph_results: dict[str, Any] = {}
+        failures: dict[str, Any] = {}
+        for output_name in output_names[graph_name]:
+            expected = reference[output_name]
+            actual = mixed[output_name]
+            limits = _MIXED_PRECISION_LIMITS[graph_name][output_name]
+            if expected.dtype == np.bool_:
+                agreement = float(np.mean(expected == actual))
+                metrics = {"agreement": agreement}
+                if agreement < limits["minimum_agreement"]:
+                    failures[output_name] = {
+                        "minimum_agreement": limits["minimum_agreement"],
+                        "actual": agreement,
+                    }
+            else:
+                expected_float = expected.astype(np.float32, copy=False)
+                actual_float = actual.astype(np.float32, copy=False)
+                if not np.isfinite(actual_float).all():
+                    raise RuntimeError(
+                        f"Mixed-FP16 numeric verification produced non-finite {graph_name}.{output_name}."
+                    )
+                difference = actual_float - expected_float
+                rmse = float(np.sqrt(np.mean(np.square(difference))))
+                maximum = float(np.max(np.abs(difference)))
+                denominator = float(
+                    np.linalg.norm(expected_float.reshape(-1)) * np.linalg.norm(actual_float.reshape(-1))
+                )
+                cosine = (
+                    1.0
+                    if denominator == 0 and np.array_equal(expected_float, actual_float)
+                    else 0.0
+                    if denominator == 0
+                    else float(
+                        np.clip(
+                            np.sum(expected_float * actual_float) / denominator,
+                            -1.0,
+                            1.0,
+                        )
+                    )
+                )
+                metrics = {
+                    "max_abs_error": maximum,
+                    "rmse": rmse,
+                    "cosine_similarity": cosine,
+                }
+                if limits.get("require_exact") and not np.array_equal(expected, actual):
+                    failures.setdefault(output_name, {})["exact_equality"] = {
+                        "required": True,
+                        "max_abs_error": maximum,
+                    }
+                if rmse > limits["rmse"]:
+                    failures.setdefault(output_name, {})["rmse"] = {
+                        "limit": limits["rmse"],
+                        "actual": rmse,
+                    }
+                minimum_cosine = limits.get("minimum_cosine_similarity")
+                if minimum_cosine is not None and cosine < minimum_cosine:
+                    failures.setdefault(output_name, {})["cosine_similarity"] = {
+                        "minimum": minimum_cosine,
+                        "actual": cosine,
+                    }
+            graph_results[output_name] = metrics
+        if failures:
+            raise RuntimeError(f"Mixed-FP16 numeric verification failed for {graph_name}: {failures}")
+        results["outputs"][graph_name] = graph_results
+    return results
 
 
 def _verify_numeric(
@@ -632,6 +813,7 @@ def _build_manifest(
     output_dir: Path,
     payload_paths: list[Path],
     verification: dict[str, Any] | None,
+    precision_reports: dict[str, MixedPrecisionReport],
 ) -> dict[str, Any]:
     motion_rep = model.motion_rep
     autoencoder = model.autoencoder
@@ -649,6 +831,8 @@ def _build_manifest(
     diffusion = model.diffusion
     alphas_cumprod = diffusion.alphas_cumprod.detach().cpu()
     alphas_cumprod_prev = diffusion.alphas_cumprod_prev.detach().cpu()
+    source_onnx_bytes = sum(report.source_size_bytes for report in precision_reports.values())
+    mixed_onnx_bytes = sum(report.output_size_bytes for report in precision_reports.values())
 
     manifest: dict[str, Any] = {
         "format": BROWSER_PACK_FORMAT,
@@ -666,6 +850,18 @@ def _build_manifest(
             "model_id": artifact_config["base_model"],
         },
         "graphs": _graph_contracts(),
+        "precision": {
+            "format": "mixed-fp16",
+            "policy_version": MIXED_FP16_POLICY_VERSION,
+            "public_io_dtype": "float32",
+            "required_webgpu_features": ["shader-f16"],
+            "toolchain": {package: metadata.version(package) for package in ("onnx", "onnxruntime", "torch")},
+            "source_onnx_bytes": source_onnx_bytes,
+            "mixed_onnx_bytes": mixed_onnx_bytes,
+            "saved_onnx_bytes": source_onnx_bytes - mixed_onnx_bytes,
+            "saved_onnx_fraction": 1 - mixed_onnx_bytes / source_onnx_bytes,
+            "graphs": {graph_name: report.to_dict() for graph_name, report in sorted(precision_reports.items())},
+        },
         "dimensions": {
             "fps": int(motion_rep.fps),
             "num_frames_per_token": nfpt,
@@ -739,6 +935,7 @@ def _build_manifest(
             "onnx_opset": config.opset,
             "batch_size": 1,
             "contract_revision": 3,
+            "required_webgpu_features": ["shader-f16"],
             "text_only": True,
             "detailed_motion_outputs": True,
             "motion_correction_included": False,
@@ -851,22 +1048,28 @@ def _export_browser_model_pack_directory(
         .to(device)
         .eval(),
     }
+    text_dummy = _make_text_dummy(
+        tokenizer,
+        config.max_prompt_tokens,
+        device,
+    )
+    with torch.no_grad():
+        text_conditions = modules["text_encoder"](*text_dummy)
+    denoiser_dummy = _make_denoiser_dummy(
+        model,
+        config.max_tokens,
+        text_conditions,
+        device,
+    )
     dummy_inputs = {
-        "text_encoder": _make_text_dummy(
-            tokenizer,
-            config.max_prompt_tokens,
-            device,
-        ),
-        "denoiser": _make_denoiser_dummy(
-            model,
-            config.max_tokens,
-            int(artifact_config["output_dim"]),
-            device,
-        ),
+        "text_encoder": text_dummy,
+        "denoiser": denoiser_dummy,
         "decoder": _make_decoder_dummy(
             model,
             config.max_tokens,
             device,
+            modules["denoiser"],
+            denoiser_dummy,
         ),
     }
 
@@ -875,10 +1078,13 @@ def _export_browser_model_pack_directory(
         "denoiser": output_dir / "denoiser.onnx",
         "decoder": output_dir / "decoder.onnx",
     }
+    fp32_dir = output_dir / ".fp32-reference"
+    fp32_dir.mkdir()
+    fp32_graph_paths = {graph_name: fp32_dir / graph_path.name for graph_name, graph_path in graph_paths.items()}
     _export_graph(
         modules["text_encoder"],
         dummy_inputs["text_encoder"],
-        graph_paths["text_encoder"],
+        fp32_graph_paths["text_encoder"],
         input_names=[
             "input_ids",
             "attention_mask",
@@ -895,7 +1101,7 @@ def _export_browser_model_pack_directory(
     _export_graph(
         modules["denoiser"],
         dummy_inputs["denoiser"],
-        graph_paths["denoiser"],
+        fp32_graph_paths["denoiser"],
         input_names=[
             "cfg_weight",
             "x",
@@ -915,7 +1121,7 @@ def _export_browser_model_pack_directory(
     _export_graph(
         modules["decoder"],
         dummy_inputs["decoder"],
-        graph_paths["decoder"],
+        fp32_graph_paths["decoder"],
         input_names=[
             "hybrid_tokens",
             "motion_pad_mask",
@@ -933,8 +1139,34 @@ def _export_browser_model_pack_directory(
         opset=config.opset,
     )
 
+    _check_onnx_models(list(fp32_graph_paths.values()))
+    fp32_verification = _verify_numeric(fp32_graph_paths, modules, dummy_inputs) if config.verify else None
+    precision_reports = {
+        graph_name: convert_browser_onnx_to_mixed_fp16(
+            fp32_graph_paths[graph_name],
+            graph_paths[graph_name],
+            graph_name=graph_name,
+        )
+        for graph_name in ("text_encoder", "denoiser", "decoder")
+    }
     _check_onnx_models(list(graph_paths.values()))
-    verification = _verify_numeric(graph_paths, modules, dummy_inputs) if config.verify else None
+    mixed_verification = (
+        _verify_mixed_numeric(
+            fp32_graph_paths,
+            graph_paths,
+            dummy_inputs,
+        )
+        if config.verify
+        else None
+    )
+    verification = (
+        {
+            "fp32_export": fp32_verification,
+            "mixed_precision": mixed_verification,
+        }
+        if config.verify
+        else None
+    )
 
     tokenizer_paths = _copy_tokenizer_files(
         config.minilm_artifact,
@@ -949,6 +1181,7 @@ def _export_browser_model_pack_directory(
         output_dir=output_dir,
         payload_paths=payload_paths,
         verification=verification,
+        precision_reports=precision_reports,
     )
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(
