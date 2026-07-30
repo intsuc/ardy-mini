@@ -109,6 +109,20 @@ export function cameraMoveForCode(
   return null;
 }
 
+export function cameraMovementForCodes(
+  codes: Iterable<string>,
+): readonly [forward: number, right: number] {
+  let forward = 0;
+  let right = 0;
+  for (const code of codes) {
+    const movement = cameraMoveForCode(code);
+    if (!movement) continue;
+    forward += movement[0];
+    right += movement[1];
+  }
+  return [Math.sign(forward), Math.sign(right)];
+}
+
 interface ActiveGeneration {
   id: string;
   mode: GenerationMode;
@@ -749,6 +763,19 @@ export function bootstrap(): () => void {
       error instanceof Error ? error.message : String(error),
     );
   }
+  const pressedCameraKeys = new Set<string>();
+  const syncCameraMovement = (): void => {
+    const [forward, right] = cameraMovementForCodes(pressedCameraKeys);
+    viewer?.setCameraMovement(forward, right);
+  };
+  const clearCameraMovement = (): void => {
+    if (pressedCameraKeys.size === 0) {
+      viewer?.setCameraMovement(0, 0);
+      return;
+    }
+    pressedCameraKeys.clear();
+    viewer?.setCameraMovement(0, 0);
+  };
 
   const worker = new Worker(new URL("./inference.worker.ts", import.meta.url), {
     type: "module",
@@ -2071,9 +2098,28 @@ export function bootstrap(): () => void {
   window.addEventListener("dragend", resetVrmDropTarget, {
     signal: lifecycle.signal,
   });
-  window.addEventListener("blur", resetVrmDropTarget, {
+  window.addEventListener(
+    "blur",
+    () => {
+      resetVrmDropTarget();
+      clearCameraMovement();
+    },
+    {
+      signal: lifecycle.signal,
+    },
+  );
+  canvas.addEventListener("blur", clearCameraMovement, {
     signal: lifecycle.signal,
   });
+  document.addEventListener(
+    "visibilitychange",
+    () => {
+      if (document.hidden) clearCameraMovement();
+    },
+    {
+      signal: lifecycle.signal,
+    },
+  );
   removeVrm.addEventListener("click", () => {
     activeVrmLoad += 1;
     viewer?.clearVrm();
@@ -2127,6 +2173,12 @@ export function bootstrap(): () => void {
     (event) => {
       const target = event.target as HTMLElement | null;
       if (event.isComposing) return;
+      if (
+        pressedCameraKeys.size > 0 &&
+        (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey)
+      ) {
+        clearCameraMovement();
+      }
       const cameraMove =
         target === canvas &&
         !event.metaKey &&
@@ -2137,7 +2189,10 @@ export function bootstrap(): () => void {
           : null;
       if (cameraMove) {
         event.preventDefault();
-        viewer?.moveCamera(cameraMove[0], cameraMove[1]);
+        if (!pressedCameraKeys.has(event.code)) {
+          pressedCameraKeys.add(event.code);
+          syncCameraMovement();
+        }
         return;
       }
       if (event.repeat) return;
@@ -2195,12 +2250,23 @@ export function bootstrap(): () => void {
     },
     { signal: lifecycle.signal },
   );
+  document.addEventListener(
+    "keyup",
+    (event) => {
+      if (!cameraMoveForCode(event.code)) return;
+      if (!pressedCameraKeys.delete(event.code)) return;
+      event.preventDefault();
+      syncCameraMovement();
+    },
+    { signal: lifecycle.signal },
+  );
 
   const cleanup = (): void => {
     if (disposed) return;
     disposed = true;
     activeVrmLoad += 1;
     resetVrmDropTarget();
+    clearCameraMovement();
     try {
       postCommand({ type: "dispose", requestId: requestId("dispose") });
     } catch {

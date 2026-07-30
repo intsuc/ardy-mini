@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it, vi } from "vitest";
+import * as THREE from "three";
 
 import {
   canPreserveMotionContinuity,
+  cameraMovementDistance,
   CORE27_FOOT_CONTACT_JOINTS,
   CORE27_JOINT_COUNT,
   CORE27_PARENTS,
@@ -77,6 +79,101 @@ describe("absolute-clock playback", () => {
       frame: 39,
       ended: true,
     });
+  });
+});
+
+describe("camera movement", () => {
+  const createViewer = (azimuth: number): SkeletonViewer => {
+    const camera = new THREE.PerspectiveCamera();
+    camera.position.set(0, 4, 0);
+    camera.lookAt(0, 0, 0);
+    const target = new THREE.Vector3();
+
+    return Object.assign(Object.create(SkeletonViewer.prototype), {
+      camera,
+      controls: {
+        target,
+        getAzimuthalAngle: vi.fn(() => azimuth),
+        getDistance: vi.fn(() => 4),
+        update: vi.fn(),
+      },
+      cameraForward: new THREE.Vector3(),
+      cameraRight: new THREE.Vector3(),
+      cameraOffset: new THREE.Vector3(),
+      upAxis: new THREE.Vector3(0, 1, 0),
+      invalidate: vi.fn(),
+    }) as SkeletonViewer;
+  };
+
+  const cameraPosition = (viewer: SkeletonViewer): THREE.Vector3 =>
+    (
+      viewer as unknown as {
+        camera: THREE.PerspectiveCamera;
+      }
+    ).camera.position;
+
+  const controlsTarget = (viewer: SkeletonViewer): THREE.Vector3 =>
+    (
+      viewer as unknown as {
+        controls: { target: THREE.Vector3 };
+      }
+    ).controls.target;
+
+  it("uses the orbit azimuth for W movement even when looking straight down", () => {
+    const azimuth = Math.PI / 3;
+    const viewer = createViewer(azimuth);
+    const before = cameraPosition(viewer).clone();
+
+    SkeletonViewer.prototype.moveCamera.call(viewer, 1, 0);
+
+    const movement = cameraPosition(viewer).clone().sub(before);
+    const expectedDirection = new THREE.Vector3(
+      -Math.sin(azimuth),
+      0,
+      -Math.cos(azimuth),
+    );
+    expect(movement.y).toBeCloseTo(0);
+    expect(movement.length()).toBeCloseTo(0.2);
+    expect(movement.clone().normalize().dot(expectedDirection)).toBeCloseTo(1);
+    expect(controlsTarget(viewer).toArray()).toEqual(movement.toArray());
+    expect(
+      (
+        viewer as unknown as {
+          controls: { getAzimuthalAngle: ReturnType<typeof vi.fn> };
+        }
+      ).controls.getAzimuthalAngle,
+    ).toHaveBeenCalledOnce();
+  });
+
+  it("normalizes diagonal camera movement to the same distance as W", () => {
+    const azimuth = -Math.PI / 5;
+    const forwardViewer = createViewer(azimuth);
+    const diagonalViewer = createViewer(azimuth);
+    const forwardStart = cameraPosition(forwardViewer).clone();
+    const diagonalStart = cameraPosition(diagonalViewer).clone();
+
+    SkeletonViewer.prototype.moveCamera.call(forwardViewer, 1, 0);
+    SkeletonViewer.prototype.moveCamera.call(diagonalViewer, 1, 1);
+
+    const forwardDistance = cameraPosition(forwardViewer).distanceTo(
+      forwardStart,
+    );
+    const diagonalDistance = cameraPosition(diagonalViewer).distanceTo(
+      diagonalStart,
+    );
+    expect(diagonalDistance).toBeCloseTo(forwardDistance);
+  });
+
+  it("integrates held movement independently of the animation frame rate", () => {
+    const at60Fps =
+      60 * cameraMovementDistance(4, 1 / 60);
+    const at30Fps =
+      30 * cameraMovementDistance(4, 1 / 30);
+
+    expect(at60Fps).toBeCloseTo(at30Fps);
+    expect(cameraMovementDistance(4, 1)).toBeCloseTo(
+      cameraMovementDistance(4, 0.05),
+    );
   });
 });
 

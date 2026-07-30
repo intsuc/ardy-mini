@@ -10,6 +10,116 @@ import {
   setSliderValue,
 } from "./control-helpers";
 
+interface CameraMovementProbeState {
+  initialPosition: [number, number, number] | null;
+  inputs: Array<[number, number]>;
+  position: [number, number, number];
+}
+
+async function installCameraMovementProbe(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const viewerModuleUrl = performance
+      .getEntriesByType("resource")
+      .map((entry) => entry.name)
+      .find((url) => new URL(url).pathname.endsWith("/src/viewer.ts"));
+    if (!viewerModuleUrl) throw new Error("Viewer module URL was not observed.");
+    const { SkeletonViewer } = await import(
+      /* @vite-ignore */ viewerModuleUrl
+    );
+    interface ProbeViewer {
+      camera: {
+        position: { x: number; y: number; z: number };
+      };
+    }
+    interface Probe {
+      initialPosition: [number, number, number] | null;
+      inputs: Array<[number, number]>;
+      viewer: ProbeViewer | null;
+    }
+    const prototype = SkeletonViewer.prototype as unknown as {
+      setCameraMovement(
+        this: ProbeViewer,
+        forward: number,
+        right: number,
+      ): void;
+    };
+    const original = prototype.setCameraMovement;
+    if (typeof original !== "function") {
+      throw new Error("SkeletonViewer.setCameraMovement is unavailable.");
+    }
+    const probe: Probe = {
+      initialPosition: null,
+      inputs: [],
+      viewer: null,
+    };
+    (
+      globalThis as typeof globalThis & {
+        __cameraMovementProbe?: Probe;
+      }
+    ).__cameraMovementProbe = probe;
+    prototype.setCameraMovement = function (
+      this: ProbeViewer,
+      forward: number,
+      right: number,
+    ): void {
+      probe.viewer = this;
+      if (probe.initialPosition === null && (forward !== 0 || right !== 0)) {
+        const { x, y, z } = this.camera.position;
+        probe.initialPosition = [x, y, z];
+      }
+      probe.inputs.push([forward, right]);
+      original.call(this, forward, right);
+    };
+  });
+}
+
+async function cameraMovementProbeState(
+  page: Page,
+): Promise<CameraMovementProbeState> {
+  return page.evaluate(() => {
+    interface Probe {
+      initialPosition: [number, number, number] | null;
+      inputs: Array<[number, number]>;
+      viewer: {
+        camera: {
+          position: { x: number; y: number; z: number };
+        };
+      } | null;
+    }
+    const probe = (
+      globalThis as typeof globalThis & {
+        __cameraMovementProbe?: Probe;
+      }
+    ).__cameraMovementProbe;
+    if (!probe?.viewer) throw new Error("Camera movement was not observed.");
+    const { x, y, z } = probe.viewer.camera.position;
+    return {
+      initialPosition: probe.initialPosition,
+      inputs: probe.inputs.map(
+        ([forward, right]) => [forward, right] as [number, number],
+      ),
+      position: [x, y, z] as [number, number, number],
+    };
+  });
+}
+
+function horizontalDistance(
+  first: readonly [number, number, number],
+  second: readonly [number, number, number],
+): number {
+  return Math.hypot(second[0] - first[0], second[2] - first[2]);
+}
+
+async function waitForAnimationFrames(page: Page, count: number): Promise<void> {
+  await page.evaluate(async (frameCount) => {
+    for (let frame = 0; frame < frameCount; frame += 1) {
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => resolve());
+      });
+    }
+  }, count);
+}
+
 test("renders the two-pane technical workspace without motion parameters", async ({
   page,
 }) => {
@@ -729,7 +839,9 @@ test("follows the root while preserving manual camera composition", async ({
   expect(Math.hypot(manualCameraDelta[0], manualCameraDelta[2])).toBeGreaterThan(
     0,
   );
-  expect(manualTargetDelta).toEqual(manualCameraDelta);
+  manualTargetDelta.forEach((value, index) => {
+    expect(value).toBeCloseTo(manualCameraDelta[index]);
+  });
   expect(cameraState.reset.target[0]).toBeCloseTo(6);
   expect(cameraState.reset.target[2]).toBeCloseTo(-4);
   expect(cameraState.playing).toBe(false);
@@ -917,6 +1029,82 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   const loopToggle = page.locator("#loop-toggle");
   await expect(loopToggle).toBeDisabled();
   await expect(loopToggle).toHaveAttribute("aria-pressed", "true");
+});
+
+test("moves continuously from one held W keydown and stops on keyup", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await installCameraMovementProbe(page);
+
+  const canvas = page.locator("#motion-canvas");
+  await canvas.focus();
+  await page.keyboard.down("w");
+
+  await expect
+    .poll(async () => {
+      const state = await cameraMovementProbeState(page);
+      return state.initialPosition
+        ? horizontalDistance(state.initialPosition, state.position)
+        : 0;
+    })
+    .toBeGreaterThan(0.001);
+  const midway = (await cameraMovementProbeState(page)).position;
+  await expect
+    .poll(async () =>
+      horizontalDistance(
+        midway,
+        (await cameraMovementProbeState(page)).position,
+      ),
+    )
+    .toBeGreaterThan(0.001);
+
+  const heldState = await cameraMovementProbeState(page);
+  expect(
+    heldState.inputs.filter(([forward, right]) => forward || right),
+  ).toEqual([[1, 0]]);
+
+  await page.keyboard.up("w");
+  await expect
+    .poll(async () => (await cameraMovementProbeState(page)).inputs.at(-1))
+    .toEqual([0, 0]);
+  await waitForAnimationFrames(page, 3);
+  const stopped = (await cameraMovementProbeState(page)).position;
+  await waitForAnimationFrames(page, 4);
+  const afterStop = (await cameraMovementProbeState(page)).position;
+  expect(horizontalDistance(stopped, afterStop)).toBeLessThan(1e-8);
+});
+
+test("clears held camera movement when the window loses focus", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await installCameraMovementProbe(page);
+
+  const canvas = page.locator("#motion-canvas");
+  await canvas.focus();
+  await page.keyboard.down("d");
+  await expect
+    .poll(async () => {
+      const state = await cameraMovementProbeState(page);
+      return state.initialPosition
+        ? horizontalDistance(state.initialPosition, state.position)
+        : 0;
+    })
+    .toBeGreaterThan(0.001);
+
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await expect
+    .poll(async () => (await cameraMovementProbeState(page)).inputs.at(-1))
+    .toEqual([0, 0]);
+  await waitForAnimationFrames(page, 3);
+  const stopped = (await cameraMovementProbeState(page)).position;
+  await waitForAnimationFrames(page, 4);
+  const afterStop = (await cameraMovementProbeState(page)).position;
+  expect(horizontalDistance(stopped, afterStop)).toBeLessThan(1e-8);
+
+  // Clear Playwright's pressed-key state after the synthetic blur.
+  await page.keyboard.up("d");
 });
 
 test("keeps invalid model-pack errors beside the model setup action", async ({

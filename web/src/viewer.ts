@@ -108,6 +108,8 @@ const VIEWER_COLORS = {
 const GROUND_MINOR_SPACING = 0.5;
 const GROUND_MAJOR_SPACING = 5;
 const GROUND_Y = -0.006;
+const CAMERA_MOVE_STEPS_PER_SECOND = 12;
+const CAMERA_MOVE_MAX_ELAPSED_SECONDS = 0.05;
 
 export interface PlaybackState {
   frame: number;
@@ -174,6 +176,30 @@ export function canPreserveMotionContinuity({
     hasPreviousClip &&
     !skeletonChanged &&
     Math.abs(previousFrame - nextFrame) <= 1e-6
+  );
+}
+
+/**
+ * Converts held-key time into a frame-rate-independent camera distance.
+ *
+ * The cap prevents a delayed animation frame from producing a large jump
+ * after the tab or main thread resumes.
+ */
+export function cameraMovementDistance(
+  orbitDistance: number,
+  elapsedSeconds: number,
+): number {
+  if (!Number.isFinite(orbitDistance) || orbitDistance <= 0) {
+    throw new RangeError("Camera orbit distance must be positive.");
+  }
+  if (!Number.isFinite(elapsedSeconds) || elapsedSeconds < 0) {
+    throw new RangeError("Camera movement time cannot be negative.");
+  }
+  const step = THREE.MathUtils.clamp(orbitDistance * 0.05, 0.08, 0.4);
+  return (
+    step *
+    CAMERA_MOVE_STEPS_PER_SECOND *
+    Math.min(elapsedSeconds, CAMERA_MOVE_MAX_ELAPSED_SECONDS)
   );
 }
 
@@ -347,6 +373,9 @@ export class SkeletonViewer {
   private animationFrame = 0;
   private resizeFrame = 0;
   private groundSideLength = 0;
+  private cameraMovementForward = 0;
+  private cameraMovementRight = 0;
+  private lastCameraMovementTime: number | null = null;
   private needsRender = true;
   private pageVisible = !document.hidden;
   private playbackListener: PlaybackListener | null = null;
@@ -373,6 +402,9 @@ export class SkeletonViewer {
       this.vrm?.springBoneManager?.reset();
       this.invalidate();
     } else {
+      this.cameraMovementForward = 0;
+      this.cameraMovementRight = 0;
+      this.lastCameraMovementTime = null;
       cancelAnimationFrame(this.animationFrame);
       this.animationFrame = 0;
     }
@@ -806,31 +838,71 @@ export class SkeletonViewer {
       throw new RangeError("Camera movement steps must be finite.");
     }
     if (forwardSteps === 0 && rightSteps === 0) return;
-    this.camera.getWorldDirection(this.cameraForward);
-    this.cameraForward.y = 0;
-    if (this.cameraForward.lengthSq() < 1e-8) {
-      this.cameraForward.set(0, 0, -1);
-    } else {
-      this.cameraForward.normalize();
-    }
-    this.cameraRight
-      .crossVectors(this.cameraForward, this.upAxis)
-      .normalize();
+    this.controls.update();
     const step = THREE.MathUtils.clamp(
       this.controls.getDistance() * 0.05,
       0.08,
       0.4,
     );
+    if (!this.translateCamera(forwardSteps, rightSteps, step)) return;
+    this.invalidate();
+  }
+
+  /**
+   * Starts or updates continuous view-relative keyboard movement.
+   *
+   * OrbitControls keeps azimuth independently from polar angle, so movement
+   * remains defined at the top-down pole and follows horizontal orbiting there.
+   */
+  setCameraMovement(forward: number, right: number): void {
+    if (!Number.isFinite(forward) || !Number.isFinite(right)) {
+      throw new RangeError("Camera movement axes must be finite.");
+    }
+    if (
+      forward === this.cameraMovementForward &&
+      right === this.cameraMovementRight
+    ) {
+      return;
+    }
+    const wasMoving =
+      this.cameraMovementForward !== 0 || this.cameraMovementRight !== 0;
+    this.cameraMovementForward = forward;
+    this.cameraMovementRight = right;
+    const isMoving = forward !== 0 || right !== 0;
+    if (!isMoving) {
+      this.lastCameraMovementTime = null;
+    } else if (!wasMoving) {
+      this.lastCameraMovementTime = performance.now();
+    }
+    this.invalidate();
+  }
+
+  private translateCamera(
+    forward: number,
+    right: number,
+    distance: number,
+  ): boolean {
+    if (distance <= 0) return false;
+    const azimuth = this.controls.getAzimuthalAngle();
+    this.cameraForward.set(
+      -Math.sin(azimuth),
+      0,
+      -Math.cos(azimuth),
+    );
+    this.cameraRight.set(
+      Math.cos(azimuth),
+      0,
+      -Math.sin(azimuth),
+    );
     this.cameraOffset
       .copy(this.cameraForward)
-      .multiplyScalar(forwardSteps)
-      .addScaledVector(this.cameraRight, rightSteps);
-    if (this.cameraOffset.lengthSq() === 0) return;
-    this.cameraOffset.normalize().multiplyScalar(step);
+      .multiplyScalar(forward)
+      .addScaledVector(this.cameraRight, right);
+    if (this.cameraOffset.lengthSq() === 0) return false;
+    this.cameraOffset.normalize().multiplyScalar(distance);
     this.camera.position.add(this.cameraOffset);
     this.controls.target.add(this.cameraOffset);
-    this.controls.update();
-    this.invalidate();
+    return true;
   }
 
   seek(frame: number): void {
@@ -1127,6 +1199,7 @@ export class SkeletonViewer {
     }
 
     const controlsChanged = this.controls.update();
+    const cameraMoved = this.updateCameraMovement(time);
     if (
       this.vrm &&
       this.vrmRoot.visible &&
@@ -1134,13 +1207,42 @@ export class SkeletonViewer {
     ) {
       this.vrm.update(elapsedSeconds);
     }
-    if (this.needsRender || poseChanged || controlsChanged) {
+    if (this.needsRender || poseChanged || controlsChanged || cameraMoved) {
       this.updateGroundSurfaceLayout();
       this.renderer.render(this.scene, this.camera);
       this.needsRender = false;
     }
-    if (this.playing || controlsChanged) this.scheduleFrame();
+    if (this.playing || controlsChanged || this.hasCameraMovement()) {
+      this.scheduleFrame();
+    }
   };
+
+  private hasCameraMovement(): boolean {
+    return (
+      this.cameraMovementForward !== 0 ||
+      this.cameraMovementRight !== 0
+    );
+  }
+
+  private updateCameraMovement(time: number): boolean {
+    if (!this.hasCameraMovement()) {
+      this.lastCameraMovementTime = null;
+      return false;
+    }
+    const previousTime = this.lastCameraMovementTime;
+    this.lastCameraMovementTime = time;
+    if (previousTime === null) return false;
+    const elapsedSeconds = Math.max(0, (time - previousTime) / 1_000);
+    const distance = cameraMovementDistance(
+      this.controls.getDistance(),
+      elapsedSeconds,
+    );
+    return this.translateCamera(
+      this.cameraMovementForward,
+      this.cameraMovementRight,
+      distance,
+    );
+  }
 
   private scheduleFrame(): void {
     if (!this.animationFrame && this.pageVisible) {

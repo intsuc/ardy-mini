@@ -7,6 +7,7 @@ import {
   canAttemptGeneration,
   canContinueGeneration,
   cameraMoveForCode,
+  cameraMovementForCodes,
   formatBytes,
   formatTime,
   isModelPackArchive,
@@ -113,6 +114,25 @@ describe("camera keyboard mapping", () => {
     expect(cameraMoveForCode("KeyS")).toEqual([-1, 0]);
     expect(cameraMoveForCode("KeyD")).toEqual([0, 1]);
     expect(cameraMoveForCode("KeyZ")).toBeNull();
+  });
+
+  it("combines simultaneous movement keys and cancels opposing inputs", () => {
+    expect(cameraMovementForCodes(new Set(["KeyW", "KeyD"]))).toEqual([1, 1]);
+    expect(cameraMovementForCodes(new Set(["KeyW", "KeyS"]))).toEqual([0, 0]);
+    expect(
+      cameraMovementForCodes(new Set(["KeyW", "KeyA", "KeyS", "KeyD"])),
+    ).toEqual([0, 0]);
+  });
+
+  it("ignores unrelated keys and preserves the remaining held direction", () => {
+    const heldCodes = new Set(["KeyW", "KeyD", "KeyZ"]);
+    expect(cameraMovementForCodes(heldCodes)).toEqual([1, 1]);
+
+    heldCodes.delete("KeyW");
+    expect(cameraMovementForCodes(heldCodes)).toEqual([0, 1]);
+
+    heldCodes.delete("KeyD");
+    expect(cameraMovementForCodes(heldCodes)).toEqual([0, 0]);
   });
 });
 
