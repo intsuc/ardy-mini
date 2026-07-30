@@ -41,6 +41,11 @@ import {
   type VrmRetargetPlan,
 } from "./vrm-retarget";
 import {
+  computeCameraRelativeGroundLayout,
+  createGroundGridMaterial,
+  updateGroundGridOrigin,
+} from "./ground-grid";
+import {
   loadVrmAvatar,
   type LoadedVrmAvatar,
   type VrmModelInfo,
@@ -99,6 +104,10 @@ const VIEWER_COLORS = {
   chart5: "#262626",
   destructive: "#ff6467",
 } as const;
+
+const GROUND_MINOR_SPACING = 0.5;
+const GROUND_MAJOR_SPACING = 5;
+const GROUND_Y = -0.006;
 
 export interface PlaybackState {
   frame: number;
@@ -272,13 +281,18 @@ export class SkeletonViewer {
     4.2,
   );
   private readonly shadowLightTarget = new THREE.Object3D();
-  private readonly shadowFloor = new THREE.Mesh(
-    new THREE.PlaneGeometry(80, 80),
-    new THREE.MeshStandardMaterial({
-      color: VIEWER_COLORS.chart5,
-      roughness: 1,
-      metalness: 0,
-    }),
+  private readonly groundMaterial = createGroundGridMaterial({
+    baseColor: VIEWER_COLORS.chart5,
+    minorColor: VIEWER_COLORS.chart4,
+    majorColor: VIEWER_COLORS.chart4,
+    minorSpacing: GROUND_MINOR_SPACING,
+    majorSpacing: GROUND_MAJOR_SPACING,
+    roughness: 1,
+    metalness: 0,
+  });
+  private readonly groundSurface = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 1),
+    this.groundMaterial,
   );
   private readonly resizeObserver: ResizeObserver;
   private readonly jointTransform = new THREE.Object3D();
@@ -332,6 +346,7 @@ export class SkeletonViewer {
   private lastReportedFrame = -1;
   private animationFrame = 0;
   private resizeFrame = 0;
+  private groundSideLength = 0;
   private needsRender = true;
   private pageVisible = !document.hidden;
   private playbackListener: PlaybackListener | null = null;
@@ -485,22 +500,13 @@ export class SkeletonViewer {
     rimLight.position.set(5, 2, -4);
     this.scene.add(rimLight);
 
-    this.shadowFloor.name = "shadow-receiving-floor";
-    this.shadowFloor.rotation.x = -Math.PI / 2;
-    this.shadowFloor.position.y = -0.006;
-    this.shadowFloor.receiveShadow = true;
-    this.scene.add(this.shadowFloor);
-
-    const grid = new THREE.GridHelper(
-      18,
-      36,
-      VIEWER_COLORS.chart4,
-      VIEWER_COLORS.chart5,
-    );
-    const gridMaterial = grid.material as THREE.LineBasicMaterial;
-    gridMaterial.transparent = true;
-    gridMaterial.opacity = 0.48;
-    this.scene.add(grid);
+    this.groundSurface.name = "camera-relative-ground-grid";
+    this.groundSurface.rotation.x = -Math.PI / 2;
+    this.groundSurface.position.y = GROUND_Y;
+    this.groundSurface.receiveShadow = true;
+    this.groundSurface.frustumCulled = false;
+    this.scene.add(this.groundSurface);
+    this.updateGroundSurfaceLayout();
 
     this.createSkeletonMeshes(this.skeleton);
     this.trajectory = new THREE.Line(
@@ -1077,9 +1083,9 @@ export class SkeletonViewer {
     this.vrmLoadRevision += 1;
     this.disposeVrmAvatar();
     this.disposeSkeletonMeshes();
-    this.scene.remove(this.shadowFloor, this.shadowRig);
-    this.shadowFloor.geometry.dispose();
-    this.shadowFloor.material.dispose();
+    this.scene.remove(this.groundSurface, this.shadowRig);
+    this.groundSurface.geometry.dispose();
+    this.groundMaterial.dispose();
     this.shadowLight.shadow.dispose();
     this.trajectory.geometry.dispose();
     (this.trajectory.material as THREE.Material).dispose();
@@ -1129,6 +1135,7 @@ export class SkeletonViewer {
       this.vrm.update(elapsedSeconds);
     }
     if (this.needsRender || poseChanged || controlsChanged) {
+      this.updateGroundSurfaceLayout();
       this.renderer.render(this.scene, this.camera);
       this.needsRender = false;
     }
@@ -1335,7 +1342,32 @@ export class SkeletonViewer {
 
   private updateShadowAnchor(x: number, z: number): void {
     this.shadowRig.position.set(x, 0, z);
-    this.shadowFloor.position.set(x, -0.006, z);
+  }
+
+  private updateGroundSurfaceLayout(): void {
+    const layout = computeCameraRelativeGroundLayout({
+      targetX: this.controls.target.x,
+      targetZ: this.controls.target.z,
+      cameraFar: this.camera.far,
+      maxCameraDistance: this.controls.maxDistance,
+      padding: GROUND_MAJOR_SPACING,
+      majorSpacing: GROUND_MAJOR_SPACING,
+    });
+    if (
+      this.groundSurface.position.x === layout.centerX &&
+      this.groundSurface.position.z === layout.centerZ &&
+      this.groundSideLength === layout.sideLength
+    ) {
+      return;
+    }
+    this.groundSurface.position.set(layout.centerX, GROUND_Y, layout.centerZ);
+    this.groundSurface.scale.set(layout.sideLength, layout.sideLength, 1);
+    this.groundSideLength = layout.sideLength;
+    updateGroundGridOrigin(
+      this.groundMaterial,
+      layout.centerX,
+      layout.centerZ,
+    );
   }
 
   private followCamera(x: number, z: number): void {

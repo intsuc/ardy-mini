@@ -247,12 +247,23 @@ test("retains the square Lyra treatment on standard shadcn surfaces", async ({
   ]);
 });
 
-test("keeps the shadow light and plane under off-origin motion", async ({
+test("renders a camera-relative pristine ground while shadows follow motion", async ({
   page,
 }) => {
+  const pageErrors: string[] = [];
+  const shaderConsoleErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("console", (message) => {
+    if (
+      message.type() === "error" &&
+      /(?:WebGLProgram|shader|GLSL)/i.test(message.text())
+    ) {
+      shaderConsoleErrors.push(message.text());
+    }
+  });
   await page.goto("/");
 
-  const shadowState = await page.evaluate(async () => {
+  const groundState = await page.evaluate(async () => {
     const viewerModule = await import("/src/viewer.ts");
     const { createVrmRetargetPlan } = await import("/src/vrm-retarget.ts");
     const {
@@ -269,6 +280,105 @@ test("keeps the shadow light and plane under off-origin motion", async ({
 
     const viewer = new SkeletonViewer(canvas);
     try {
+      interface DebugObject {
+        readonly name: string;
+        readonly type: string;
+        readonly isMesh?: boolean;
+        readonly position: { readonly x: number; readonly z: number };
+        readonly scale: { readonly x: number; readonly y: number };
+        readonly receiveShadow?: boolean;
+        readonly geometry?: {
+          readonly type: string;
+          readonly parameters: {
+            readonly width?: number;
+            readonly height?: number;
+          };
+        };
+        readonly material?: {
+          readonly dithering?: boolean;
+          readonly roughness?: number;
+          readonly metalness?: number;
+          readonly userData?: Record<string, unknown>;
+        };
+        readonly target?: { readonly name: string };
+        readonly shadow?: {
+          readonly camera: {
+            readonly left: number;
+            readonly right: number;
+            readonly top: number;
+            readonly bottom: number;
+          };
+        };
+      }
+      interface ShaderDiagnostics {
+        readonly runnable?: boolean;
+      }
+      const internal = viewer as unknown as {
+        scene: {
+          getObjectByName(name: string): DebugObject | undefined;
+          traverse(callback: (object: DebugObject) => void): void;
+        };
+        camera: {
+          readonly far: number;
+          readonly position: {
+            readonly x: number;
+            readonly y: number;
+            readonly z: number;
+          };
+        };
+        controls: {
+          readonly maxDistance: number;
+          readonly target: {
+            readonly x: number;
+            readonly y: number;
+            readonly z: number;
+          };
+        };
+        renderer: {
+          readonly shadowMap: { readonly enabled: boolean };
+          readonly debug: {
+            onShaderError:
+              | ((
+                  gl: WebGL2RenderingContext,
+                  program: WebGLProgram,
+                  vertexShader: WebGLShader,
+                  fragmentShader: WebGLShader,
+                ) => void)
+              | null;
+          };
+          readonly info: {
+            readonly programs:
+              | readonly { readonly diagnostics?: ShaderDiagnostics }[]
+              | null;
+          };
+          compileAsync(scene: unknown, camera: unknown): Promise<unknown>;
+          render(scene: unknown, camera: unknown): void;
+        };
+        vrm: unknown;
+        vrmRetargetPlan: unknown;
+        vrmRoot: {
+          visible: boolean;
+          readonly position: { readonly x: number; readonly z: number };
+        };
+      };
+      const shaderErrors: string[] = [];
+      internal.renderer.debug.onShaderError = (
+        gl,
+        program,
+        vertexShader,
+        fragmentShader,
+      ) => {
+        shaderErrors.push(
+          [
+            gl.getProgramInfoLog(program),
+            gl.getShaderInfoLog(vertexShader),
+            gl.getShaderInfoLog(fragmentShader),
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        );
+      };
+
       const rootX = 24;
       const rootZ = -18;
       const positions = new Float32Array(CORE27_JOINT_COUNT * 3);
@@ -292,52 +402,28 @@ test("keeps the shadow light and plane under off-origin motion", async ({
         requestAnimationFrame(() => resolve()),
       );
 
-      interface DebugObject {
-        readonly name: string;
-        readonly isMesh?: boolean;
-        readonly position: { readonly x: number; readonly z: number };
-        readonly receiveShadow?: boolean;
-        readonly geometry?: {
-          readonly type: string;
-          readonly parameters: { readonly width?: number; readonly height?: number };
-        };
-        readonly material?: {
-          readonly roughness?: number;
-          readonly metalness?: number;
-        };
-        readonly target?: { readonly name: string };
-        readonly shadow?: {
-          readonly camera: {
-            readonly left: number;
-            readonly right: number;
-            readonly top: number;
-            readonly bottom: number;
-          };
-        };
-      }
-      const internal = viewer as unknown as {
-        scene: {
-          getObjectByName(name: string): DebugObject | undefined;
-          traverse(callback: (object: DebugObject) => void): void;
-        };
-        renderer: { shadowMap: { enabled: boolean } };
-        vrm: unknown;
-        vrmRetargetPlan: unknown;
-        vrmRoot: {
-          visible: boolean;
-          position: { readonly x: number; readonly z: number };
-        };
-      };
-      const floor = internal.scene.getObjectByName("shadow-receiving-floor");
+      const ground = internal.scene.getObjectByName(
+        "camera-relative-ground-grid",
+      );
       const rig = internal.scene.getObjectByName("shadow-follow-rig");
       const light = internal.scene.getObjectByName("shadow-key-light");
-      const currentAnchor = () => ({
-        floor: floor ? { x: floor.position.x, z: floor.position.z } : null,
+      const snapshot = () => ({
+        ground: ground
+          ? { x: ground.position.x, z: ground.position.z }
+          : null,
         rig: rig ? { x: rig.position.x, z: rig.position.z } : null,
+        camera: {
+          x: internal.camera.position.x,
+          z: internal.camera.position.z,
+        },
+        target: {
+          x: internal.controls.target.x,
+          z: internal.controls.target.z,
+        },
       });
-      const sourceAnchor = currentAnchor();
+      const initial = snapshot();
       const currentVrmState = () => ({
-        anchor: currentAnchor(),
+        rig: rig ? { x: rig.position.x, z: rig.position.z } : null,
         rootOffset: {
           x: internal.vrmRoot.position.x,
           z: internal.vrmRoot.position.z,
@@ -345,8 +431,8 @@ test("keeps the shadow light and plane under off-origin motion", async ({
       });
       let vrm1State;
       let vrm0State;
-      let hiddenVrmAnchor;
-      let reshownVrmAnchor;
+      let hiddenVrmRig;
+      let reshownVrmRig;
       const fakeHips = {
         position: {
           fromArray(_position: readonly number[]): void {},
@@ -379,38 +465,80 @@ test("keeps the shadow light and plane under off-origin motion", async ({
         viewer.seek(0);
         vrm0State = currentVrmState();
         viewer.setVrmVisible(false);
-        hiddenVrmAnchor = currentAnchor();
+        hiddenVrmRig = currentVrmState().rig;
         viewer.setVrmVisible(true);
-        reshownVrmAnchor = currentAnchor();
+        reshownVrmRig = currentVrmState().rig;
       } finally {
         internal.vrm = null;
         internal.vrmRetargetPlan = null;
         internal.vrmRoot.visible = false;
       }
-      const geometryTypes: string[] = [];
+      viewer.orbit(3, 1);
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+      const afterOrbit = snapshot();
+      for (let step = 0; step < 48; step += 1) {
+        viewer.moveCamera(1, 0);
+      }
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+      const afterMove = snapshot();
+
+      const gridHelpers: string[] = [];
+      let namedGroundCount = 0;
       internal.scene.traverse((object) => {
-        if (object.isMesh && object.geometry) {
-          geometryTypes.push(object.geometry.type);
+        if (object.type === "GridHelper") {
+          gridHelpers.push(object.name);
+        }
+        if (object.name === "camera-relative-ground-grid") {
+          namedGroundCount += 1;
         }
       });
 
+      await internal.renderer.compileAsync(
+        internal.scene,
+        internal.camera,
+      );
+      internal.renderer.render(internal.scene, internal.camera);
+      const failedPrograms =
+        internal.renderer.info.programs?.filter(
+          (program) => program.diagnostics?.runnable === false,
+        ).length ?? 0;
+      const width =
+        (ground?.geometry?.parameters.width ?? 0) *
+        Math.abs(ground?.scale.x ?? 0);
+      const height =
+        (ground?.geometry?.parameters.height ?? 0) *
+        Math.abs(ground?.scale.y ?? 0);
+
       return {
         rendererShadows: internal.renderer.shadowMap.enabled,
-        floor: floor
+        ground: ground
           ? {
-              geometry: floor.geometry?.type,
-              width: floor.geometry?.parameters.width,
-              height: floor.geometry?.parameters.height,
-              receiveShadow: floor.receiveShadow,
-              roughness: floor.material?.roughness,
-              metalness: floor.material?.metalness,
+              geometry: ground.geometry?.type,
+              width,
+              height,
+              receiveShadow: ground.receiveShadow,
+              dithering: ground.material?.dithering,
+              roughness: ground.material?.roughness,
+              metalness: ground.material?.metalness,
+              pristineGrid: ground.material?.userData?.pristineGrid,
             }
           : null,
-        sourceAnchor,
+        requiredDiameter:
+          2 *
+          (internal.camera.far +
+            internal.controls.maxDistance +
+            5),
+        initial,
         vrm1State,
         vrm0State,
-        hiddenVrmAnchor,
-        reshownVrmAnchor,
+        hiddenVrmRig,
+        reshownVrmRig,
+        afterOrbit,
+        afterMove,
         light: light
           ? {
               target: light.target?.name,
@@ -420,7 +548,10 @@ test("keeps the shadow light and plane under off-origin motion", async ({
               bottom: light.shadow?.camera.bottom,
             }
           : null,
-        geometryTypes,
+        namedGroundCount,
+        gridHelpers,
+        shaderErrors,
+        failedPrograms,
       };
     } finally {
       viewer.dispose();
@@ -428,49 +559,67 @@ test("keeps the shadow light and plane under off-origin motion", async ({
     }
   });
 
-  expect(shadowState.rendererShadows).toBe(true);
-  expect(shadowState.floor).toEqual({
+  expect(groundState.rendererShadows).toBe(true);
+  expect(groundState.namedGroundCount).toBe(1);
+  expect(groundState.gridHelpers).toEqual([]);
+  expect(groundState.ground).toMatchObject({
     geometry: "PlaneGeometry",
-    width: 80,
-    height: 80,
     receiveShadow: true,
+    dithering: true,
     roughness: 1,
     metalness: 0,
+    pristineGrid: true,
   });
-  expect(shadowState.sourceAnchor).toEqual({
-    floor: { x: 24, z: -18 },
+  expect(groundState.ground!.width).toBeGreaterThanOrEqual(
+    groundState.requiredDiameter,
+  );
+  expect(groundState.ground!.height).toBeGreaterThanOrEqual(
+    groundState.requiredDiameter,
+  );
+  expect(groundState.initial.rig).toEqual({ x: 24, z: -18 });
+  expect(groundState.vrm1State).toEqual({
     rig: { x: 24, z: -18 },
-  });
-  expect(shadowState.vrm1State).toEqual({
-    anchor: {
-      floor: { x: 24, z: -18 },
-      rig: { x: 24, z: -18 },
-    },
     rootOffset: { x: 12, z: -9 },
   });
-  expect(shadowState.vrm0State).toEqual({
-    anchor: {
-      floor: { x: 24, z: -18 },
-      rig: { x: 24, z: -18 },
-    },
+  expect(groundState.vrm0State).toEqual({
+    rig: { x: 24, z: -18 },
     rootOffset: { x: 12, z: -9 },
   });
-  expect(shadowState.hiddenVrmAnchor).toEqual({
-    floor: { x: 24, z: -18 },
-    rig: { x: 24, z: -18 },
-  });
-  expect(shadowState.reshownVrmAnchor).toEqual({
-    floor: { x: 24, z: -18 },
-    rig: { x: 24, z: -18 },
-  });
-  expect(shadowState.light).toEqual({
+  expect(groundState.hiddenVrmRig).toEqual({ x: 24, z: -18 });
+  expect(groundState.reshownVrmRig).toEqual({ x: 24, z: -18 });
+  expect(groundState.afterOrbit.rig).toEqual({ x: 24, z: -18 });
+  expect(groundState.afterMove.rig).toEqual({ x: 24, z: -18 });
+
+  const snappedTarget = (value: number): number =>
+    Math.round(value / 5) * 5;
+  for (const state of [
+    groundState.initial,
+    groundState.afterOrbit,
+    groundState.afterMove,
+  ]) {
+    expect(state.ground?.x).toBeCloseTo(snappedTarget(state.target.x));
+    expect(state.ground?.z).toBeCloseTo(snappedTarget(state.target.z));
+  }
+  expect(groundState.afterOrbit.ground).toEqual(
+    groundState.initial.ground,
+  );
+  expect(groundState.afterMove.ground).not.toEqual(
+    groundState.initial.ground,
+  );
+  expect(groundState.afterMove.camera).not.toEqual(
+    groundState.initial.camera,
+  );
+  expect(groundState.light).toEqual({
     target: "shadow-key-light-target",
     left: -4,
     right: 4,
     top: 4,
     bottom: -4,
   });
-  expect(shadowState.geometryTypes).not.toContain("CircleGeometry");
+  expect(groundState.shaderErrors).toEqual([]);
+  expect(groundState.failedPrograms).toBe(0);
+  expect(shaderConsoleErrors).toEqual([]);
+  expect(pageErrors).toEqual([]);
 });
 
 test("follows the root while preserving manual camera composition", async ({
