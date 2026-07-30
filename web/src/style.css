@@ -64,7 +64,8 @@ body {
 .workspace {
   display: grid;
   grid-template-columns: minmax(20rem, 23rem) minmax(0, 1fr);
-  height: calc(100vh - 3.75rem);
+  height: 100vh;
+  height: 100dvh;
   min-height: 0;
 }
 
@@ -84,7 +85,7 @@ body {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   background: var(--background);
 }
 
@@ -128,14 +129,15 @@ body {
   [data-slot="input-group"],
   [data-slot="native-select"],
   [data-slot="slider"],
-  [data-slot="select-trigger"],
-  [data-slot="select-item"],
+  [data-combobox-trigger],
+  [data-slot="combobox-item"],
   [data-slot="accordion-trigger"],
   [data-slot="toggle"] {
     min-height: 2.75rem;
   }
 
   [data-slot="button"][data-size^="icon"],
+  [data-combobox-trigger],
   [data-slot="toggle"] {
     min-width: 2.75rem;
   }
@@ -155,7 +157,8 @@ body {
   .workspace {
     display: block;
     height: auto;
-    min-height: calc(100dvh - 3.75rem);
+    min-height: 100vh;
+    min-height: 100dvh;
   }
 
   .generation-panel,
@@ -172,7 +175,7 @@ body {
 
   .viewport-panel {
     height: auto;
-    grid-template-rows: auto auto auto auto;
+    grid-template-rows: auto auto auto;
   }
 
   .viewport {
@@ -183,8 +186,7 @@ body {
   [data-slot="input"],
   [data-slot="input-group-control"],
   [data-slot="textarea"],
-  [data-slot="native-select"],
-  [data-slot="select-trigger"] {
+  [data-slot="native-select"] {
     font-size: 1rem;
   }
 }
@@ -225,8 +227,7 @@ body {
   [data-slot="input-group-control"],
   [data-slot="textarea"],
   [data-slot="native-select"],
-  [data-slot="select-trigger"],
-  [data-slot="select-content"],
+  [data-slot="combobox-content"],
   [data-slot="progress-indicator"],
   [data-slot="checkbox"],
   [data-slot="switch"],
@@ -235,7 +236,7 @@ body {
     transition: none;
   }
 
-  [data-slot="select-content"],
+  [data-slot="combobox-content"],
   [data-slot="spinner"],
   [data-slot="accordion-content"],
   [data-slot="alert-dialog-content"],

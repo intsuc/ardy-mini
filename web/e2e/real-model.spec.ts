@@ -27,9 +27,10 @@ async function runGeneration(
   await expect(page.locator("#generate")).toHaveAttribute("aria-busy", "false", {
     timeout: operationTimeout,
   });
-  await expect(page.locator("#motion-badge")).toHaveText(
-    `${expectedFrames} frames · 20 FPS`,
+  await expect(page.locator("#generation-stage")).toHaveText(
+    `${expectedFrames} frames`,
   );
+  await expect(page.locator("#generation-percent")).toHaveText(/^\d+ ms$/);
   await expect(page.locator("#app-status")).toContainText(
     `session contains ${expectedFrames} frames`,
   );
@@ -199,19 +200,13 @@ test.describe("real browser model-pack", () => {
     await setCheckedState(page, "#stream-generation", false);
     await page.evaluate(() => {
       const stage = document.querySelector("#generation-stage");
-      const badge = document.querySelector("#motion-badge");
       const progress = document.querySelector("#generation-progress");
-      if (!stage || !badge || !progress) {
+      if (!stage || !progress) {
         throw new Error("Missing generation UI");
       }
       const stages = [stage.textContent ?? ""];
-      const badges = [badge.textContent ?? ""];
       new MutationObserver(() => stages.push(stage.textContent ?? "")).observe(
         stage,
-        { childList: true, characterData: true, subtree: true },
-      );
-      new MutationObserver(() => badges.push(badge.textContent ?? "")).observe(
-        badge,
         { childList: true, characterData: true, subtree: true },
       );
       let hiddenMutations = 0;
@@ -229,16 +224,9 @@ test.describe("real browser model-pack", () => {
       (
         window as typeof window & {
           __ardyGenerationStages?: string[];
-          __ardyMotionBadges?: string[];
           __ardyGenerationProgressHiddenMutations?: number;
         }
       ).__ardyGenerationStages = stages;
-      (
-        window as typeof window & {
-          __ardyGenerationStages?: string[];
-          __ardyMotionBadges?: string[];
-        }
-      ).__ardyMotionBadges = badges;
       (
         window as typeof window & {
           __ardyGenerationProgressHiddenMutations?: number;
@@ -258,26 +246,17 @@ test.describe("real browser model-pack", () => {
         (
           window as typeof window & { __ardyGenerationStages?: string[] }
         ).__ardyGenerationStages ?? [],
-      badges:
-        (
-          window as typeof window & { __ardyMotionBadges?: string[] }
-        ).__ardyMotionBadges ?? [],
     }));
     expect(firstGenerationUi.stages).toContain("Received 40 frames");
-    expect(firstGenerationUi.badges).toContain("40 frames · 20 FPS");
-    await expect(page.locator("#generation-stage")).toHaveText(
-      /40 session frames|Received 40 frames/,
-    );
-    await expect(page.locator("#generation-percent")).toHaveText("100%");
+    await expect(page.locator("#generation-stage")).toHaveText("40 frames");
+    await expect(page.locator("#generation-percent")).toHaveText(/^\d+ ms$/);
     await expect(page.locator("#generation-progress")).toHaveAttribute(
       "data-state",
       "complete",
     );
     await expect(page.locator("#generation-progress")).toBeVisible();
-    await expect(page.locator("#runtime-metric")).toBeVisible();
     await openPreviewSettings(page);
     await expect(page.locator("#show-contacts")).toBeChecked();
-    await setCheckedState(page, "#show-orientations", true);
     await expect(page.locator("#show-orientations")).toBeChecked();
 
     const playPause = page.locator("#play-pause");
@@ -323,9 +302,7 @@ test.describe("real browser model-pack", () => {
       () => page.locator("#restart-generation").click(),
       40,
     );
-    await expect(page.locator("#generation-stage")).toHaveText(
-      /40 session frames|Received 40 frames/,
-    );
+    await expect(page.locator("#generation-stage")).toHaveText("40 frames");
     if (reducedMotion) {
       await expect(playPause).toHaveAttribute("aria-label", "Play motion");
       await expect(page.locator("#loop-toggle")).toHaveAttribute(
@@ -359,10 +336,9 @@ test.describe("real browser model-pack", () => {
 
     const ui = await page.evaluate(() => ({
       model: document.querySelector("#model-detail")?.textContent ?? "",
-      motion: document.querySelector("#motion-badge")?.textContent ?? "",
-      runtime: document.querySelector("#runtime-value")?.textContent ?? "",
-      runtimeTitle:
-        document.querySelector("#runtime-value")?.getAttribute("title") ?? "",
+      frames: document.querySelector("#generation-stage")?.textContent ?? "",
+      runtime:
+        document.querySelector("#generation-percent")?.textContent ?? "",
       status: document.querySelector("#app-status")?.textContent ?? "",
     }));
     await testInfo.attach("real-model-metrics.json", {

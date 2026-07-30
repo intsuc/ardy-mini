@@ -14,6 +14,12 @@ interface TestVrmMetadata {
   readonly author: string;
 }
 
+interface DragFile {
+  readonly name: string;
+  readonly mimeType: string;
+  readonly buffer: Buffer;
+}
+
 const requiredHumanBones = {
   hips: { node: 0 },
   spine: { node: 1 },
@@ -145,54 +151,63 @@ function createTestVrm(metadata: TestVrmMetadata): Buffer {
   return glb;
 }
 
+async function beginPageFileDrag(
+  page: Page,
+  files: readonly DragFile[],
+) {
+  const dataTransfer = await page.evaluateHandle(
+    (serializedFiles) => {
+      const transfer = new DataTransfer();
+      for (const file of serializedFiles) {
+        transfer.items.add(
+          new File(
+            [Uint8Array.from(file.bytes)],
+            file.name,
+            { type: file.mimeType },
+          ),
+        );
+      }
+      return transfer;
+    },
+    files.map((file) => ({
+      name: file.name,
+      mimeType: file.mimeType,
+      bytes: Array.from(file.buffer),
+    })),
+  );
+  await page.dispatchEvent("#app", "dragenter", { dataTransfer });
+  await page.dispatchEvent("#app", "dragover", { dataTransfer });
+  return dataTransfer;
+}
+
+async function dropPageFiles(
+  page: Page,
+  dataTransfer: Awaited<ReturnType<typeof beginPageFileDrag>>,
+) {
+  await page.dispatchEvent("#app", "drop", { dataTransfer });
+}
+
 test("loads, hides, replaces, and removes a local VRM avatar", async ({
   page,
 }) => {
   await page.goto("/");
   await openPreviewSettings(page);
 
-  const state = page.locator("#vrm-state");
   const card = page.locator("#vrm-card");
+  const name = page.locator("#vrm-name");
+  const detail = page.locator("#vrm-detail");
+  const dropTarget = page.locator("#vrm-drop-target");
   const showAvatar = page.getByRole("switch", {
     name: "Show VRM avatar",
   });
 
-  await expect(state).toHaveText("Optional");
+  await expect(page.locator("#vrm-state")).toHaveCount(0);
   await expect(card).toHaveAttribute("data-state", "missing");
-  await expect(page.locator("#vrm-name")).toHaveText("No avatar loaded");
+  await expect(name).toHaveText("No avatar loaded");
+  await expect(detail).toHaveText("Load a VRM 0.x or 1.0 file.");
   await expect(page.locator("#remove-vrm")).toBeDisabled();
   await expect(showAvatar).toBeDisabled();
-
-  await page.evaluate(() => {
-    const stateElement = document.querySelector("#vrm-state");
-    const cardElement = document.querySelector("#vrm-card");
-    if (!stateElement || !cardElement) {
-      throw new Error("Missing VRM status elements");
-    }
-    const states = [
-      {
-        label: stateElement.textContent ?? "",
-        busy: cardElement.hasAttribute("aria-busy"),
-      },
-    ];
-    new MutationObserver(() => {
-      states.push({
-        label: stateElement.textContent ?? "",
-        busy: cardElement.hasAttribute("aria-busy"),
-      });
-    }).observe(cardElement.parentElement ?? cardElement, {
-      attributes: true,
-      attributeFilter: ["aria-busy", "data-state"],
-      childList: true,
-      characterData: true,
-      subtree: true,
-    });
-    (
-      window as typeof window & {
-        __ardyVrmStates?: Array<{ label: string; busy: boolean }>;
-      }
-    ).__ardyVrmStates = states;
-  });
+  await expect(dropTarget).toBeHidden();
 
   await page.locator("#vrm-file-input").setInputFiles({
     name: "synthetic-avatar.vrm",
@@ -204,28 +219,17 @@ test("loads, hides, replaces, and removes a local VRM avatar", async ({
     }),
   });
 
-  await expect(state).toHaveText("VRM 1.0");
   await expect(card).toHaveAttribute("data-state", "ready");
   await expect(card).not.toHaveAttribute("aria-busy", "");
-  await expect(page.locator("#vrm-name")).toHaveText("Synthetic Avatar");
-  await expect(page.locator("#vrm-detail")).toHaveText(
-    "VRM 1.0 · model 1.2 · by ARDY Test · local preview",
+  await expect(name).toHaveText("Synthetic Avatar");
+  await expect(detail).toHaveText(
+    "VRM 1.0 · model 1.2 · by ARDY Test",
   );
   await expect(page.locator("#import-vrm-label")).toHaveText("Replace VRM");
   await expect(page.locator("#remove-vrm")).toBeEnabled();
   await expect(showAvatar).toBeEnabled();
   await expect(showAvatar).toBeChecked();
   await expect(page.locator("#vrm-error-banner")).toBeHidden();
-
-  const observedStates = await page.evaluate(
-    () =>
-      (
-        window as typeof window & {
-          __ardyVrmStates?: Array<{ label: string; busy: boolean }>;
-        }
-      ).__ardyVrmStates ?? [],
-  );
-  expect(observedStates).toContainEqual({ label: "Loading", busy: true });
 
   await setCheckedState(page, "#show-vrm", false);
   await expect(showAvatar).not.toBeChecked();
@@ -234,24 +238,35 @@ test("loads, hides, replaces, and removes a local VRM avatar", async ({
   await expect(showAvatar).toBeChecked();
   await expect(page.locator("#app-status")).toContainText("VRM avatar shown.");
 
-  await page.locator("#vrm-file-input").setInputFiles({
-    name: "replacement.vrm",
-    mimeType: "model/gltf-binary",
-    buffer: createTestVrm({
-      name: "Replacement Avatar",
-      version: "2.0",
-      author: "Second Author",
-    }),
-  });
-  await expect(page.locator("#vrm-name")).toHaveText("Replacement Avatar");
-  await expect(page.locator("#vrm-detail")).toContainText("model 2.0");
-  await expect(page.locator("#vrm-detail")).toContainText("by Second Author");
+  const replacementTransfer = await beginPageFileDrag(page, [
+    {
+      name: "replacement.vrm",
+      mimeType: "model/gltf-binary",
+      buffer: createTestVrm({
+        name: "Replacement Avatar",
+        version: "2.0",
+        author: "Second Author",
+      }),
+    },
+  ]);
+  try {
+    await expect(dropTarget).toBeVisible();
+    await dropPageFiles(page, replacementTransfer);
+  } finally {
+    await replacementTransfer.dispose();
+  }
+
+  await expect(dropTarget).toBeHidden();
+  await expect(name).toHaveText("Replacement Avatar");
+  await expect(detail).toHaveText(
+    "VRM 1.0 · model 2.0 · by Second Author",
+  );
   await expect(showAvatar).toBeChecked();
 
   await page.locator("#remove-vrm").click();
-  await expect(state).toHaveText("Optional");
   await expect(card).toHaveAttribute("data-state", "missing");
-  await expect(page.locator("#vrm-name")).toHaveText("No avatar loaded");
+  await expect(name).toHaveText("No avatar loaded");
+  await expect(detail).toHaveText("Load a VRM 0.x or 1.0 file.");
   await expect(page.locator("#import-vrm-label")).toHaveText("Load VRM");
   await expect(page.locator("#remove-vrm")).toBeDisabled();
   await expect(showAvatar).toBeDisabled();
@@ -260,29 +275,56 @@ test("loads, hides, replaces, and removes a local VRM avatar", async ({
   );
 });
 
-test("focuses a dismissible error when the selected VRM is invalid", async ({
+test("preserves the current avatar and focuses an error for an invalid VRM drop", async ({
   page,
 }) => {
   await page.goto("/");
-  await openPreviewSettings(page);
+  await expect(page.locator("#preview-settings-trigger")).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
 
-  const fileChooserPromise = page.waitForEvent("filechooser");
-  await page.locator("#import-vrm").click();
-  const fileChooser = await fileChooserPromise;
-  await fileChooser.setFiles({
-    name: "empty.vrm",
+  await page.locator("#vrm-file-input").setInputFiles({
+    name: "stable-avatar.vrm",
     mimeType: "model/gltf-binary",
-    buffer: Buffer.alloc(0),
+    buffer: createTestVrm({
+      name: "Stable Avatar",
+      version: "1.0",
+      author: "ARDY Test",
+    }),
   });
+  await expect(page.locator("#vrm-name")).toHaveText("Stable Avatar");
+
+  const dropTarget = page.locator("#vrm-drop-target");
+  const invalidTransfer = await beginPageFileDrag(page, [
+    {
+      name: "empty.vrm",
+      mimeType: "model/gltf-binary",
+      buffer: Buffer.alloc(0),
+    },
+  ]);
+  try {
+    await expect(dropTarget).toBeVisible();
+    await dropPageFiles(page, invalidTransfer);
+  } finally {
+    await invalidTransfer.dispose();
+  }
 
   const error = page.locator("#vrm-error-banner");
+  await expect(dropTarget).toBeHidden();
+  await expect(page.locator("#preview-settings-trigger")).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
   await expect(error).toBeVisible();
   await expect(error).toBeFocused();
   await expect(page.locator("#vrm-error-message")).toHaveText(
     "The selected VRM file is empty.",
   );
-  await expect(page.locator("#vrm-state")).toHaveText("Optional");
-  await expect(page.locator("#vrm-name")).toHaveText("No avatar loaded");
+  await expect(page.locator("#vrm-name")).toHaveText("Stable Avatar");
+  await expect(page.locator("#vrm-detail")).toHaveText(
+    "VRM 1.0 · model 1.0 · by ARDY Test",
+  );
 
   await page.locator("#dismiss-vrm-error").click();
   await expect(error).toBeHidden();

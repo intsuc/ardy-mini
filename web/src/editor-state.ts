@@ -80,7 +80,7 @@ export const DEFAULT_OUTPUT_VISIBILITY: ViewerOutputVisibility = Object.freeze({
   reference: false,
   trajectory: true,
   contacts: true,
-  orientationAxes: false,
+  orientationAxes: true,
   constraints: true,
   initialTransform: true,
   waypoints: true,

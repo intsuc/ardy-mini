@@ -50,7 +50,6 @@ import {
   Empty,
   EmptyDescription,
   EmptyHeader,
-  EmptyTitle,
 } from "@/components/ui/empty"
 import {
   Field,
@@ -71,18 +70,17 @@ import {
 } from "@/components/ui/input-group"
 import { Label } from "@/components/ui/label"
 import {
+  Combobox,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+} from "@/components/ui/combobox"
+import {
   NativeSelect,
   NativeSelectOption,
 } from "@/components/ui/native-select"
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import { Toggle } from "@/components/ui/toggle"
@@ -93,6 +91,8 @@ import {
   BoundSwitch,
 } from "@/components/control-bindings"
 import {
+  DEFAULT_PROMPT,
+  matchesPromptExample,
   PROMPT_EXAMPLES,
   PROMPT_EXAMPLE_EVENT,
 } from "@/prompt-examples"
@@ -135,55 +135,57 @@ function selectPrompt(prompt: string) {
   )
 }
 
-const PROMPT_SELECT_ITEMS = PROMPT_EXAMPLES.map(({ label, prompt }) => ({
-  label,
-  value: prompt,
-}))
-
-function PromptExampleSelect() {
+function PromptExampleCombobox() {
   return (
     <Field className="min-w-0">
-      <FieldLabel id="prompt-example-label">
+      <FieldLabel htmlFor="prompt-example">
         Example prompt
       </FieldLabel>
-      <Select
-        items={PROMPT_SELECT_ITEMS}
+      <Combobox
+        items={PROMPT_EXAMPLES}
+        itemToStringLabel={(example) => example.label}
+        itemToStringValue={(example) => example.prompt}
+        filter={matchesPromptExample}
+        autoHighlight
         onValueChange={(value) => {
-          if (typeof value === "string") selectPrompt(value)
+          if (value) selectPrompt(value.prompt)
         }}
       >
-        <SelectTrigger
+        <ComboboxInput
           id="prompt-example"
           className="w-full min-w-0"
-          aria-labelledby="prompt-example-label"
-        >
-          <SelectValue placeholder="Choose an example" />
-        </SelectTrigger>
-        <SelectContent alignItemWithTrigger={false} align="start">
-          <SelectGroup>
-            <SelectLabel>Motion examples</SelectLabel>
-            {PROMPT_EXAMPLES.map((example) => (
-              <SelectItem
-                key={example.label}
-                value={example.prompt}
-              >
+          placeholder="Search 100 examples"
+          autoComplete="off"
+          triggerAriaLabel="Open example prompts"
+        />
+        <ComboboxContent>
+          <ComboboxEmpty>No examples found.</ComboboxEmpty>
+          <ComboboxList>
+            {(example) => (
+              <ComboboxItem key={example.prompt} value={example}>
                 {example.label}
-              </SelectItem>
-            ))}
-          </SelectGroup>
-        </SelectContent>
-      </Select>
+              </ComboboxItem>
+            )}
+          </ComboboxList>
+        </ComboboxContent>
+      </Combobox>
     </Field>
   )
 }
 
-function AppHeader() {
+function VrmDropTarget() {
   return (
-    <header className="flex min-h-15 items-center border-b bg-background px-3 py-2 max-[520px]:px-2.5">
-      <strong className="text-sm leading-tight">
-        ARDY Mini
-      </strong>
-    </header>
+    <Alert
+      className="pointer-events-none fixed top-3 left-1/2 z-50 w-[min(24rem,calc(100%_-_1.5rem))] -translate-x-1/2 shadow-lg"
+      id="vrm-drop-target"
+      hidden
+    >
+      <IconUpload aria-hidden="true" />
+      <AlertTitle>Drop VRM avatar</AlertTitle>
+      <AlertDescription>
+        Release the file to load or replace the current avatar.
+      </AlertDescription>
+    </Alert>
   )
 }
 
@@ -198,12 +200,12 @@ function ModelSection() {
       className="model-setup flex flex-col gap-3 border-b p-3"
       aria-labelledby="model-step-title"
     >
-      <h2
+      <h3
         className="text-xs font-medium text-muted-foreground"
         id="model-step-title"
       >
         Model
-      </h2>
+      </h3>
 
       <Card id="model-card" size="sm">
         <CardHeader>
@@ -370,12 +372,12 @@ function PromptSection() {
       aria-labelledby="prompt-step-title"
     >
       <div className="flex items-center justify-between gap-3">
-        <h2
+        <h3
           className="text-xs font-medium text-muted-foreground"
           id="prompt-step-title"
         >
           Prompt
-        </h2>
+        </h3>
       </div>
 
       <FieldGroup>
@@ -387,6 +389,7 @@ function PromptSection() {
             <InputGroupTextarea
               id="prompt"
               name="prompt"
+              defaultValue={DEFAULT_PROMPT}
               rows={3}
               maxLength={280}
               spellCheck
@@ -397,7 +400,7 @@ function PromptSection() {
             />
             <InputGroupAddon align="block-end">
               <InputGroupText id="prompt-count">
-                0 / 280
+                {DEFAULT_PROMPT.length} / 280
               </InputGroupText>
             </InputGroupAddon>
           </InputGroup>
@@ -406,7 +409,7 @@ function PromptSection() {
       </FieldGroup>
 
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-end gap-1.5">
-        <PromptExampleSelect />
+        <PromptExampleCombobox />
         <Button
           id="apply-prompt"
           variant="secondary"
@@ -430,12 +433,12 @@ function ClipSection() {
       aria-labelledby="basic-settings-title"
     >
       <div className="flex items-center justify-between gap-3">
-        <h2
+        <h3
           className="text-xs font-medium text-muted-foreground"
           id="basic-settings-title"
         >
           Clip
-        </h2>
+        </h3>
         <output
           id="duration-output"
           className="text-xs text-muted-foreground"
@@ -673,31 +676,11 @@ function ViewportPanel() {
     <section
       className="viewport-panel"
       id="viewport-panel"
-      aria-labelledby="preview-title"
+      aria-labelledby="motion-preview-title"
     >
-      <div className="flex min-h-15 items-center justify-between gap-3 border-b bg-background px-3 py-2.5">
-        <div>
-          <p className="text-xs text-muted-foreground">Output</p>
-          <h2 className="text-sm font-medium" id="preview-title">
-            3D preview
-          </h2>
-        </div>
-        <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
-          <Badge
-            variant="outline"
-            id="motion-badge"
-          >
-            No motion
-          </Badge>
-          <Badge
-            variant="outline"
-            id="runtime-metric"
-            hidden
-          >
-            <strong id="runtime-value">—</strong>
-          </Badge>
-        </div>
-      </div>
+      <h2 className="sr-only" id="motion-preview-title">
+        Motion preview
+      </h2>
 
       <PreviewSettingsSection />
 
@@ -723,7 +706,6 @@ function ViewportPanel() {
           id="empty-state"
         >
           <EmptyHeader>
-            <EmptyTitle>No motion loaded</EmptyTitle>
             <EmptyDescription>
               Load the Core40 model, enter a prompt, then generate.
             </EmptyDescription>
@@ -812,17 +794,12 @@ function VrmAvatarSection() {
       className="grid gap-3"
       aria-labelledby="vrm-avatar-title"
     >
-      <div className="flex items-center justify-between gap-3">
-        <h3
-          className="text-xs font-medium text-muted-foreground"
-          id="vrm-avatar-title"
-        >
-          VRM avatar
-        </h3>
-        <Badge id="vrm-state" variant="outline" data-state="missing">
-          Optional
-        </Badge>
-      </div>
+      <h3
+        className="text-xs font-medium text-muted-foreground"
+        id="vrm-avatar-title"
+      >
+        VRM avatar
+      </h3>
 
       <Card id="vrm-card" size="sm">
         <CardHeader>
@@ -830,7 +807,7 @@ function VrmAvatarSection() {
             No avatar loaded
           </CardTitle>
           <CardDescription id="vrm-detail">
-            Load a VRM 0.x or 1.0 file for local preview.
+            Load a VRM 0.x or 1.0 file.
           </CardDescription>
         </CardHeader>
         <CardFooter className="grid grid-cols-2 gap-1.5">
@@ -952,20 +929,12 @@ function GenerationPanel() {
     <aside
       className="panel generation-panel"
       id="generator-panel"
-      aria-labelledby="generation-panel-title"
+      aria-labelledby="motion-controls-title"
       tabIndex={-1}
     >
-      <div className="sticky top-0 z-10 flex min-h-15 items-center gap-3 border-b bg-background px-3 py-2.5 max-[760px]:static">
-        <div>
-          <p className="text-xs text-muted-foreground">Input</p>
-          <h1
-            className="text-sm font-medium"
-            id="generation-panel-title"
-          >
-            Motion generation
-          </h1>
-        </div>
-      </div>
+      <h2 className="sr-only" id="motion-controls-title">
+        Motion controls
+      </h2>
 
       <form id="generation-form" noValidate>
         <ModelSection />
@@ -991,8 +960,6 @@ export function App() {
         Skip to generation controls
       </a>
 
-      <AppHeader />
-
       <p
         className="sr-only"
         id="app-status"
@@ -1001,7 +968,11 @@ export function App() {
         aria-atomic="true"
       />
 
+      <VrmDropTarget />
+
       <main className="workspace">
+        <h1 className="sr-only">ARDY browser motion workspace</h1>
+
         <GenerationPanel />
 
         <ViewportPanel />

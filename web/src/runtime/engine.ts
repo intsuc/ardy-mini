@@ -1017,7 +1017,7 @@ export class BrowserArdyGenerationSession {
         stage: "decoding",
         completed: windowIndex + 1,
         total: windowCount,
-        message: `${this.#frameCount} session frames`,
+        message: `${this.#frameCount} frames`,
       });
     }
 

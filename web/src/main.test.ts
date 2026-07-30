@@ -10,8 +10,11 @@ import {
   formatBytes,
   formatTime,
   isModelPackArchive,
+  isVrmFile,
+  resolveGenerationProgressState,
   shouldAutoplayMotion,
   shouldResetMotionPresentation,
+  shouldShowIdleGenerationStatus,
   validateGenerationForm,
 } from "./main";
 
@@ -69,6 +72,14 @@ describe("model-pack archive selection", () => {
   });
 });
 
+describe("VRM file selection", () => {
+  it("accepts the VRM extension case-insensitively", () => {
+    expect(isVrmFile(new File(["vrm"], "avatar.vrm"))).toBe(true);
+    expect(isVrmFile(new File(["vrm"], "AVATAR.VRM"))).toBe(true);
+    expect(isVrmFile(new File(["glb"], "avatar.glb"))).toBe(false);
+  });
+});
+
 describe("display formatting", () => {
   it("formats playback time and binary sizes", () => {
     expect(formatTime(4.25)).toBe("00:04.25");
@@ -80,6 +91,18 @@ describe("display formatting", () => {
   it("does not autoplay generated motion when reduced motion is requested", () => {
     expect(shouldAutoplayMotion(false)).toBe(true);
     expect(shouldAutoplayMotion(true)).toBe(false);
+  });
+});
+
+describe("generation progress presentation", () => {
+  it("preserves partial playback-only motion instead of resetting to idle", () => {
+    expect(resolveGenerationProgressState(false, true, 0.35)).toBe(
+      "playback-only",
+    );
+    expect(
+      shouldShowIdleGenerationStatus(false, "playback-only"),
+    ).toBe(false);
+    expect(shouldShowIdleGenerationStatus(false, "idle")).toBe(true);
   });
 });
 

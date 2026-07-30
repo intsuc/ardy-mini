@@ -190,7 +190,7 @@ export const showContactsControl = createCheckedControl(
 
 export const showOrientationsControl = createCheckedControl(
   "show-orientations",
-  false
+  true
 )
 
 export const showTrajectoryControl = createCheckedControl(

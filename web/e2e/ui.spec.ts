@@ -35,8 +35,28 @@ test("renders the two-pane technical workspace without motion parameters", async
   );
   expect(panePositions.every(Boolean)).toBe(true);
   expect(panePositions[0]!.x).toBeLessThan(panePositions[1]!.x);
+  expect(panePositions[0]!.y).toBe(0);
+  expect(panePositions[1]!.y).toBe(0);
+  expect(panePositions[0]!.height).toBeCloseTo(900, 1);
+  expect(panePositions[1]!.height).toBeCloseTo(900, 1);
 
   await expect(page.getByLabel("Motion description")).toBeEditable();
+  await expect(page.locator("header")).toHaveCount(0);
+  for (const removedText of [
+    "ARDY Mini",
+    "Input",
+    "Output",
+    "Motion generation",
+    "3D preview",
+    "No motion",
+    "No motion loaded",
+  ]) {
+    await expect(
+      page.locator("body").getByText(removedText, { exact: true }),
+    ).toHaveCount(0);
+  }
+  await expect(page.locator("#motion-badge")).toHaveCount(0);
+  await expect(page.locator("#runtime-metric")).toHaveCount(0);
   await expect(
     page.getByText(
       "Clear, typo-free English. Apply updates while streaming.",
@@ -159,6 +179,7 @@ test("renders the two-pane technical workspace without motion parameters", async
     "data-slot",
     "switch",
   );
+  await expect(page.locator("#show-orientations")).toBeChecked();
   await expect(page.getByText("Body proxy", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Reference motion", { exact: true })).toHaveCount(0);
 });
@@ -199,6 +220,7 @@ test("retains the square Lyra treatment on standard shadcn surfaces", async ({
       "#model-card",
       "#generate",
       "#prompt",
+      "#prompt-example",
       "#seed",
       "#playback-speed",
     ].map((selector) => {
@@ -210,7 +232,14 @@ test("retains the square Lyra treatment on standard shadcn surfaces", async ({
     }),
   );
 
-  expect(radii).toEqual(["0px", "0px", "0px", "0px", "0px"]);
+  expect(radii).toEqual([
+    "0px",
+    "0px",
+    "0px",
+    "0px",
+    "0px",
+    "0px",
+  ]);
 });
 
 test("keeps the shadow light and plane under off-origin motion", async ({
@@ -566,8 +595,10 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
     "data-slot",
     "input-group",
   );
-  await prompt.fill("A person walks forward confidently.");
-  await expect(page.locator("#prompt-count")).toHaveText("35 / 280");
+  await expect(prompt).toHaveValue(
+    "A person walks forward, then waves with their right hand.",
+  );
+  await expect(page.locator("#prompt-count")).toHaveText("57 / 280");
   await page.locator("#prompt-count").click();
   await expect(prompt).toBeFocused();
 
@@ -580,13 +611,27 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
   const promptExample = page.getByRole("combobox", {
     name: "Example prompt",
   });
+  await expect(
+    page.getByRole("button", { name: "Open example prompts" }),
+  ).toBeVisible();
   await promptExample.click();
-  const promptOptions = page
-    .locator('[data-slot="select-content"]')
-    .getByRole("option");
-  await expect(promptOptions).toHaveCount(10);
-  await promptOptions.filter({ hasText: "Joyful dance" }).click();
-  await expect(promptExample).toContainText("Joyful dance");
+  const promptExampleContent = page.locator(
+    '[data-slot="combobox-content"]',
+  );
+  await expect(promptExampleContent).toBeVisible();
+  const promptOptions = promptExampleContent.getByRole("option");
+  await expect(promptOptions).toHaveCount(100);
+  await expect(promptOptions.first()).toHaveAttribute(
+    "data-slot",
+    "combobox-item",
+  );
+
+  await promptExample.fill("Joyful dance");
+  await expect(promptOptions).toHaveCount(1);
+  await expect(promptOptions).toHaveText("Joyful dance");
+  await promptExample.press("ArrowDown");
+  await promptExample.press("Enter");
+  await expect(promptExample).toHaveValue("Joyful dance");
   await expect(prompt).toHaveValue("A person performs a joyful dance.");
 
   const validation = await page.evaluate(async () => {
@@ -624,6 +669,19 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   page,
 }) => {
   await page.goto("/");
+
+  await expect(
+    page.getByRole("heading", {
+      level: 1,
+      name: "ARDY browser motion workspace",
+    }),
+  ).toHaveClass(/sr-only/);
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Motion controls" }),
+  ).toHaveClass(/sr-only/);
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Motion preview" }),
+  ).toHaveClass(/sr-only/);
 
   await page.keyboard.press("Tab");
   await expect(page.locator(".skip-link")).toBeFocused();
@@ -715,7 +773,7 @@ test("keeps invalid model-pack errors beside the model setup action", async ({
   const modelError = page.locator("#model-error-banner");
   await expect(modelError).toBeVisible();
   await expect(modelError).toBeFocused();
-  await expect(modelError).toContainText(/decompress|gzip/i);
+  await expect(modelError).toContainText(/decompress|gzip|shader-f16/i);
   await expect(page.locator("#error-banner")).toBeHidden();
   await expect
     .poll(() =>
@@ -801,6 +859,15 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
         .evaluate((element) => getComputedStyle(element).transitionDuration),
     )
     .toBe("0s");
+  await page.locator("#prompt-example").click();
+  await expect
+    .poll(() =>
+      page
+        .locator('[data-slot="combobox-content"]')
+        .evaluate((element) => getComputedStyle(element).animationName),
+    )
+    .toBe("none");
+  await page.keyboard.press("Escape");
   const importModel = page.locator("#import-model");
   const importModelBox = await importModel.boundingBox();
   expect(importModelBox).not.toBeNull();
@@ -858,6 +925,7 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
     ),
   );
   expect(panes.every(Boolean)).toBe(true);
+  expect(panes[0]!.y).toBe(0);
   expect(panes[0]!.y).toBeLessThan(panes[1]!.y);
   await expect(page.locator(".inspector-panel")).toHaveCount(0);
 
@@ -936,7 +1004,8 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
 
     const selectors = [
       "#import-model",
-      "#prompt-example",
+      '[data-slot="input-group"]:has(#prompt-example)',
+      "[data-combobox-trigger]",
       "#apply-prompt",
       "#randomize-seed",
       "#generate",
@@ -959,10 +1028,12 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
       expect(box!.height).toBeGreaterThanOrEqual(44);
     }
 
-    const promptExamples = page.locator('[data-slot="select-item"]');
+    const promptExamples = page.locator('[data-slot="combobox-item"]');
     await page.locator("#prompt-example").click();
-    await expect(promptExamples).toHaveCount(10);
-    for (const item of await promptExamples.all()) {
+    await expect(promptExamples).toHaveCount(100);
+    for (const index of [0, 49, 99]) {
+      const item = promptExamples.nth(index);
+      await item.scrollIntoViewIfNeeded();
       const box = await item.boundingBox();
       expect(box).not.toBeNull();
       expect(box!.height).toBeGreaterThanOrEqual(44);
@@ -1000,6 +1071,7 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
     );
 
     const orientations = page.locator("#show-orientations");
+    await expect(orientations).toHaveAttribute("aria-checked", "true");
     const orientationsLabel = page.locator(
       'label[for="show-orientations"]',
     );
@@ -1010,7 +1082,7 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
       orientationsLabelBox!.x + orientationsLabelBox!.width - 2,
       orientationsLabelBox!.y + orientationsLabelBox!.height - 2,
     );
-    await expect(orientations).toHaveAttribute("aria-checked", "true");
+    await expect(orientations).toHaveAttribute("aria-checked", "false");
   } finally {
     await context.close();
   }

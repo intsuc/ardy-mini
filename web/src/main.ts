@@ -169,6 +169,31 @@ export function isModelPackArchive(file: File): boolean {
   return file.size > 0 && file.name.toLowerCase().endsWith(".tar.gz");
 }
 
+export function isVrmFile(file: File): boolean {
+  return file.name.toLocaleLowerCase("en-US").endsWith(".vrm");
+}
+
+export function resolveGenerationProgressState(
+  active: boolean,
+  playbackOnly: boolean,
+  progress: number,
+): "active" | "complete" | "idle" | "playback-only" {
+  if (active) return "active";
+  if (playbackOnly) return "playback-only";
+  return progress >= 1 ? "complete" : "idle";
+}
+
+export function shouldShowIdleGenerationStatus(
+  generationBusy: boolean,
+  state: string | undefined,
+): boolean {
+  return (
+    !generationBusy &&
+    state !== "complete" &&
+    state !== "playback-only"
+  );
+}
+
 export function shouldAutoplayMotion(reducedMotion: boolean): boolean {
   return !reducedMotion;
 }
@@ -683,9 +708,6 @@ export function bootstrap(): () => void {
   const dismissError = requiredElement<HTMLButtonElement>("dismiss-error");
   const canvas = requiredElement<HTMLCanvasElement>("motion-canvas");
   const emptyState = requiredElement<HTMLElement>("empty-state");
-  const motionBadge = requiredElement<HTMLElement>("motion-badge");
-  const runtimeMetric = requiredElement<HTMLElement>("runtime-metric");
-  const runtimeValue = requiredElement<HTMLElement>("runtime-value");
   const playPause = requiredElement<HTMLButtonElement>("play-pause");
   const currentTime = requiredElement<HTMLElement>("current-time");
   const totalTime = requiredElement<HTMLElement>("total-time");
@@ -699,7 +721,6 @@ export function bootstrap(): () => void {
   const vrmCard = requiredElement<HTMLElement>("vrm-card");
   const vrmName = requiredElement<HTMLElement>("vrm-name");
   const vrmDetail = requiredElement<HTMLElement>("vrm-detail");
-  const vrmState = requiredElement<HTMLElement>("vrm-state");
   const importVrm = requiredElement<HTMLButtonElement>("import-vrm");
   const importVrmLabel = requiredElement<HTMLElement>("import-vrm-label");
   const vrmFileInput = requiredElement<HTMLInputElement>("vrm-file-input");
@@ -710,6 +731,7 @@ export function bootstrap(): () => void {
     requiredElement<HTMLElement>("vrm-error-message");
   const dismissVrmError =
     requiredElement<HTMLButtonElement>("dismiss-vrm-error");
+  const vrmDropTarget = requiredElement<HTMLElement>("vrm-drop-target");
 
   restartFromNow.disabled = true;
 
@@ -754,10 +776,13 @@ export function bootstrap(): () => void {
   let generationReturnFocus: HTMLElement | null = null;
   let currentMotion: StructuredMotionResult | null = null;
   let currentContinuation: RuntimeContinuationState | null = null;
+  let playbackOnlyStatus = false;
   let currentProvenance: MotionSessionProvenance = {};
   let editorState = cloneEditorState(DEFAULT_EDITOR_STATE);
   let activeVrmLoad = 0;
   let currentVrmInfo: VrmModelInfo | null = null;
+  let vrmLoading = false;
+  let vrmDragDepth = 0;
 
   const postCommand = (command: WorkerCommand): void =>
     worker.postMessage(command);
@@ -895,7 +920,6 @@ export function bootstrap(): () => void {
       info.metaVersion === "0" ? "VRM 0.x" : "VRM 1.0",
       info.version ? `model ${info.version}` : "",
       info.authors.length > 0 ? `by ${info.authors.join(", ")}` : "",
-      "local preview",
     ].filter(Boolean);
     return details.join(" · ");
   }
@@ -903,35 +927,18 @@ export function bootstrap(): () => void {
   function setVrmStatus(info: VrmModelInfo | null): void {
     currentVrmInfo = info;
     vrmCard.dataset.state = info ? "ready" : "missing";
-    vrmState.dataset.state = info ? "ready" : "missing";
     vrmName.textContent = info?.name ?? "No avatar loaded";
     vrmDetail.textContent = info
       ? vrmDetailText(info)
-      : "Load a VRM 0.x or 1.0 file for local preview.";
-    vrmState.textContent = info
-      ? info.metaVersion === "0"
-        ? "VRM 0.x"
-        : "VRM 1.0"
-      : "Optional";
+      : "Load a VRM 0.x or 1.0 file.";
     importVrmLabel.textContent = info ? "Replace VRM" : "Load VRM";
     removeVrm.disabled = !info;
     showVrmControl.setState({ disabled: !info });
   }
 
   function setVrmLoading(loading: boolean): void {
+    vrmLoading = loading;
     vrmCard.toggleAttribute("aria-busy", loading);
-    vrmState.dataset.state = loading
-      ? "loading"
-      : currentVrmInfo
-        ? "ready"
-        : "missing";
-    vrmState.textContent = loading
-      ? "Loading"
-      : currentVrmInfo
-        ? currentVrmInfo.metaVersion === "0"
-          ? "VRM 0.x"
-          : "VRM 1.0"
-        : "Optional";
     importVrm.disabled = loading || viewer === null;
     removeVrm.disabled = loading || currentVrmInfo === null;
     showVrmControl.setState({
@@ -952,7 +959,9 @@ export function bootstrap(): () => void {
     previewSettingsControl.setState({ open: true });
     vrmErrorMessage.textContent = message;
     vrmErrorBanner.hidden = false;
-    vrmErrorBanner.focus();
+    window.requestAnimationFrame(() => {
+      if (!vrmErrorBanner.hidden) vrmErrorBanner.focus();
+    });
     announce(`VRM import failed: ${message}`);
   }
 
@@ -960,6 +969,53 @@ export function bootstrap(): () => void {
     vrmErrorBanner.hidden = true;
     if (restoreFocus) vrmErrorReturnFocus?.focus();
     vrmErrorReturnFocus = null;
+  }
+
+  async function loadVrmFile(file: File): Promise<void> {
+    if (vrmLoading) {
+      showVrmError("Wait for the current VRM file to finish loading.");
+      return;
+    }
+    if (!isVrmFile(file)) {
+      showVrmError("Choose a .vrm file.");
+      return;
+    }
+
+    const request = ++activeVrmLoad;
+    clearVrmError();
+    setVrmLoading(true);
+    try {
+      if (!viewer) {
+        throw new Error("The 3D preview is unavailable in this browser.");
+      }
+      const info = await viewer.loadVrm(file);
+      if (request !== activeVrmLoad) return;
+      clearVrmError();
+      showVrmControl.setState({ checked: true });
+      viewer.setVrmVisible(true);
+      setVrmStatus(info);
+      announce(`Loaded VRM avatar ${info.name}.`);
+    } catch (error) {
+      if (request !== activeVrmLoad) return;
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setVrmStatus(currentVrmInfo);
+      showVrmError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (request === activeVrmLoad) setVrmLoading(false);
+    }
+  }
+
+  function setVrmDropTargetVisible(visible: boolean): void {
+    vrmDropTarget.hidden = !visible;
+  }
+
+  function resetVrmDropTarget(): void {
+    vrmDragDepth = 0;
+    setVrmDropTargetVisible(false);
+  }
+
+  function hasDraggedFiles(event: DragEvent): boolean {
+    return Array.from(event.dataTransfer?.types ?? []).includes("Files");
   }
 
   function updatePrompt(): void {
@@ -1059,8 +1115,10 @@ export function bootstrap(): () => void {
     }
 
     if (
-      !generationBusy &&
-      generationProgressElement.dataset.state !== "complete"
+      shouldShowIdleGenerationStatus(
+        generationBusy,
+        generationProgressElement.dataset.state,
+      )
     ) {
       generationStage.textContent = modelReady
         ? "Ready to generate"
@@ -1077,11 +1135,13 @@ export function bootstrap(): () => void {
 
   function markCurrentMotionPlaybackOnly(): void {
     currentContinuation = null;
+    playbackOnlyStatus = currentMotion !== null;
     if (currentMotion) {
       continuousGenerationControl.setState({ checked: false });
-      motionBadge.removeAttribute("data-state");
-      motionBadge.textContent =
-        `${currentMotion.frameCount} frames · ${currentMotion.fps} FPS · playback only`;
+      generationProgressElement.dataset.state = "playback-only";
+      generationStage.textContent =
+        `${currentMotion.frameCount} frames · playback only`;
+      generationPercent.textContent = "—";
     }
     updateGenerateAvailability();
   }
@@ -1093,11 +1153,11 @@ export function bootstrap(): () => void {
       (activeElement === cancelGeneration || activeElement === document.body)
         ? generationReturnFocus
         : null;
-    generationProgressElement.dataset.state = active
-      ? "active"
-      : generationProgressValue >= 1
-        ? "complete"
-        : "idle";
+    generationProgressElement.dataset.state = resolveGenerationProgressState(
+      active,
+      playbackOnlyStatus,
+      generationProgressValue,
+    );
     generationProgressElement.setAttribute("aria-busy", String(active));
     cancelGeneration.dataset.state = active ? "active" : "idle";
     cancelGeneration.disabled = !active;
@@ -1395,8 +1455,6 @@ export function bootstrap(): () => void {
       updateLoopControl({ pressed: loop });
     }
     emptyState.hidden = true;
-    motionBadge.dataset.state = "ready";
-    motionBadge.textContent = `${currentMotion.frameCount} frames · ${currentMotion.fps} FPS`;
     updateGenerateAvailability();
   }
 
@@ -1450,6 +1508,7 @@ export function bootstrap(): () => void {
         );
       }
       currentContinuation = event.result.continuation;
+      playbackOnlyStatus = false;
       const playback = viewer?.getPlaybackState();
       const resetPresentation = shouldResetMotionPresentation(
         active.mode,
@@ -1461,13 +1520,10 @@ export function bootstrap(): () => void {
         resetPresentation,
       );
       generationProgressValue = 1;
-      generationPercent.textContent = "100%";
+      generationStage.textContent = `${event.sessionFrameCount} frames`;
+      generationPercent.textContent =
+        `${Math.round(event.result.timingsMs.total)} ms`;
       setProgress(generationProgressControl, 1);
-      runtimeMetric.hidden = false;
-      runtimeValue.textContent =
-        event.result.timingsMs.total >= 1000
-          ? `${(event.result.timingsMs.total / 1000).toFixed(2)} s`
-          : `${Math.round(event.result.timingsMs.total)} ms`;
       activeGeneration = null;
       setGenerationBusy(false);
       announce(
@@ -1552,6 +1608,7 @@ export function bootstrap(): () => void {
     const values = validateFormForGeneration();
     if (!values) return;
     clearError();
+    playbackOnlyStatus = false;
     const background = Boolean(options.background);
     const id = requestId(mode);
     const playback = viewer?.getPlaybackState();
@@ -1967,29 +2024,57 @@ export function bootstrap(): () => void {
     const file = vrmFileInput.files?.[0];
     vrmFileInput.value = "";
     if (!file) return;
-    const request = ++activeVrmLoad;
-    clearVrmError();
-    setVrmLoading(true);
-    void (async () => {
-      try {
-        if (!viewer) {
-          throw new Error("The 3D preview is unavailable in this browser.");
-        }
-        const info = await viewer.loadVrm(file);
-        if (request !== activeVrmLoad) return;
-        showVrmControl.setState({ checked: true });
-        viewer.setVrmVisible(true);
-        setVrmStatus(info);
-        announce(`Loaded VRM avatar ${info.name}.`);
-      } catch (error) {
-        if (request !== activeVrmLoad) return;
-        if (error instanceof DOMException && error.name === "AbortError") return;
-        setVrmStatus(currentVrmInfo);
-        showVrmError(error instanceof Error ? error.message : String(error));
-      } finally {
-        if (request === activeVrmLoad) setVrmLoading(false);
+    void loadVrmFile(file);
+  });
+  window.addEventListener(
+    "dragenter",
+    (event) => {
+      if (!hasDraggedFiles(event)) return;
+      event.preventDefault();
+      vrmDragDepth += 1;
+      setVrmDropTargetVisible(true);
+    },
+    { signal: lifecycle.signal },
+  );
+  window.addEventListener(
+    "dragover",
+    (event) => {
+      if (!hasDraggedFiles(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      setVrmDropTargetVisible(true);
+    },
+    { signal: lifecycle.signal },
+  );
+  window.addEventListener(
+    "dragleave",
+    (event) => {
+      if (!hasDraggedFiles(event)) return;
+      vrmDragDepth = Math.max(0, vrmDragDepth - 1);
+      if (vrmDragDepth === 0) setVrmDropTargetVisible(false);
+    },
+    { signal: lifecycle.signal },
+  );
+  window.addEventListener(
+    "drop",
+    (event) => {
+      if (!hasDraggedFiles(event)) return;
+      event.preventDefault();
+      const files = Array.from(event.dataTransfer?.files ?? []);
+      resetVrmDropTarget();
+      if (files.length !== 1 || !isVrmFile(files[0])) {
+        showVrmError("Drop a single .vrm file.");
+        return;
       }
-    })();
+      void loadVrmFile(files[0]);
+    },
+    { signal: lifecycle.signal },
+  );
+  window.addEventListener("dragend", resetVrmDropTarget, {
+    signal: lifecycle.signal,
+  });
+  window.addEventListener("blur", resetVrmDropTarget, {
+    signal: lifecycle.signal,
   });
   removeVrm.addEventListener("click", () => {
     activeVrmLoad += 1;
@@ -2117,6 +2202,7 @@ export function bootstrap(): () => void {
     if (disposed) return;
     disposed = true;
     activeVrmLoad += 1;
+    resetVrmDropTarget();
     try {
       postCommand({ type: "dispose", requestId: requestId("dispose") });
     } catch {
