@@ -197,7 +197,7 @@ test("loads, hides, replaces, and removes a local VRM avatar", async ({
   const name = page.locator("#vrm-name");
   const detail = page.locator("#vrm-detail");
   const dropTarget = page.locator("#vrm-drop-target");
-  const showAvatar = page.getByRole("switch", {
+  const showAvatar = page.getByRole("checkbox", {
     name: "Show VRM avatar",
   });
 

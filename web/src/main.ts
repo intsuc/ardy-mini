@@ -707,7 +707,6 @@ export function bootstrap(): () => void {
   const errorMessage = requiredElement<HTMLElement>("error-message");
   const dismissError = requiredElement<HTMLButtonElement>("dismiss-error");
   const canvas = requiredElement<HTMLCanvasElement>("motion-canvas");
-  const emptyState = requiredElement<HTMLElement>("empty-state");
   const playPause = requiredElement<HTMLButtonElement>("play-pause");
   const currentTime = requiredElement<HTMLElement>("current-time");
   const totalTime = requiredElement<HTMLElement>("total-time");
@@ -1454,7 +1453,6 @@ export function bootstrap(): () => void {
       viewer.setLoop(loop);
       updateLoopControl({ pressed: loop });
     }
-    emptyState.hidden = true;
     updateGenerateAvailability();
   }
 

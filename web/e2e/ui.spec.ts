@@ -50,6 +50,7 @@ test("renders the two-pane technical workspace without motion parameters", async
     "3D preview",
     "No motion",
     "No motion loaded",
+    "Load the Core40 model, enter a prompt, then generate.",
   ]) {
     await expect(
       page.locator("body").getByText(removedText, { exact: true }),
@@ -171,14 +172,18 @@ test("renders the two-pane technical workspace without motion parameters", async
   await expect(page.locator("#import-vrm")).toBeEnabled();
   await expect(page.getByText("Foot contacts", { exact: true })).toBeVisible();
   await expect(page.getByText("Orientations", { exact: true })).toBeVisible();
-  await expect(page.locator("#show-skeleton")).toHaveAttribute(
-    "data-slot",
-    "checkbox",
-  );
-  await expect(page.locator("#show-vrm")).toHaveAttribute(
-    "data-slot",
-    "switch",
-  );
+  for (const selector of [
+    "#show-vrm",
+    "#show-skeleton",
+    "#show-contacts",
+    "#show-orientations",
+    "#show-trajectory",
+  ]) {
+    await expect(page.locator(selector)).toHaveAttribute(
+      "data-slot",
+      "checkbox",
+    );
+  }
   await expect(page.locator("#show-orientations")).toBeChecked();
   await expect(page.getByText("Body proxy", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Reference motion", { exact: true })).toHaveCount(0);
@@ -611,6 +616,10 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
   const promptExample = page.getByRole("combobox", {
     name: "Example prompt",
   });
+  await expect(promptExample).toHaveAttribute(
+    "placeholder",
+    "Search examples",
+  );
   await expect(
     page.getByRole("button", { name: "Open example prompts" }),
   ).toBeVisible();

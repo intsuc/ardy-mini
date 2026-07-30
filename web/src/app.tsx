@@ -47,11 +47,6 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-} from "@/components/ui/empty"
-import {
   Field,
   FieldDescription,
   FieldError,
@@ -154,7 +149,7 @@ function PromptExampleCombobox() {
         <ComboboxInput
           id="prompt-example"
           className="w-full min-w-0"
-          placeholder="Search 100 examples"
+          placeholder="Search examples"
           autoComplete="off"
           triggerAriaLabel="Open example prompts"
         />
@@ -700,17 +695,6 @@ function ViewportPanel() {
           Arrow to seek, W A S D to move the camera, Shift plus Arrow keys
           to orbit, Plus or Minus to zoom, and Home to reset the camera.
         </p>
-
-        <Empty
-          className="pointer-events-none absolute top-1/2 left-1/2 w-[min(22rem,calc(100%_-_2rem))] -translate-x-1/2 -translate-y-1/2"
-          id="empty-state"
-        >
-          <EmptyHeader>
-            <EmptyDescription>
-              Load the Core40 model, enter a prompt, then generate.
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
       </div>
 
       <div
@@ -841,10 +825,10 @@ function VrmAvatarSection() {
         orientation="horizontal"
         data-disabled={showVrm.disabled || undefined}
       >
+        <BoundCheckbox control={showVrmControl} />
         <FieldLabel htmlFor={showVrmControl.id}>
           Show VRM avatar
         </FieldLabel>
-        <BoundSwitch control={showVrmControl} />
       </Field>
 
       <Alert
