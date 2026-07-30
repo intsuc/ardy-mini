@@ -3,11 +3,13 @@
 
 import { useEffect, useRef, useState } from "react"
 import {
+  IconLayoutSidebar,
   IconCameraRotate,
   IconPlayerPause,
   IconPlayerPlay,
   IconRefresh,
   IconRepeat,
+  IconSettings,
   IconUpload,
   IconX,
 } from "@tabler/icons-react"
@@ -18,12 +20,6 @@ import {
   AlertDescription,
   AlertTitle,
 } from "@/components/ui/alert"
-import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
-} from "@/components/ui/accordion"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -63,7 +59,6 @@ import {
   InputGroupText,
   InputGroupTextarea,
 } from "@/components/ui/input-group"
-import { Label } from "@/components/ui/label"
 import {
   Combobox,
   ComboboxContent,
@@ -73,12 +68,29 @@ import {
   ComboboxList,
 } from "@/components/ui/combobox"
 import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select"
+  Popover,
+  PopoverContent,
+  PopoverHeader,
+  PopoverTitle,
+  PopoverTrigger,
+} from "@/components/ui/popover"
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import { Toggle } from "@/components/ui/toggle"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import {
   BoundCheckbox,
   BoundProgress,
@@ -98,6 +110,8 @@ import {
   generationProgressControl,
   loopControl,
   modelProgressControl,
+  playbackSpeedControl,
+  playPauseControl,
   previewSettingsControl,
   removeSavedModelAction,
   showContactsControl,
@@ -107,6 +121,7 @@ import {
   showVrmControl,
   targetBufferControl,
   timelineControl,
+  unsupportedDeviceControl,
   useControlState,
 } from "@/ui-control-store"
 
@@ -129,6 +144,12 @@ function selectPrompt(prompt: string) {
     })
   )
 }
+
+const PLAYBACK_SPEED_OPTIONS = [
+  { label: "0.5×", value: "0.5" },
+  { label: "1×", value: "1" },
+  { label: "2×", value: "2" },
+]
 
 function PromptExampleCombobox() {
   return (
@@ -181,6 +202,34 @@ function VrmDropTarget() {
         Release the file to load or replace the current avatar.
       </AlertDescription>
     </Alert>
+  )
+}
+
+function UnsupportedDeviceDialog() {
+  const state = useControlState(unsupportedDeviceControl)
+  const contentRef = useRef<HTMLDivElement>(null)
+
+  return (
+    <AlertDialog
+      open={state.open}
+      onOpenChange={(open, eventDetails) => {
+        if (!open) eventDetails.cancel()
+      }}
+    >
+      <AlertDialogContent
+        ref={contentRef}
+        initialFocus={contentRef}
+        size="sm"
+        tabIndex={-1}
+      >
+        <AlertDialogHeader>
+          <AlertDialogTitle>{state.title}</AlertDialogTitle>
+          <AlertDialogDescription>
+            {state.description}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+      </AlertDialogContent>
+    </AlertDialog>
   )
 }
 
@@ -480,10 +529,7 @@ function ClipSection() {
                   aria-label="Choose a random seed"
                   title="Random seed"
                 >
-                  <IconRefresh
-                    data-icon="inline-start"
-                    aria-hidden="true"
-                  />
+                  <IconRefresh aria-hidden="true" />
                 </InputGroupButton>
               </InputGroupAddon>
             </InputGroup>
@@ -622,51 +668,142 @@ function GenerationActionsSection() {
   )
 }
 
-function GenerationMessages() {
-  return (
-    <Alert
-      className="m-3"
-      id="error-banner"
-      variant="destructive"
-      tabIndex={-1}
-      hidden
-    >
-      <AlertTitle id="error-title">Generation failed</AlertTitle>
-      <AlertDescription id="error-message" />
-      <AlertAction>
-        <Button
-          id="dismiss-error"
-          variant="ghost"
-          size="icon-lg"
-          type="button"
-          aria-label="Dismiss generation error"
-        >
-          <IconX data-icon="inline-start" aria-hidden="true" />
-        </Button>
-      </AlertAction>
-    </Alert>
-  )
-}
-
 function LoopToggle() {
   const state = useControlState(loopControl)
 
   return (
-    <Toggle
-      id="loop-toggle"
-      variant="outline"
-      size="lg"
-      pressed={state.pressed}
-      disabled={state.disabled}
-      onPressedChange={loopControl.commit}
-      aria-label="Loop playback"
-    >
-      <IconRepeat data-icon="inline-start" aria-hidden="true" />
-    </Toggle>
+    <Tooltip>
+      <TooltipTrigger
+        render={<span className="inline-flex" />}
+      >
+        <Toggle
+          id="loop-toggle"
+          variant="outline"
+          size="lg"
+          pressed={state.pressed}
+          disabled={state.disabled}
+          onPressedChange={loopControl.commit}
+          aria-label="Loop playback"
+        >
+          <IconRepeat aria-hidden="true" />
+        </Toggle>
+      </TooltipTrigger>
+      <TooltipContent>Loop playback</TooltipContent>
+    </Tooltip>
   )
 }
 
-function ViewportPanel() {
+function PlaybackSpeedSelect() {
+  const state = useControlState(playbackSpeedControl)
+
+  return (
+    <Select
+      items={PLAYBACK_SPEED_OPTIONS}
+      value={state.value}
+      disabled={state.disabled}
+      onValueChange={(value) => {
+        if (typeof value === "string") playbackSpeedControl.commit(value)
+      }}
+    >
+      <SelectTrigger
+        id={playbackSpeedControl.id}
+        className="speed-control"
+        aria-label="Playback speed"
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent align="end" alignItemWithTrigger={false}>
+        <SelectGroup>
+          {PLAYBACK_SPEED_OPTIONS.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  )
+}
+
+function PlayPauseButton() {
+  const state = useControlState(playPauseControl)
+  const label = state.pressed ? "Pause motion" : "Play motion"
+
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<span className="inline-flex" />}>
+        <Button
+          id={playPauseControl.id}
+          className="group/play"
+          size="icon-lg"
+          type="button"
+          data-playing={state.pressed}
+          aria-label={label}
+          disabled={state.disabled}
+        >
+          <IconPlayerPlay
+            className="group-data-[playing=true]/play:hidden"
+            aria-hidden="true"
+          />
+          <IconPlayerPause
+            className="hidden group-data-[playing=true]/play:block"
+            aria-hidden="true"
+          />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+function SidebarToggle({
+  expanded,
+  onExpandedChange,
+}: {
+  expanded: boolean
+  onExpandedChange: (expanded: boolean) => void
+}) {
+  const label = expanded
+    ? "Hide motion controls"
+    : "Show motion controls"
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            className="sidebar-toggle-anchor inline-flex"
+          />
+        }
+      >
+        <Button
+          id="sidebar-toggle"
+          variant="outline"
+          size="icon-lg"
+          type="button"
+          aria-label={label}
+          aria-controls="generator-panel"
+          aria-expanded={expanded}
+          onClick={(event) => {
+            event.currentTarget.focus()
+            onExpandedChange(!expanded)
+          }}
+        >
+          <IconLayoutSidebar aria-hidden="true" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{label}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+function ViewportPanel({
+  sidebarExpanded,
+  onSidebarExpandedChange,
+}: {
+  sidebarExpanded: boolean
+  onSidebarExpandedChange: (expanded: boolean) => void
+}) {
   return (
     <section
       className="viewport-panel"
@@ -676,8 +813,6 @@ function ViewportPanel() {
       <h2 className="sr-only" id="motion-preview-title">
         Motion preview
       </h2>
-
-      <PreviewSettingsSection />
 
       <div className="viewport" id="viewport">
         <canvas
@@ -695,6 +830,13 @@ function ViewportPanel() {
           Arrow to seek, W A S D to move the camera, Shift plus Arrow keys
           to orbit, Plus or Minus to zoom, and Home to reset the camera.
         </p>
+        <div className="preview-overlay-controls">
+          <SidebarToggle
+            expanded={sidebarExpanded}
+            onExpandedChange={onSidebarExpandedChange}
+          />
+          <PreviewSettingsSection />
+        </div>
       </div>
 
       <div
@@ -703,25 +845,7 @@ function ViewportPanel() {
         role="group"
         aria-label="Playback controls"
       >
-        <Button
-          id="play-pause"
-          className="group/play"
-          size="icon-lg"
-          type="button"
-          aria-label="Play motion"
-          disabled
-        >
-          <IconPlayerPlay
-            className="group-data-[playing=true]/play:hidden"
-            data-icon="inline-start"
-            aria-hidden="true"
-          />
-          <IconPlayerPause
-            className="hidden group-data-[playing=true]/play:block"
-            data-icon="inline-start"
-            aria-hidden="true"
-          />
-        </Button>
+        <PlayPauseButton />
         <span
           className="min-w-15 text-xs tabular-nums"
           id="current-time"
@@ -739,32 +863,24 @@ function ViewportPanel() {
         >
           00:00.00
         </span>
-        <Label className="speed-control">
-          <span className="sr-only">Playback speed</span>
-          <NativeSelect
-            id="playback-speed"
-            aria-label="Playback speed"
-            defaultValue="1"
-            disabled
-          >
-            <NativeSelectOption value="0.5">0.5×</NativeSelectOption>
-            <NativeSelectOption value="1">1×</NativeSelectOption>
-            <NativeSelectOption value="2">2×</NativeSelectOption>
-          </NativeSelect>
-        </Label>
+        <PlaybackSpeedSelect />
         <LoopToggle />
-        <Button
-          id="reset-camera"
-          variant="ghost"
-          size="icon-lg"
-          type="button"
-          aria-label="Reset camera"
-        >
-          <IconCameraRotate
-            data-icon="inline-start"
-            aria-hidden="true"
-          />
-        </Button>
+        <Tooltip>
+          <TooltipTrigger
+            render={<span className="inline-flex" />}
+          >
+            <Button
+              id="reset-camera"
+              variant="outline"
+              size="icon-lg"
+              type="button"
+              aria-label="Reset camera"
+            >
+              <IconCameraRotate aria-hidden="true" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Reset camera</TooltipContent>
+        </Tooltip>
       </div>
     </section>
   )
@@ -800,7 +916,6 @@ function VrmAvatarSection() {
             variant="secondary"
             type="button"
           >
-            <IconUpload data-icon="inline-start" aria-hidden="true" />
             <span id="import-vrm-label">Load VRM</span>
           </Button>
           <input
@@ -886,25 +1001,40 @@ function PreviewSettingsSection() {
   const state = useControlState(previewSettingsControl)
 
   return (
-    <Accordion
-      id={previewSettingsControl.id}
-      className="border-b px-3"
-      value={state.open ? ["view-settings"] : []}
-      onValueChange={(value) =>
-        previewSettingsControl.commit(value.includes("view-settings"))
-      }
+    <Popover
+      open={state.open}
+      onOpenChange={previewSettingsControl.commit}
+      triggerId="preview-settings-trigger"
     >
-      <AccordionItem value="view-settings">
-        <AccordionTrigger id="preview-settings-trigger">
-          View settings
-        </AccordionTrigger>
-        <AccordionContent keepMounted className="grid gap-3 pb-3">
+      <PopoverTrigger
+        id="preview-settings-trigger"
+        render={
+          <Button
+            variant="outline"
+            size="icon-lg"
+            type="button"
+            aria-label="View settings"
+          />
+        }
+      >
+        <IconSettings aria-hidden="true" />
+      </PopoverTrigger>
+      <PopoverContent
+        id={previewSettingsControl.id}
+        align="end"
+        side="bottom"
+        keepMounted
+      >
+        <PopoverHeader>
+          <PopoverTitle>View settings</PopoverTitle>
+        </PopoverHeader>
+        <div className="grid gap-3">
           <VrmAvatarSection />
           <Separator />
           <DisplayControls />
-        </AccordionContent>
-      </AccordionItem>
-    </Accordion>
+        </div>
+      </PopoverContent>
+    </Popover>
   )
 }
 
@@ -928,40 +1058,58 @@ function GenerationPanel() {
         <ClipSection />
 
         <GenerationActionsSection />
-
-        <GenerationMessages />
       </form>
     </aside>
   )
 }
 
 export function App() {
-  useEffect(() => bootstrap(), [])
+  const [sidebarExpanded, setSidebarExpanded] = useState(true)
+
+  useEffect(() => {
+    let cleanup: (() => void) | undefined
+    const frame = window.requestAnimationFrame(() => {
+      cleanup = bootstrap()
+    })
+    return () => {
+      window.cancelAnimationFrame(frame)
+      cleanup?.()
+    }
+  }, [])
 
   return (
-    <div id="app">
-      <a className="skip-link" href="#prompt">
-        Skip to generation controls
-      </a>
+    <TooltipProvider delay={250}>
+      <div id="app">
+        <a className="skip-link" href="#motion-canvas">
+          Skip to motion preview
+        </a>
 
-      <p
-        className="sr-only"
-        id="app-status"
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-      />
+        <p
+          className="sr-only"
+          id="app-status"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        />
 
-      <VrmDropTarget />
+        <VrmDropTarget />
+        <UnsupportedDeviceDialog />
 
-      <main className="workspace">
-        <h1 className="sr-only">ARDY browser motion workspace</h1>
+        <main
+          className="workspace"
+          data-sidebar={sidebarExpanded ? "expanded" : "collapsed"}
+        >
+          <h1 className="sr-only">ARDY browser motion workspace</h1>
 
-        <GenerationPanel />
+          <GenerationPanel />
 
-        <ViewportPanel />
-      </main>
-    </div>
+          <ViewportPanel
+            sidebarExpanded={sidebarExpanded}
+            onSidebarExpandedChange={setSidebarExpanded}
+          />
+        </main>
+      </div>
+    </TooltipProvider>
   )
 }
 

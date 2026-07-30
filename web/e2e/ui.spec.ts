@@ -260,10 +260,10 @@ test("renders the two-pane technical workspace without motion parameters", async
     await expect(page.getByText(label, { exact: true })).toHaveCount(0);
   }
 
-  await expect(page.locator("#preview-settings")).toBeVisible();
+  await expect(page.locator("#preview-settings")).toBeHidden();
   await expect(page.locator("#preview-settings")).toHaveAttribute(
     "data-slot",
-    "accordion",
+    "popover-content",
   );
   await expect(page.locator("#stream-generation")).toHaveAttribute(
     "data-slot",
@@ -281,6 +281,7 @@ test("renders the two-pane technical workspace without motion parameters", async
   await openPreviewSettings(page);
   await expect(page.getByText("VRM avatar", { exact: true })).toBeVisible();
   await expect(page.locator("#import-vrm")).toBeEnabled();
+  await expect(page.locator("#import-vrm svg")).toHaveCount(0);
   await expect(page.getByText("Foot contacts", { exact: true })).toBeVisible();
   await expect(page.getByText("Orientations", { exact: true })).toBeVisible();
   for (const selector of [
@@ -300,7 +301,7 @@ test("renders the two-pane technical workspace without motion parameters", async
   await expect(page.getByText("Reference motion", { exact: true })).toHaveCount(0);
 });
 
-test("blocks model loading before archive work when WebGPU is unavailable", async ({
+test("blocks model loading with a non-dismissible dialog when WebGPU is unavailable", async ({
   page,
 }) => {
   await page.addInitScript(() => {
@@ -311,22 +312,38 @@ test("blocks model loading before archive work when WebGPU is unavailable", asyn
   });
   await page.goto("/");
 
-  await expect(page.locator("#model-title")).toHaveText("WebGPU required");
-  await expect(page.locator("#model-state")).toHaveText("Unavailable");
-  await expect(page.locator("#model-detail")).toContainText(
-    "support WebGPU",
+  const unavailableReason =
+    "Use a browser and device that support WebGPU, then reload the page.";
+  const dialog = page.getByRole("alertdialog", {
+    name: "WebGPU is required",
+  });
+
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText(unavailableReason);
+  await expect(
+    page.getByText(unavailableReason, { exact: true }),
+  ).toHaveCount(1);
+  await expect(page.locator("#model-title")).not.toContainText(
+    unavailableReason,
+  );
+  await expect(page.locator("#model-detail")).not.toContainText(
+    unavailableReason,
   );
   await expect(page.locator("#import-model")).toBeDisabled();
   await expect(page.locator("#model-file-input")).toBeDisabled();
-  await expect(page.locator("#model-setup-help")).toBeHidden();
-  await expect(page.locator("#generate-help")).toContainText(
-    "WebGPU is required",
-  );
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+  await page.mouse.click(2, 2);
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button")).toHaveCount(0);
 });
 
 test("rejects renderer initialization instead of using a WebGL fallback", async ({
   page,
 }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.addInitScript(() => {
     const requestedContexts: string[] = [];
     type ContextGetter = (
@@ -362,13 +379,11 @@ test("rejects renderer initialization instead of using a WebGL fallback", async 
   });
   await page.goto("/");
 
-  await expect(page.locator("#model-title")).toHaveText(
-    "WebGPU preview unavailable",
-  );
-  await expect(page.locator("#model-state")).toHaveText("Unavailable");
-  await expect(page.locator("#error-title")).toHaveText(
-    "3D preview unavailable",
-  );
+  const dialog = page.getByRole("alertdialog", {
+    name: "WebGPU preview unavailable",
+  });
+  await expect(dialog).toBeVisible();
+  await expect(page.locator("#error-banner")).toHaveCount(0);
   const requestedContexts = await page.evaluate(
     () =>
       (
@@ -379,6 +394,7 @@ test("rejects renderer initialization instead of using a WebGL fallback", async 
   );
   expect(requestedContexts).not.toContain("webgl");
   expect(requestedContexts).not.toContain("webgl2");
+  expect(pageErrors).toEqual([]);
 });
 
 test("retains the square Lyra treatment on standard shadcn surfaces", async ({
@@ -957,6 +973,31 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
   await expect(page.locator("#target-buffer-output")).toHaveText("120 frames");
   await expect(page.getByRole("spinbutton", { name: "Seed" })).toHaveValue("2");
 
+  const randomizeSeed = page.locator("#randomize-seed");
+  const randomizeSeedIcon = randomizeSeed.locator("svg");
+  await expect(randomizeSeedIcon).toHaveCount(1);
+  await expect(randomizeSeedIcon).not.toHaveAttribute("data-icon");
+  const [randomizeSeedBox, randomizeSeedIconBox] = await Promise.all([
+    randomizeSeed.boundingBox(),
+    randomizeSeedIcon.boundingBox(),
+  ]);
+  expect(randomizeSeedBox).not.toBeNull();
+  expect(randomizeSeedIconBox).not.toBeNull();
+  expect(
+    Math.abs(
+      randomizeSeedBox!.x +
+        randomizeSeedBox!.width / 2 -
+        (randomizeSeedIconBox!.x + randomizeSeedIconBox!.width / 2),
+    ),
+  ).toBeLessThanOrEqual(0.5);
+  expect(
+    Math.abs(
+      randomizeSeedBox!.y +
+        randomizeSeedBox!.height / 2 -
+        (randomizeSeedIconBox!.y + randomizeSeedIconBox!.height / 2),
+    ),
+  ).toBeLessThanOrEqual(0.5);
+
   const promptExample = page.getByRole("combobox", {
     name: "Example prompt",
   });
@@ -1018,6 +1059,53 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
   });
 });
 
+test("uses the Select control to update runtime playback speed", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await waitForPreviewReady(page);
+  await page.evaluate(async () => {
+    const [{ SkeletonViewer }, { playbackSpeedControl }] =
+      await Promise.all([
+        import("/src/viewer.ts"),
+        import("/src/ui-control-store.ts"),
+      ]);
+    const probe = globalThis as typeof globalThis & {
+      __playbackSpeeds?: number[];
+    };
+    probe.__playbackSpeeds = [];
+    const prototype = SkeletonViewer.prototype;
+    const original = prototype.setSpeed;
+    prototype.setSpeed = function (speed: number): void {
+      probe.__playbackSpeeds?.push(speed);
+      original.call(this, speed);
+    };
+    playbackSpeedControl.setState({ disabled: false });
+  });
+
+  const speed = page.getByRole("combobox", {
+    name: "Playback speed",
+  });
+  await expect(speed).toHaveAttribute("data-slot", "select-trigger");
+  await expect(page.locator("select#playback-speed")).toHaveCount(0);
+  await speed.click();
+  const doubleSpeed = page.getByRole("option", { name: "2×" });
+  await expect(doubleSpeed).toHaveAttribute("data-slot", "select-item");
+  await doubleSpeed.click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            globalThis as typeof globalThis & {
+              __playbackSpeeds?: number[];
+            }
+          ).__playbackSpeeds ?? [],
+      ),
+    )
+    .toContain(2);
+});
+
 test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   page,
 }) => {
@@ -1040,24 +1128,64 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   await expect(page.locator(".skip-link")).toBeFocused();
 
   const previewSettingsTrigger = page.locator("#preview-settings-trigger");
-  const previewSettingsContent = page.locator(
-    '[data-slot="accordion-content"]',
-  );
+  const previewSettingsContent = page.locator("#preview-settings");
+  const [viewportBefore, triggerBox] = await Promise.all([
+    page.locator("#viewport").boundingBox(),
+    previewSettingsTrigger.boundingBox(),
+  ]);
+  expect(viewportBefore).not.toBeNull();
+  expect(triggerBox).not.toBeNull();
+  expect(triggerBox!.y - viewportBefore!.y).toBeGreaterThanOrEqual(8);
+  expect(triggerBox!.y - viewportBefore!.y).toBeLessThanOrEqual(16);
+  expect(
+    viewportBefore!.x +
+      viewportBefore!.width -
+      triggerBox!.x -
+      triggerBox!.width,
+  ).toBeGreaterThanOrEqual(8);
+  expect(
+    viewportBefore!.x +
+      viewportBefore!.width -
+      triggerBox!.x -
+      triggerBox!.width,
+  ).toBeLessThanOrEqual(16);
   await expect(previewSettingsContent).toHaveCount(1);
+  await expect(previewSettingsContent).toHaveAttribute(
+    "data-slot",
+    "popover-content",
+  );
   await expect(previewSettingsContent).toBeHidden();
-  await previewSettingsTrigger.focus();
-  await page.keyboard.press("Space");
+  await previewSettingsTrigger.click();
   await expect(previewSettingsTrigger).toHaveAttribute(
     "aria-expanded",
     "true",
   );
   await expect(previewSettingsContent).toBeVisible();
-  await page.keyboard.press("Space");
+  expect(await page.locator("#viewport").boundingBox()).toEqual(
+    viewportBefore,
+  );
+  const previewSettingsOverflow = await previewSettingsContent.evaluate(
+    (element) => {
+      const style = getComputedStyle(element);
+      const borderWidth =
+        Number.parseFloat(style.borderLeftWidth) +
+        Number.parseFloat(style.borderRightWidth);
+      return {
+        overflowY: style.overflowY,
+        scrollbarWidth:
+          element.offsetWidth - element.clientWidth - borderWidth,
+      };
+    },
+  );
+  expect(previewSettingsOverflow.overflowY).toBe("visible");
+  expect(previewSettingsOverflow.scrollbarWidth).toBeLessThanOrEqual(0.5);
+  await page.keyboard.press("Escape");
   await expect(previewSettingsTrigger).toHaveAttribute(
     "aria-expanded",
     "false",
   );
   await expect(previewSettingsContent).toBeHidden();
+  await expect(previewSettingsTrigger).toBeFocused();
 
   for (const label of [
     "Motion description",
@@ -1112,6 +1240,113 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   const loopToggle = page.locator("#loop-toggle");
   await expect(loopToggle).toBeDisabled();
   await expect(loopToggle).toHaveAttribute("aria-pressed", "true");
+  await expect(loopToggle).toHaveClass(/\bborder-input\b/);
+  const resetCamera = page.locator("#reset-camera");
+  await expect(resetCamera).toHaveAttribute(
+    "data-variant",
+    "outline",
+  );
+  const [loopBorder, resetBorder] = await Promise.all(
+    [loopToggle, resetCamera].map((control) =>
+      control.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return {
+          style: style.borderStyle,
+          width: style.borderWidth,
+        };
+      }),
+    ),
+  );
+  expect(loopBorder).toEqual({ style: "solid", width: "1px" });
+  expect(resetBorder).toEqual(loopBorder);
+});
+
+test("labels every icon button in the playback bar with a tooltip", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await waitForPreviewReady(page);
+  await installCameraMovementProbe(page);
+  const canvas = page.locator("#motion-canvas");
+  await canvas.focus();
+  await page.keyboard.press("w");
+  await page.evaluate(async () => {
+    const {
+      CORE27_JOINT_COUNT,
+      CORE27_SKELETON,
+    } = await import("/src/viewer.ts");
+    interface MotionViewer {
+      setMotion(
+        motion: {
+          skeleton: typeof CORE27_SKELETON;
+          positions: Float32Array;
+          positionsShape: [number, number, number];
+          frameCount: number;
+          fps: number;
+        },
+        options: { playing: boolean },
+      ): void;
+    }
+    const probe = (
+      globalThis as typeof globalThis & {
+        __cameraMovementProbe?: { viewer: MotionViewer | null };
+      }
+    );
+    const viewer = probe.__cameraMovementProbe?.viewer;
+    if (!viewer) throw new Error("Preview viewer is unavailable.");
+    const frameCount = 200;
+    viewer.setMotion(
+      {
+        skeleton: CORE27_SKELETON,
+        positions: new Float32Array(
+          frameCount * CORE27_JOINT_COUNT * 3,
+        ),
+        positionsShape: [frameCount, CORE27_JOINT_COUNT, 3],
+        frameCount,
+        fps: 20,
+      },
+      { playing: false },
+    );
+  });
+  await expect(page.locator("#play-pause")).toBeEnabled();
+  await expect(page.locator("#loop-toggle")).toBeEnabled();
+
+  for (const [selector, label] of [
+    ["#play-pause", "Play motion"],
+    ["#loop-toggle", "Loop playback"],
+    ["#reset-camera", "Reset camera"],
+  ] as const) {
+    const trigger = page.locator(selector);
+    const tooltipTrigger = trigger.locator("xpath=..");
+    const tooltip = page
+      .locator('[data-slot="tooltip-content"]')
+      .filter({ hasText: label });
+    await expect(tooltipTrigger).toHaveAttribute(
+      "data-slot",
+      "tooltip-trigger",
+    );
+    await trigger.focus();
+    await expect(tooltip).toBeVisible();
+
+    await canvas.focus();
+    await expect(tooltip).toBeHidden();
+    await trigger.hover();
+    await expect(tooltip).toBeVisible();
+    await page.waitForTimeout(750);
+    await expect(tooltip).toBeVisible();
+    await page.mouse.move(0, 0);
+    await expect(tooltip).toBeHidden();
+  }
+
+  const playPause = page.locator("#play-pause");
+  await playPause.click();
+  await expect(playPause).toHaveAccessibleName("Pause motion");
+  const pauseTooltip = page
+    .locator('[data-slot="tooltip-content"]')
+    .filter({ hasText: "Pause motion" });
+  await playPause.hover();
+  await expect(pauseTooltip).toBeVisible();
+  await page.mouse.move(0, 0);
 });
 
 test("moves continuously from one held W keydown and stops on keyup", async ({
@@ -1206,7 +1441,6 @@ test("keeps invalid model-pack errors beside the model setup action", async ({
   await expect(modelError).toBeVisible();
   await expect(modelError).toBeFocused();
   await expect(modelError).toContainText(/decompress|gzip|shader-f16/i);
-  await expect(page.locator("#error-banner")).toBeHidden();
   await expect
     .poll(() =>
       page.evaluate(() => {
@@ -1216,6 +1450,88 @@ test("keeps invalid model-pack errors beside the model setup action", async ({
       }),
     )
     .toBe(true);
+});
+
+test("reports internal failures to the console without rendering an error panel", async ({
+  page,
+}) => {
+  const pageErrors: string[] = [];
+  const internalErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("console", (message) => {
+    if (
+      message.type() === "error" &&
+      message.text().includes("[ARDY] Inference failed")
+    ) {
+      internalErrors.push(message.text());
+    }
+  });
+  await page.addInitScript(() => {
+    const NativeWorker = globalThis.Worker;
+    const WorkerProxy = new Proxy(NativeWorker, {
+      construct(target, argumentsList) {
+        const worker = Reflect.construct(
+          target,
+          argumentsList,
+        ) as Worker;
+        (
+          globalThis as typeof globalThis & {
+            __ardyTestWorker?: Worker;
+          }
+        ).__ardyTestWorker = worker;
+        return worker;
+      },
+    });
+    Object.defineProperty(globalThis, "Worker", {
+      configurable: true,
+      value: WorkerProxy,
+    });
+  });
+
+  await page.goto("/");
+  await waitForPreviewReady(page);
+  await page.evaluate(() => {
+    const worker = (
+      globalThis as typeof globalThis & {
+        __ardyTestWorker?: Worker;
+      }
+    ).__ardyTestWorker;
+    if (!worker) throw new Error("Inference worker was not observed.");
+    worker.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          type: "error",
+          requestId: "synthetic-internal-failure",
+          error: {
+            name: "Error",
+            message: "Synthetic internal inference failure",
+          },
+        },
+      }),
+    );
+  });
+
+  await expect
+    .poll(() => internalErrors)
+    .toHaveLength(1);
+  await expect(
+    page.locator(
+      "#error-banner, #error-title, #error-message, #dismiss-error",
+    ),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText("Synthetic internal inference failure", {
+      exact: false,
+    }),
+  ).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.locator("#generator-panel").evaluate(
+        (element) => element.scrollWidth <= element.clientWidth,
+      ),
+    )
+    .toBe(true);
+  expect(pageErrors).toEqual([]);
 });
 
 test("keeps saved model actions inside the input panel at minimum width", async ({
@@ -1248,6 +1564,72 @@ test("keeps saved model actions inside the input panel at minimum width", async 
   ).toBe(true);
 });
 
+test("toggles the motion-control sidebar only in the side-by-side layout", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+
+  const generatorPanel = page.locator("#generator-panel");
+  const viewportPanel = page.locator("#viewport-panel");
+  const viewport = page.locator("#viewport");
+  const sidebarToggle = page.locator("#sidebar-toggle");
+  const [generatorBefore, viewportPanelBefore, viewportBox, toggleBox] =
+    await Promise.all([
+      generatorPanel.boundingBox(),
+      viewportPanel.boundingBox(),
+      viewport.boundingBox(),
+      sidebarToggle.boundingBox(),
+    ]);
+  expect(generatorBefore).not.toBeNull();
+  expect(viewportPanelBefore).not.toBeNull();
+  expect(viewportBox).not.toBeNull();
+  expect(toggleBox).not.toBeNull();
+  expect(toggleBox!.x - viewportBox!.x).toBeGreaterThanOrEqual(8);
+  expect(toggleBox!.x - viewportBox!.x).toBeLessThanOrEqual(16);
+  expect(toggleBox!.y - viewportBox!.y).toBeGreaterThanOrEqual(8);
+  expect(toggleBox!.y - viewportBox!.y).toBeLessThanOrEqual(16);
+  await expect(
+    sidebarToggle.locator("svg.tabler-icon-layout-sidebar"),
+  ).toHaveCount(1);
+  await expect(sidebarToggle).toHaveAccessibleName(
+    "Hide motion controls",
+  );
+  await expect(sidebarToggle).toHaveAttribute("aria-expanded", "true");
+  const sidebarTooltip = page
+    .locator('[data-slot="tooltip-content"]')
+    .filter({ hasText: "Hide motion controls" });
+  await sidebarToggle.hover();
+  await expect(sidebarTooltip).toBeVisible();
+  await expect(sidebarTooltip).toHaveAttribute("data-open", "");
+  await page.waitForTimeout(750);
+  await expect(sidebarTooltip).toBeVisible();
+  await expect(sidebarTooltip).toHaveAttribute("data-open", "");
+  await page.mouse.move(0, 0);
+  await expect(sidebarTooltip).toBeHidden();
+
+  await sidebarToggle.click();
+  await expect(generatorPanel).toBeHidden();
+  await expect(sidebarToggle).toHaveAccessibleName(
+    "Show motion controls",
+  );
+  await expect(sidebarToggle).toHaveAttribute("aria-expanded", "false");
+  const viewportPanelCollapsed = await viewportPanel.boundingBox();
+  expect(viewportPanelCollapsed).not.toBeNull();
+  expect(viewportPanelCollapsed!.x).toBe(0);
+  expect(viewportPanelCollapsed!.width).toBeGreaterThan(
+    viewportPanelBefore!.width,
+  );
+
+  await sidebarToggle.click();
+  await expect(generatorPanel).toBeVisible();
+  await expect(sidebarToggle).toHaveAccessibleName(
+    "Hide motion controls",
+  );
+  expect(await generatorPanel.boundingBox()).toEqual(generatorBefore);
+  expect(await viewportPanel.boundingBox()).toEqual(viewportPanelBefore);
+});
+
 test("stacks the workspace before the two-pane layout can overflow", async ({
   page,
 }) => {
@@ -1261,6 +1643,9 @@ test("stacks the workspace before the two-pane layout can overflow", async ({
   );
   expect(panes.every(Boolean)).toBe(true);
   expect(panes[0]!.y).toBeLessThan(panes[1]!.y);
+  await expect(page.locator("#generator-panel")).toBeVisible();
+  await expect(page.locator("#sidebar-toggle")).toBeHidden();
+  await expect(page.locator(".sidebar-toggle-anchor")).toBeHidden();
   await expect
     .poll(() =>
       page.evaluate(
@@ -1357,7 +1742,6 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
     ),
   );
   expect(panes.every(Boolean)).toBe(true);
-  expect(panes[0]!.y).toBe(0);
   expect(panes[0]!.y).toBeLessThan(panes[1]!.y);
   await expect(page.locator(".inspector-panel")).toHaveCount(0);
 
@@ -1416,108 +1800,120 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
 });
 
 test("keeps coarse-pointer controls at least 44 pixels", async ({
-  browser,
-}, testInfo) => {
-  const context = await browser.newContext({
-    baseURL: testInfo.project.use.baseURL as string,
-    hasTouch: true,
-    viewport: { width: 390, height: 844 },
+  context,
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const client = await context.newCDPSession(page);
+  await client.send("Emulation.setTouchEmulationEnabled", {
+    enabled: true,
+    maxTouchPoints: 5,
   });
-  const page = await context.newPage();
 
-  try {
-    await page.goto("/");
-    await openPreviewSettings(page);
-    await expect
-      .poll(() =>
-        page.evaluate(() => matchMedia("(any-pointer: coarse)").matches),
-      )
-      .toBe(true);
+  await page.goto("/");
+  await openPreviewSettings(page);
+  await expect
+    .poll(() =>
+      page.evaluate(() => matchMedia("(any-pointer: coarse)").matches),
+    )
+    .toBe(true);
 
-    const selectors = [
-      "#import-model",
-      '[data-slot="input-group"]:has(#prompt-example)',
-      "[data-combobox-trigger]",
-      "#apply-prompt",
-      "#randomize-seed",
-      "#generate",
-      "#preview-settings-trigger",
-      "#play-pause",
-      "#playback-speed",
-      "#loop-toggle",
-      "#reset-camera",
-      "#import-vrm",
-      "#duration",
-      "#target-buffer",
-      "#timeline",
-    ];
-    const boxes = await Promise.all(
-      selectors.map((selector) => page.locator(selector).boundingBox()),
-    );
-    for (const box of boxes) {
-      expect(box).not.toBeNull();
-      expect(box!.width).toBeGreaterThanOrEqual(44);
-      expect(box!.height).toBeGreaterThanOrEqual(44);
-    }
-
-    const promptExamples = page.locator('[data-slot="combobox-item"]');
-    await page.locator("#prompt-example").click();
-    await expect(promptExamples).toHaveCount(100);
-    for (const index of [0, 49, 99]) {
-      const item = promptExamples.nth(index);
-      await item.scrollIntoViewIfNeeded();
-      const box = await item.boundingBox();
-      expect(box).not.toBeNull();
-      expect(box!.height).toBeGreaterThanOrEqual(44);
-    }
-    await page.keyboard.press("Escape");
-
-    for (const controlId of [
-      "stream-generation",
-      "show-vrm",
-      "show-skeleton",
-      "show-contacts",
-      "show-orientations",
-      "show-trajectory",
-    ]) {
-      const label = page.locator(`label[for="${controlId}"]`);
-      const box = await label.boundingBox();
-      expect(box).not.toBeNull();
-      expect(box!.height).toBeGreaterThanOrEqual(44);
-    }
-
-    const continuousGeneration = page.locator("#stream-generation");
-    const continuousLabel = page.locator(
-      'label[for="stream-generation"]',
-    );
-    await continuousLabel.scrollIntoViewIfNeeded();
-    const continuousLabelBox = await continuousLabel.boundingBox();
-    expect(continuousLabelBox).not.toBeNull();
-    await page.mouse.click(
-      continuousLabelBox!.x + continuousLabelBox!.width - 2,
-      continuousLabelBox!.y + 2,
-    );
-    await expect(continuousGeneration).toHaveAttribute(
-      "aria-checked",
-      "false",
-    );
-
-    const orientations = page.locator("#show-orientations");
-    await expect(orientations).toHaveAttribute("aria-checked", "true");
-    const orientationsLabel = page.locator(
-      'label[for="show-orientations"]',
-    );
-    await orientationsLabel.scrollIntoViewIfNeeded();
-    const orientationsLabelBox = await orientationsLabel.boundingBox();
-    expect(orientationsLabelBox).not.toBeNull();
-    await page.mouse.click(
-      orientationsLabelBox!.x + orientationsLabelBox!.width - 2,
-      orientationsLabelBox!.y + orientationsLabelBox!.height - 2,
-    );
-    await expect(orientations).toHaveAttribute("aria-checked", "false");
-  } finally {
-    await context.close();
+  const selectors = [
+    "#import-model",
+    '[data-slot="input-group"]:has(#prompt-example)',
+    "[data-combobox-trigger]",
+    "#apply-prompt",
+    "#randomize-seed",
+    "#generate",
+    "#preview-settings-trigger",
+    "#play-pause",
+    "#playback-speed",
+    "#loop-toggle",
+    "#reset-camera",
+    "#import-vrm",
+    "#duration",
+    "#target-buffer",
+    "#timeline",
+  ];
+  const boxes = await Promise.all(
+    selectors.map((selector) => page.locator(selector).boundingBox()),
+  );
+  for (const [index, box] of boxes.entries()) {
+    expect(box).not.toBeNull();
+    expect(
+      box!.width,
+      `${selectors[index]} tap-target width`,
+    ).toBeGreaterThanOrEqual(43.5);
+    expect(
+      box!.height,
+      `${selectors[index]} tap-target height`,
+    ).toBeGreaterThanOrEqual(43.5);
   }
+
+  const promptExamples = page.locator('[data-slot="combobox-item"]');
+  await page.locator("#prompt-example").click();
+  await expect(promptExamples).toHaveCount(100);
+  for (const index of [0, 49, 99]) {
+    const item = promptExamples.nth(index);
+    await item.scrollIntoViewIfNeeded();
+    const box = await item.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.height).toBeGreaterThanOrEqual(44);
+  }
+  await page.keyboard.press("Escape");
+  await openPreviewSettings(page);
+  await page.waitForTimeout(150);
+
+  const displayControlIds = [
+    "stream-generation",
+    "show-vrm",
+    "show-skeleton",
+    "show-contacts",
+    "show-orientations",
+    "show-trajectory",
+  ];
+  for (const controlId of displayControlIds) {
+    const label = page.locator(`label[for="${controlId}"]`);
+    const box = await label.boundingBox();
+    expect(box).not.toBeNull();
+    expect(
+      box!.height,
+      `${controlId} label tap-target height`,
+    ).toBeGreaterThanOrEqual(43.5);
+  }
+
+  const continuousGeneration = page.locator("#stream-generation");
+  const continuousLabel = page.locator(
+    'label[for="stream-generation"]',
+  );
+  await continuousLabel.scrollIntoViewIfNeeded();
+  const continuousLabelBox = await continuousLabel.boundingBox();
+  expect(continuousLabelBox).not.toBeNull();
+  await page.mouse.click(
+    continuousLabelBox!.x + continuousLabelBox!.width - 2,
+    continuousLabelBox!.y + 2,
+  );
+  await expect(continuousGeneration).toHaveAttribute(
+    "aria-checked",
+    "false",
+  );
+  await openPreviewSettings(page);
+
+  const orientations = page.locator("#show-orientations");
+  await expect(orientations).toHaveAttribute("aria-checked", "true");
+  const orientationsLabel = page.locator(
+    'label[for="show-orientations"]',
+  );
+  await orientationsLabel.scrollIntoViewIfNeeded();
+  const orientationsLabelBox = await orientationsLabel.boundingBox();
+  expect(orientationsLabelBox).not.toBeNull();
+  await page.mouse.click(
+    orientationsLabelBox!.x + orientationsLabelBox!.width - 2,
+    orientationsLabelBox!.y + orientationsLabelBox!.height - 2,
+  );
+  await expect(orientations).toHaveAttribute("aria-checked", "false");
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#preview-settings")).toBeHidden();
 });
 
 test("returns focus to model selection after saved pack removal", async ({

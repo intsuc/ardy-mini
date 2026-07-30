@@ -400,6 +400,7 @@ export class SkeletonViewer {
   private cameraMovementForward = 0;
   private cameraMovementRight = 0;
   private lastCameraMovementTime: number | null = null;
+  private rendererInitialized = false;
   private rendererReady = false;
   private disposed = false;
   private needsRender = true;
@@ -495,6 +496,7 @@ export class SkeletonViewer {
     const viewer = new SkeletonViewer(canvas);
     try {
       await viewer.renderer.init();
+      viewer.rendererInitialized = true;
       if (!isWebGpuRendererBackend(viewer.renderer)) {
         throw new Error(
           "Three.js initialized a WebGL fallback instead of the required WebGPU backend.",
@@ -547,7 +549,6 @@ export class SkeletonViewer {
     this.controls.dampingFactor = 0.07;
     this.controls.minDistance = 1.2;
     this.controls.maxDistance = 12;
-    this.controls.maxPolarAngle = Math.PI * 0.49;
     this.controls.update();
     this.controls.addEventListener("change", this.invalidate);
     this.canvas.addEventListener("pointerdown", this.handleGroundPointerDown);
@@ -1225,7 +1226,7 @@ export class SkeletonViewer {
       this.waypointGroup,
     ].forEach(clearGroup);
     this.renderPipeline.dispose();
-    this.renderer.dispose();
+    if (this.rendererInitialized) this.renderer.dispose();
   }
 
   private readonly animate = (time: number): void => {

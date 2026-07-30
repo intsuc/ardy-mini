@@ -35,7 +35,7 @@ async function runGeneration(
     `session contains ${expectedFrames} frames`,
   );
   await expect(page.locator("#model-error-banner")).toBeHidden();
-  await expect(page.locator("#error-banner")).toBeHidden();
+  await expect(page.locator("#error-banner")).toHaveCount(0);
   return performance.now() - started;
 }
 
@@ -318,7 +318,7 @@ test.describe("real browser model-pack", () => {
     }
 
     await expect(page.locator("#model-error-banner")).toBeHidden();
-    await expect(page.locator("#error-banner")).toBeHidden();
+    await expect(page.locator("#error-banner")).toHaveCount(0);
     expect(
       await page.evaluate(
         () =>

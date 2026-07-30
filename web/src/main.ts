@@ -42,6 +42,8 @@ import {
   generationProgressControl,
   loopControl,
   modelProgressControl,
+  playbackSpeedControl,
+  playPauseControl,
   previewSettingsControl,
   removeSavedModelAction,
   showContactsControl,
@@ -52,6 +54,7 @@ import {
   targetBufferControl,
   timelineControl,
   type PressedControlState,
+  unsupportedDeviceControl,
 } from "./ui-control-store";
 
 const UINT32_MAX = 0xffff_ffff;
@@ -662,6 +665,7 @@ export function bootstrap(): () => void {
   if (!document.getElementById("app")) return () => {};
   const lifecycle = new AbortController();
   let disposed = false;
+  unsupportedDeviceControl.setState({ open: false });
 
   const form = requiredElement<HTMLFormElement>("generation-form");
   const prompt = requiredElement<HTMLTextAreaElement>("prompt");
@@ -705,16 +709,10 @@ export function bootstrap(): () => void {
     requiredElement<HTMLElement>("generation-progress");
   const generationStage = requiredElement<HTMLElement>("generation-stage");
   const generationPercent = requiredElement<HTMLElement>("generation-percent");
-  const errorBanner = requiredElement<HTMLElement>("error-banner");
-  const errorTitle = requiredElement<HTMLElement>("error-title");
-  const errorMessage = requiredElement<HTMLElement>("error-message");
-  const dismissError = requiredElement<HTMLButtonElement>("dismiss-error");
   const canvas = requiredElement<HTMLCanvasElement>("motion-canvas");
   const playPause = requiredElement<HTMLButtonElement>("play-pause");
   const currentTime = requiredElement<HTMLElement>("current-time");
   const totalTime = requiredElement<HTMLElement>("total-time");
-  const playbackSpeed =
-    requiredElement<HTMLSelectElement>("playback-speed");
   const resetCamera = requiredElement<HTMLButtonElement>("reset-camera");
   const appStatus = requiredElement<HTMLElement>("app-status");
   const viewportPanel = requiredElement<HTMLElement>("viewport-panel");
@@ -739,7 +737,6 @@ export function bootstrap(): () => void {
 
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
-  let errorReturnFocus: HTMLElement | null = null;
   let modelErrorReturnFocus: HTMLElement | null = null;
   let vrmErrorReturnFocus: HTMLElement | null = null;
   let viewer: SkeletonViewer | null = null;
@@ -882,22 +879,8 @@ export function bootstrap(): () => void {
     form.dataset.modelState = state;
   }
 
-  function showError(title: string, message: string): void {
-    errorReturnFocus =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
-    errorTitle.textContent = title;
-    errorMessage.textContent = message;
-    errorBanner.hidden = false;
-    errorBanner.focus();
-    announce(`${title}: ${message}`);
-  }
-
-  function clearError(restoreFocus = false): void {
-    errorBanner.hidden = true;
-    if (restoreFocus) errorReturnFocus?.focus();
-    errorReturnFocus = null;
+  function reportInternalError(title: string, error: unknown): void {
+    console.error(`[ARDY] ${title}`, error);
   }
 
   function showModelError(
@@ -1106,8 +1089,7 @@ export function bootstrap(): () => void {
     } else if (webGpuState === "checking") {
       generateHelp.textContent = "Checking WebGPU support.";
     } else if (webGpuState === "unavailable") {
-      generateHelp.textContent =
-        "WebGPU is required to load the model and generate motion.";
+      generateHelp.textContent = "Load a model pack to enable generation.";
     } else if (modelLoading || modelCaching) {
       generateHelp.textContent = "Preparing the local model pack.";
     } else if (!modelReady) {
@@ -1131,11 +1113,9 @@ export function bootstrap(): () => void {
         ? "Ready to generate"
         : webGpuState === "checking"
           ? "Checking WebGPU"
-          : webGpuState === "unavailable"
-            ? "WebGPU unavailable"
-            : modelLoading || modelCaching
-              ? "Preparing model"
-              : "Waiting for model";
+          : modelLoading || modelCaching
+            ? "Preparing model"
+            : "Waiting for model";
       generationPercent.textContent = "—";
     }
   }
@@ -1192,10 +1172,7 @@ export function bootstrap(): () => void {
     try {
       viewer?.applyEditorState(editorState);
     } catch (error) {
-      showError(
-        "Could not update editor",
-        error instanceof Error ? error.message : String(error),
-      );
+      reportInternalError("Could not update editor", error);
     }
   }
 
@@ -1222,14 +1199,15 @@ export function bootstrap(): () => void {
 
   function updatePlayback(state: PlaybackState): void {
     const maxFrame = Math.max(0, state.frameCount - 1);
-    playPause.disabled = state.frameCount < 2;
-    playbackSpeed.disabled = state.frameCount === 0;
+    playPauseControl.setState({
+      pressed: state.playing,
+      disabled: state.frameCount < 2,
+    });
+    playbackSpeedControl.setState({
+      value: String(state.speed),
+      disabled: state.frameCount === 0,
+    });
     updateLoopControl({ disabled: state.frameCount < 2 });
-    playPause.dataset.playing = String(state.playing);
-    playPause.setAttribute(
-      "aria-label",
-      state.playing ? "Pause motion" : "Play motion",
-    );
     const elapsed = formatTime(state.frame / state.fps);
     const total = formatTime(maxFrame / state.fps);
     currentTime.textContent = elapsed;
@@ -1265,7 +1243,6 @@ export function bootstrap(): () => void {
     archive: File,
     shouldCache: boolean,
   ): Promise<void> {
-    clearError();
     clearModelError();
     if (webGpuState !== "ready") {
       throw new Error(
@@ -1564,10 +1541,7 @@ export function bootstrap(): () => void {
     } catch (error) {
       activeGeneration = null;
       setGenerationBusy(false);
-      showError(
-        "Could not assemble generated motion",
-        error instanceof Error ? error.message : String(error),
-      );
+      reportInternalError("Could not assemble generated motion", error);
     }
   }
 
@@ -1629,7 +1603,6 @@ export function bootstrap(): () => void {
     }
     const values = validateFormForGeneration();
     if (!values) return;
-    clearError();
     playbackOnlyStatus = false;
     const background = Boolean(options.background);
     const id = requestId(mode);
@@ -1770,9 +1743,9 @@ export function bootstrap(): () => void {
             try {
               applyChunk(event.chunk);
             } catch (error) {
-              showError(
+              reportInternalError(
                 "Could not display generation chunk",
-                error instanceof Error ? error.message : String(error),
+                error,
               );
             }
           }
@@ -1862,12 +1835,12 @@ export function bootstrap(): () => void {
           if (wasLoading) {
             showModelError("Model import failed", event.error.message);
           } else if (wasRestoring) {
-            showError(
+            reportInternalError(
               "Continuation unavailable",
               `${event.error.message} The imported motion is still available for playback.`,
             );
           } else {
-            showError("Inference failed", event.error.message);
+            reportInternalError("Inference failed", event.error);
           }
           updateGenerateAvailability();
           break;
@@ -2131,13 +2104,13 @@ export function bootstrap(): () => void {
     announce(checked ? "VRM avatar shown." : "VRM avatar hidden.");
   }, lifecycle.signal);
 
-  dismissError.addEventListener("click", () => clearError(true));
   dismissModelError.addEventListener("click", () => clearModelError(true));
   dismissVrmError.addEventListener("click", () => clearVrmError(true));
   playPause.addEventListener("click", () => viewer?.togglePlaying());
   timelineControl.onCommit((value) => viewer?.seek(value), lifecycle.signal);
-  playbackSpeed.addEventListener("change", () =>
-    viewer?.setSpeed(Number(playbackSpeed.value)),
+  playbackSpeedControl.onCommit(
+    (value) => viewer?.setSpeed(Number(value)),
+    lifecycle.signal,
   );
   loopControl.onCommit((pressed) => viewer?.setLoop(pressed), lifecycle.signal);
   resetCamera.addEventListener("click", () => viewer?.resetCamera());
@@ -2284,14 +2257,12 @@ export function bootstrap(): () => void {
     if (unavailableReason) {
       webGpuState = "unavailable";
       modelCard.removeAttribute("aria-busy");
-      setModelStatus(
-        "unavailable",
-        "WebGPU required",
-        unavailableReason,
-        "Unavailable",
-      );
       updateGenerateAvailability();
-      announce(`WebGPU is unavailable. ${unavailableReason}`);
+      unsupportedDeviceControl.commit({
+        open: true,
+        title: "WebGPU is required",
+        description: unavailableReason,
+      });
       return;
     }
 
@@ -2302,14 +2273,12 @@ export function bootstrap(): () => void {
       const message = error instanceof Error ? error.message : String(error);
       webGpuState = "unavailable";
       modelCard.removeAttribute("aria-busy");
-      setModelStatus(
-        "unavailable",
-        "WebGPU preview unavailable",
-        message,
-        "Unavailable",
-      );
       updateGenerateAvailability();
-      showError("3D preview unavailable", message);
+      unsupportedDeviceControl.commit({
+        open: true,
+        title: "WebGPU preview unavailable",
+        description: message,
+      });
       return;
     }
 

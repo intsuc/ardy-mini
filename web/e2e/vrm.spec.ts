@@ -353,6 +353,7 @@ test("loads, hides, replaces, and removes a local VRM avatar", async ({
   await waitForPreviewReady(page);
   await openPreviewSettings(page);
 
+  const settings = page.locator("#preview-settings");
   const card = page.locator("#vrm-card");
   const name = page.locator("#vrm-name");
   const detail = page.locator("#vrm-detail");
@@ -361,10 +362,13 @@ test("loads, hides, replaces, and removes a local VRM avatar", async ({
     name: "Show VRM avatar",
   });
 
+  await expect(settings).toHaveAttribute("data-slot", "popover-content");
+  await expect(settings).toBeVisible();
   await expect(page.locator("#vrm-state")).toHaveCount(0);
   await expect(card).toHaveAttribute("data-state", "missing");
   await expect(name).toHaveText("No avatar loaded");
   await expect(detail).toHaveText("Load a VRM 0.x or 1.0 file.");
+  await expect(page.locator("#import-vrm svg")).toHaveCount(0);
   await expect(page.locator("#remove-vrm")).toBeDisabled();
   await expect(showAvatar).toBeDisabled();
   await expect(dropTarget).toBeHidden();
@@ -441,10 +445,13 @@ test("preserves the current avatar and focuses an error for an invalid VRM drop"
 }) => {
   await page.goto("/");
   await waitForPreviewReady(page);
+  const settings = page.locator("#preview-settings");
   await expect(page.locator("#preview-settings-trigger")).toHaveAttribute(
     "aria-expanded",
     "false",
   );
+  await expect(settings).toHaveAttribute("data-slot", "popover-content");
+  await expect(settings).toBeHidden();
 
   await page.locator("#vrm-file-input").setInputFiles({
     name: "stable-avatar.vrm",
@@ -478,6 +485,7 @@ test("preserves the current avatar and focuses an error for an invalid VRM drop"
     "aria-expanded",
     "true",
   );
+  await expect(settings).toBeVisible();
   await expect(error).toBeVisible();
   await expect(error).toBeFocused();
   await expect(page.locator("#vrm-error-message")).toHaveText(

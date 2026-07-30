@@ -129,3 +129,64 @@ test("updates the held heading when orbiting horizontally at the top-down pole",
     expect(delta.targetZ).toBeCloseTo(delta.z);
   }
 });
+
+test("orbits past horizontal so the camera can look upward", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  const state = await page.evaluate(async () => {
+    const { SkeletonViewer } = await import("/src/viewer.ts");
+    const host = document.createElement("div");
+    host.style.width = "320px";
+    host.style.height = "320px";
+    const canvas = document.createElement("canvas");
+    host.append(canvas);
+    document.body.append(host);
+    const viewer = await SkeletonViewer.create(canvas);
+    const internal = viewer as unknown as {
+      camera: {
+        position: {
+          x: number;
+          y: number;
+          z: number;
+        };
+      };
+      controls: {
+        target: {
+          x: number;
+          y: number;
+          z: number;
+        };
+        getDistance(): number;
+        getPolarAngle(): number;
+      };
+    };
+
+    const snapshot = () => ({
+      cameraY: internal.camera.position.y,
+      targetY: internal.controls.target.y,
+      distance: internal.controls.getDistance(),
+      polar: internal.controls.getPolarAngle(),
+    });
+
+    try {
+      viewer.setReducedMotion(true);
+      const before = snapshot();
+      viewer.orbit(0, -4);
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+      return { before, after: snapshot() };
+    } finally {
+      viewer.dispose();
+      host.remove();
+    }
+  });
+
+  expect(state.before.polar).toBeLessThan(Math.PI / 2);
+  expect(state.before.cameraY).toBeGreaterThan(state.before.targetY);
+  expect(state.after.polar).toBeGreaterThan(Math.PI / 2);
+  expect(state.after.cameraY).toBeLessThan(state.after.targetY);
+  expect(state.after.distance).toBeCloseTo(state.before.distance);
+});

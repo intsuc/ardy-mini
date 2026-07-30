@@ -115,6 +115,17 @@ export interface DisclosureControlState {
   open: boolean
 }
 
+export interface SelectControlState {
+  value: string
+  disabled: boolean
+}
+
+export interface UnsupportedDeviceState {
+  open: boolean
+  title: string
+  description: string
+}
+
 function createCheckedControl(
   id: string,
   checked: boolean,
@@ -207,6 +218,15 @@ export const loopControl = createExternalControl<
   (pressed) => ({ pressed })
 )
 
+export const playPauseControl = createExternalControl<
+  PressedControlState,
+  boolean
+>(
+  "play-pause",
+  { pressed: false, disabled: true },
+  (pressed) => ({ pressed })
+)
+
 export const previewSettingsControl = createExternalControl<
   DisclosureControlState,
   boolean
@@ -214,6 +234,29 @@ export const previewSettingsControl = createExternalControl<
   "preview-settings",
   { open: false },
   (open) => ({ open })
+)
+
+export const playbackSpeedControl = createExternalControl<
+  SelectControlState,
+  string
+>(
+  "playback-speed",
+  { value: "1", disabled: true },
+  (value) => ({ value })
+)
+
+export const unsupportedDeviceControl = createExternalControl<
+  UnsupportedDeviceState,
+  UnsupportedDeviceState
+>(
+  "unsupported-device",
+  {
+    open: false,
+    title: "WebGPU is required",
+    description:
+      "Use a browser and device that support WebGPU, then reload the page.",
+  },
+  (state) => state
 )
 
 function createProgressControl(id: string) {
