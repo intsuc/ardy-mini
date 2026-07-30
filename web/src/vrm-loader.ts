@@ -58,12 +58,23 @@ export async function loadVrmAvatar(file: File): Promise<LoadedVrmAvatar> {
     throw new RangeError("VRM files must be 512 MiB or smaller.");
   }
 
-  const [{ GLTFLoader }, vrmModule] = await Promise.all([
+  const [{ GLTFLoader }, vrmModule, vrmNodesModule] = await Promise.all([
     import("three/examples/jsm/loaders/GLTFLoader.js"),
     import("@pixiv/three-vrm"),
+    import("@pixiv/three-vrm/nodes"),
   ]);
   const loader = new GLTFLoader();
-  loader.register((parser) => new vrmModule.VRMLoaderPlugin(parser));
+  loader.register((parser) => {
+    const mtoonMaterialPlugin = new vrmModule.MToonMaterialLoaderPlugin(
+      parser,
+      {
+        materialType: vrmNodesModule.MToonNodeMaterial,
+      },
+    );
+    return new vrmModule.VRMLoaderPlugin(parser, {
+      mtoonMaterialPlugin,
+    });
+  });
 
   const objectUrl = URL.createObjectURL(file);
   try {

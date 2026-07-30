@@ -3,6 +3,13 @@
 
 import { expect, type Page } from "@playwright/test"
 
+export async function waitForPreviewReady(page: Page): Promise<void> {
+  await expect(page.locator("#model-state")).toHaveText("Not loaded", {
+    timeout: 15_000,
+  })
+  await expect(page.locator("#import-vrm")).toBeEnabled()
+}
+
 export async function setSliderValue(
   page: Page,
   selector: string,

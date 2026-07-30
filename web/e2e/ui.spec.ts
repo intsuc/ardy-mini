@@ -8,6 +8,7 @@ import { expect, test, type Page } from "@playwright/test";
 import {
   openPreviewSettings,
   setSliderValue,
+  waitForPreviewReady,
 } from "./control-helpers";
 
 interface CameraMovementProbeState {
@@ -305,9 +306,7 @@ test("blocks model loading before archive work when WebGPU is unavailable", asyn
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "gpu", {
       configurable: true,
-      value: {
-        requestAdapter: async () => null,
-      },
+      value: undefined,
     });
   });
   await page.goto("/");
@@ -315,7 +314,7 @@ test("blocks model loading before archive work when WebGPU is unavailable", asyn
   await expect(page.locator("#model-title")).toHaveText("WebGPU required");
   await expect(page.locator("#model-state")).toHaveText("Unavailable");
   await expect(page.locator("#model-detail")).toContainText(
-    "No compatible GPU adapter is available",
+    "support WebGPU",
   );
   await expect(page.locator("#import-model")).toBeDisabled();
   await expect(page.locator("#model-file-input")).toBeDisabled();
@@ -323,6 +322,63 @@ test("blocks model loading before archive work when WebGPU is unavailable", asyn
   await expect(page.locator("#generate-help")).toContainText(
     "WebGPU is required",
   );
+});
+
+test("rejects renderer initialization instead of using a WebGL fallback", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const requestedContexts: string[] = [];
+    type ContextGetter = (
+      contextId: string,
+      ...options: unknown[]
+    ) => unknown;
+    const canvasPrototype =
+      HTMLCanvasElement.prototype as unknown as {
+        getContext: ContextGetter;
+      };
+    const originalGetContext = canvasPrototype.getContext;
+    canvasPrototype.getContext = function (
+      contextId,
+      ...options
+    ): unknown {
+      requestedContexts.push(contextId);
+      return Reflect.apply(
+        originalGetContext,
+        this,
+        [contextId, ...options],
+      );
+    };
+    Object.defineProperty(globalThis, "__rendererContexts", {
+      configurable: true,
+      value: requestedContexts,
+    });
+    Object.defineProperty(navigator, "gpu", {
+      configurable: true,
+      value: {
+        requestAdapter: async () => null,
+      },
+    });
+  });
+  await page.goto("/");
+
+  await expect(page.locator("#model-title")).toHaveText(
+    "WebGPU preview unavailable",
+  );
+  await expect(page.locator("#model-state")).toHaveText("Unavailable");
+  await expect(page.locator("#error-title")).toHaveText(
+    "3D preview unavailable",
+  );
+  const requestedContexts = await page.evaluate(
+    () =>
+      (
+        globalThis as typeof globalThis & {
+          __rendererContexts?: string[];
+        }
+      ).__rendererContexts ?? [],
+  );
+  expect(requestedContexts).not.toContain("webgl");
+  expect(requestedContexts).not.toContain("webgl2");
 });
 
 test("retains the square Lyra treatment on standard shadcn surfaces", async ({
@@ -366,7 +422,7 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
   page.on("console", (message) => {
     if (
       message.type() === "error" &&
-      /(?:WebGLProgram|shader|GLSL)/i.test(message.text())
+      /(?:WebGPU|WGSL|shader|validation)/i.test(message.text())
     ) {
       shaderConsoleErrors.push(message.text());
     }
@@ -388,7 +444,7 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
     host.append(canvas);
     document.body.append(host);
 
-    const viewer = new SkeletonViewer(canvas);
+    const viewer = await SkeletonViewer.create(canvas);
     try {
       interface DebugObject {
         readonly name: string;
@@ -405,7 +461,6 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
           };
         };
         readonly material?: {
-          readonly dithering?: boolean;
           readonly roughness?: number;
           readonly metalness?: number;
           readonly userData?: Record<string, unknown>;
@@ -419,9 +474,6 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
             readonly bottom: number;
           };
         };
-      }
-      interface ShaderDiagnostics {
-        readonly runnable?: boolean;
       }
       const internal = viewer as unknown as {
         scene: {
@@ -445,24 +497,31 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
           };
         };
         renderer: {
+          readonly isWebGPURenderer: boolean;
+          readonly backend: {
+            readonly isWebGPUBackend?: boolean;
+            readonly isWebGLBackend?: boolean;
+            readonly device?: GPUDevice;
+          };
           readonly shadowMap: { readonly enabled: boolean };
           readonly debug: {
-            onShaderError:
-              | ((
-                  gl: WebGL2RenderingContext,
-                  program: WebGLProgram,
-                  vertexShader: WebGLShader,
-                  fragmentShader: WebGLShader,
-                ) => void)
-              | null;
+            getShaderAsync(
+              scene: unknown,
+              camera: unknown,
+              object: unknown,
+            ): Promise<{
+              readonly fragmentShader: string | null;
+              readonly vertexShader: string | null;
+            }>;
           };
-          readonly info: {
-            readonly programs:
-              | readonly { readonly diagnostics?: ShaderDiagnostics }[]
-              | null;
-          };
+          onError(info: string | { readonly message?: string }): void;
           compileAsync(scene: unknown, camera: unknown): Promise<unknown>;
-          render(scene: unknown, camera: unknown): void;
+        };
+        renderPipeline: {
+          readonly pipeline: {
+            readonly outputColorTransform: boolean;
+          };
+          render(): void;
         };
         vrm: unknown;
         vrmRetargetPlan: unknown;
@@ -471,21 +530,12 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
           readonly position: { readonly x: number; readonly z: number };
         };
       };
-      const shaderErrors: string[] = [];
-      internal.renderer.debug.onShaderError = (
-        gl,
-        program,
-        vertexShader,
-        fragmentShader,
-      ) => {
-        shaderErrors.push(
-          [
-            gl.getProgramInfoLog(program),
-            gl.getShaderInfoLog(vertexShader),
-            gl.getShaderInfoLog(fragmentShader),
-          ]
-            .filter(Boolean)
-            .join("\n"),
+      const rendererErrors: string[] = [];
+      internal.renderer.onError = (info) => {
+        rendererErrors.push(
+          typeof info === "string"
+            ? info
+            : (info.message ?? JSON.stringify(info)),
         );
       };
 
@@ -607,15 +657,31 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
         }
       });
 
-      await internal.renderer.compileAsync(
-        internal.scene,
-        internal.camera,
-      );
-      internal.renderer.render(internal.scene, internal.camera);
-      const failedPrograms =
-        internal.renderer.info.programs?.filter(
-          (program) => program.diagnostics?.runnable === false,
-        ).length ?? 0;
+      const device = internal.renderer.backend.device;
+      device?.pushErrorScope("validation");
+      let validationError: string | null = null;
+      let groundShader: {
+        readonly fragmentShader: string | null;
+        readonly vertexShader: string | null;
+      } | null = null;
+      try {
+        await internal.renderer.compileAsync(
+          internal.scene,
+          internal.camera,
+        );
+        if (ground) {
+          groundShader = await internal.renderer.debug.getShaderAsync(
+            internal.scene,
+            internal.camera,
+            ground,
+          );
+        }
+        internal.renderPipeline.render();
+        await device?.queue.onSubmittedWorkDone();
+      } finally {
+        validationError =
+          (await device?.popErrorScope())?.message ?? null;
+      }
       const width =
         (ground?.geometry?.parameters.width ?? 0) *
         Math.abs(ground?.scale.x ?? 0);
@@ -624,6 +690,18 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
         Math.abs(ground?.scale.y ?? 0);
 
       return {
+        renderer: {
+          isWebGPURenderer: internal.renderer.isWebGPURenderer,
+          isWebGPUBackend:
+            internal.renderer.backend.isWebGPUBackend === true,
+          isWebGLBackend:
+            internal.renderer.backend.isWebGLBackend === true,
+          outputColorTransform:
+            internal.renderPipeline.pipeline.outputColorTransform,
+          generatedWgsl:
+            Boolean(groundShader?.vertexShader?.includes("@vertex")) &&
+            Boolean(groundShader?.fragmentShader?.includes("@fragment")),
+        },
         rendererShadows: internal.renderer.shadowMap.enabled,
         ground: ground
           ? {
@@ -631,7 +709,6 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
               width,
               height,
               receiveShadow: ground.receiveShadow,
-              dithering: ground.material?.dithering,
               roughness: ground.material?.roughness,
               metalness: ground.material?.metalness,
               pristineGrid: ground.material?.userData?.pristineGrid,
@@ -660,8 +737,8 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
           : null,
         namedGroundCount,
         gridHelpers,
-        shaderErrors,
-        failedPrograms,
+        rendererErrors,
+        validationError,
       };
     } finally {
       viewer.dispose();
@@ -669,13 +746,19 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
     }
   });
 
+  expect(groundState.renderer).toEqual({
+    isWebGPURenderer: true,
+    isWebGPUBackend: true,
+    isWebGLBackend: false,
+    outputColorTransform: false,
+    generatedWgsl: true,
+  });
   expect(groundState.rendererShadows).toBe(true);
   expect(groundState.namedGroundCount).toBe(1);
   expect(groundState.gridHelpers).toEqual([]);
   expect(groundState.ground).toMatchObject({
     geometry: "PlaneGeometry",
     receiveShadow: true,
-    dithering: true,
     roughness: 1,
     metalness: 0,
     pristineGrid: true,
@@ -726,8 +809,8 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
     top: 4,
     bottom: -4,
   });
-  expect(groundState.shaderErrors).toEqual([]);
-  expect(groundState.failedPrograms).toBe(0);
+  expect(groundState.rendererErrors).toEqual([]);
+  expect(groundState.validationError).toBeNull();
   expect(shaderConsoleErrors).toEqual([]);
   expect(pageErrors).toEqual([]);
 });
@@ -749,7 +832,7 @@ test("follows the root while preserving manual camera composition", async ({
     const canvas = document.createElement("canvas");
     host.append(canvas);
     document.body.append(host);
-    const viewer = new SkeletonViewer(canvas);
+    const viewer = await SkeletonViewer.create(canvas);
     try {
       const positions = new Float32Array(
         2 * CORE27_JOINT_COUNT * 3,
@@ -1035,6 +1118,7 @@ test("moves continuously from one held W keydown and stops on keyup", async ({
   page,
 }) => {
   await page.goto("/");
+  await waitForPreviewReady(page);
   await installCameraMovementProbe(page);
 
   const canvas = page.locator("#motion-canvas");
@@ -1079,6 +1163,7 @@ test("clears held camera movement when the window loses focus", async ({
   page,
 }) => {
   await page.goto("/");
+  await waitForPreviewReady(page);
   await installCameraMovementProbe(page);
 
   const canvas = page.locator("#motion-canvas");
@@ -1111,6 +1196,7 @@ test("keeps invalid model-pack errors beside the model setup action", async ({
   page,
 }, testInfo) => {
   await page.goto("/");
+  await waitForPreviewReady(page);
 
   const invalidPack = testInfo.outputPath("invalid-pack.tar.gz");
   await writeFile(invalidPack, "not a gzip archive");

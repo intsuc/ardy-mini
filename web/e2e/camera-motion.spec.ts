@@ -16,7 +16,7 @@ test("updates the held heading when orbiting horizontally at the top-down pole",
     const canvas = document.createElement("canvas");
     host.append(canvas);
     document.body.append(host);
-    const viewer = new SkeletonViewer(canvas);
+    const viewer = await SkeletonViewer.create(canvas);
     const internal = viewer as unknown as {
       camera: {
         position: {

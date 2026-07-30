@@ -77,24 +77,13 @@ interface FormValidation {
 
 type WebGpuState = "checking" | "ready" | "unavailable";
 
-interface WebGpuApi {
-  requestAdapter(): Promise<unknown | null>;
-}
-
-async function webGpuUnavailableReason(): Promise<string | null> {
+function webGpuUnavailableReason(): string | null {
   if (globalThis.isSecureContext === false) {
     return "Open this demo over HTTPS or localhost, then reload the page.";
   }
-  const gpu = (navigator as Navigator & { gpu?: WebGpuApi }).gpu;
+  const gpu = (navigator as Navigator & { gpu?: unknown }).gpu;
   if (!gpu) {
     return "Use a browser and device that support WebGPU, then reload the page.";
-  }
-  try {
-    if ((await gpu.requestAdapter()) === null) {
-      return "No compatible GPU adapter is available. Check browser GPU settings or use another device.";
-    }
-  } catch {
-    return "WebGPU could not initialize. Check browser GPU settings or use another device.";
   }
   return null;
 }
@@ -754,15 +743,7 @@ export function bootstrap(): () => void {
   let modelErrorReturnFocus: HTMLElement | null = null;
   let vrmErrorReturnFocus: HTMLElement | null = null;
   let viewer: SkeletonViewer | null = null;
-  try {
-    viewer = new SkeletonViewer(canvas);
-    viewer.setReducedMotion(reducedMotion.matches);
-  } catch (error) {
-    showError(
-      "3D preview unavailable",
-      error instanceof Error ? error.message : String(error),
-    );
-  }
+  let viewerInitialization: Promise<SkeletonViewer> | null = null;
   const pressedCameraKeys = new Set<string>();
   const syncCameraMovement = (): void => {
     const [forward, right] = cameraMovementForCodes(pressedCameraKeys);
@@ -1262,7 +1243,23 @@ export function bootstrap(): () => void {
     maybeAutoReplan(state);
   }
 
-  if (viewer) viewer.onPlaybackChange = updatePlayback;
+  async function initializeViewer(): Promise<boolean> {
+    viewerInitialization ??= SkeletonViewer.create(canvas);
+    const initializedViewer = await viewerInitialization;
+    if (disposed) {
+      initializedViewer.dispose();
+      return false;
+    }
+    if (viewer === null) {
+      viewer = initializedViewer;
+      viewer.setReducedMotion(reducedMotion.matches);
+      viewer.onPlaybackChange = updatePlayback;
+      viewer.applyEditorState(editorState);
+      viewer.setOutputVisibility(outputVisibilityFromControls());
+      setVrmLoading(false);
+    }
+    return true;
+  }
 
   async function loadModelPack(
     archive: File,
@@ -2282,7 +2279,7 @@ export function bootstrap(): () => void {
   });
 
   async function initializeModelPack(): Promise<void> {
-    const unavailableReason = await webGpuUnavailableReason();
+    const unavailableReason = webGpuUnavailableReason();
     if (disposed) return;
     if (unavailableReason) {
       webGpuState = "unavailable";
@@ -2295,6 +2292,24 @@ export function bootstrap(): () => void {
       );
       updateGenerateAvailability();
       announce(`WebGPU is unavailable. ${unavailableReason}`);
+      return;
+    }
+
+    try {
+      if (!(await initializeViewer())) return;
+    } catch (error) {
+      if (disposed) return;
+      const message = error instanceof Error ? error.message : String(error);
+      webGpuState = "unavailable";
+      modelCard.removeAttribute("aria-busy");
+      setModelStatus(
+        "unavailable",
+        "WebGPU preview unavailable",
+        message,
+        "Unavailable",
+      );
+      updateGenerateAvailability();
+      showError("3D preview unavailable", message);
       return;
     }
 

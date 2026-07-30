@@ -1,9 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-import * as THREE from "three";
-
-const GRID_SHADER_CACHE_KEY = "ardy-pristine-ground-grid-v1";
+import {
+  Color,
+  type ColorRepresentation,
+  MeshStandardNodeMaterial,
+  type Node,
+  Vector2,
+} from "three/webgpu";
+import * as TSL from "three/tsl";
 
 const DEFAULTS = {
   baseColor: "#262626",
@@ -17,102 +22,193 @@ const DEFAULTS = {
   majorOpacity: 0.7,
 } as const;
 
-const GRID_VERTEX_DECLARATIONS = /* glsl */ `
-uniform vec2 ardyGroundGridPhase;
-varying vec2 ardyGroundGridPosition;
-`;
+type GridNodeType =
+  | "color"
+  | "float"
+  | "mat4"
+  | "vec2"
+  | "vec3"
+  | "vec4";
 
-const GRID_VERTEX_POSITION = /* glsl */ `
-// Drop model translation before interpolation. The small phase uniform restores
-// world-grid alignment without passing large world coordinates through fract().
-ardyGroundGridPosition =
-  (mat3(modelMatrix) * transformed).xz + ardyGroundGridPhase;
-`;
+/**
+ * A deliberately small facade over the TSL API used by this shader.
+ *
+ * The full TSL overload graph is extremely expensive for TypeScript to infer
+ * through a long procedural shader. Keeping the internal graph structurally
+ * typed avoids multi-gigabyte type-checks while the public material boundary
+ * remains Three.js's `Node` type.
+ */
+interface GridNode<T extends GridNodeType> {
+  readonly nodeType: T;
+  readonly rgb: GridNode<"vec3">;
+  readonly x: GridNode<"float">;
+  readonly xz: GridNode<"vec2">;
+  readonly y: GridNode<"float">;
+  readonly yw: GridNode<"vec2">;
+}
+
+interface MutableGridUniform<
+  T extends GridNodeType,
+  TValue,
+> extends GridNode<T> {
+  value: TValue;
+}
+
+interface GridTslFacade {
+  readonly materialColor: GridNode<"vec4">;
+  readonly modelWorldMatrix: GridNode<"mat4">;
+  readonly positionLocal: GridNode<"vec3">;
+  abs<T extends GridNodeType>(value: unknown): GridNode<T>;
+  add<T extends GridNodeType>(left: unknown, right: unknown): GridNode<T>;
+  clamp<T extends GridNodeType>(
+    value: unknown,
+    low: unknown,
+    high: unknown,
+  ): GridNode<T>;
+  dFdx<T extends GridNodeType>(value: unknown): GridNode<T>;
+  dFdy<T extends GridNodeType>(value: unknown): GridNode<T>;
+  div<T extends GridNodeType>(left: unknown, right: unknown): GridNode<T>;
+  fract<T extends GridNodeType>(value: unknown): GridNode<T>;
+  length(value: unknown): GridNode<"float">;
+  max<T extends GridNodeType>(left: unknown, right: unknown): GridNode<T>;
+  min<T extends GridNodeType>(left: unknown, right: unknown): GridNode<T>;
+  mix<T extends GridNodeType>(
+    left: unknown,
+    right: unknown,
+    factor: unknown,
+  ): GridNode<T>;
+  mul<T extends GridNodeType>(left: unknown, right: unknown): GridNode<T>;
+  smoothstep<T extends GridNodeType>(
+    low: unknown,
+    high: unknown,
+    value: unknown,
+  ): GridNode<T>;
+  step<T extends GridNodeType>(
+    edge: unknown,
+    value: unknown,
+  ): GridNode<T>;
+  sub<T extends GridNodeType>(left: unknown, right: unknown): GridNode<T>;
+  uniform<T extends GridNodeType, TValue>(
+    value: TValue,
+  ): MutableGridUniform<T, TValue>;
+  vec2(x?: unknown, y?: unknown): GridNode<"vec2">;
+  vec4(x?: unknown, y?: unknown, z?: unknown, w?: unknown): GridNode<"vec4">;
+}
+
+const gridTsl = TSL as unknown as GridTslFacade;
 
 // Adapted from Ben Golus's "The Best Darn Grid Shader (Yet)" and Brandon
 // Jones's MIT-licensed WebGPU implementation:
 // https://bgolus.medium.com/the-best-darn-grid-shader-yet-727f9278b9d8
 // https://github.com/toji/pristine-grid-webgpu
-const GRID_FRAGMENT_DECLARATIONS = /* glsl */ `
-uniform vec3 ardyGroundMinorColor;
-uniform vec3 ardyGroundMajorColor;
-uniform float ardyGroundMinorSpacing;
-uniform float ardyGroundMajorSpacing;
-uniform float ardyGroundMinorLineWidth;
-uniform float ardyGroundMajorLineWidth;
-uniform float ardyGroundMinorOpacity;
-uniform float ardyGroundMajorOpacity;
-varying vec2 ardyGroundGridPosition;
+function pristineGrid(
+  uv: GridNode<"vec2">,
+  lineWidth: GridNode<"vec2">,
+): GridNode<"float"> {
+  const uvDx = gridTsl.dFdx<"vec2">(uv);
+  const uvDy = gridTsl.dFdy<"vec2">(uv);
+  const uvDDXY = gridTsl.vec4(uvDx, uvDy);
+  const xDerivative = gridTsl.length(uvDDXY.xz);
+  const yDerivative = gridTsl.length(uvDDXY.yw);
+  const uvDeriv = gridTsl.vec2(xDerivative, yDerivative);
 
-float ardyPristineGrid(vec2 uv, vec2 lineWidth) {
-  vec4 uvDDXY = vec4(dFdx(uv), dFdy(uv));
-  vec2 uvDeriv = vec2(length(uvDDXY.xz), length(uvDDXY.yw));
-  vec2 invertLine = step(vec2(0.5), lineWidth);
-  vec2 targetWidth = mix(lineWidth, vec2(1.0) - lineWidth, invertLine);
-  vec2 drawWidth = min(
-    max(targetWidth, uvDeriv),
-    vec2(0.5)
+  const halfWidth = gridTsl.vec2(0.5);
+  const invertLine = gridTsl.step<"vec2">(halfWidth, lineWidth);
+  const oneMinusLineWidth = gridTsl.sub<"vec2">(
+    gridTsl.vec2(1),
+    lineWidth,
   );
-  vec2 lineAA = uvDeriv * 1.5;
-  vec2 gridUV = abs(fract(uv) * 2.0 - 1.0);
-  gridUV = mix(vec2(1.0) - gridUV, gridUV, invertLine);
-  vec2 grid = vec2(1.0) - smoothstep(
-    drawWidth - lineAA,
-    drawWidth + lineAA,
-    gridUV
+  const targetWidth = gridTsl.mix<"vec2">(
+    lineWidth,
+    oneMinusLineWidth,
+    invertLine,
   );
-  grid *= clamp(targetWidth / max(drawWidth, vec2(1e-6)), 0.0, 1.0);
-  grid = mix(
-    grid,
+  const derivativeWidth = gridTsl.max<"vec2">(targetWidth, uvDeriv);
+  const drawWidth = gridTsl.min<"vec2">(derivativeWidth, halfWidth);
+  const lineAA = gridTsl.mul<"vec2">(uvDeriv, 1.5);
+
+  const repeatedUV = gridTsl.fract<"vec2">(uv);
+  const doubledUV = gridTsl.mul<"vec2">(repeatedUV, 2);
+  const centeredUV = gridTsl.sub<"vec2">(doubledUV, 1);
+  const absoluteUV = gridTsl.abs<"vec2">(centeredUV);
+  const invertedUV = gridTsl.sub<"vec2">(
+    gridTsl.vec2(1),
+    absoluteUV,
+  );
+  const selectedUV = gridTsl.mix<"vec2">(
+    invertedUV,
+    absoluteUV,
+    invertLine,
+  );
+
+  const lowerAA = gridTsl.sub<"vec2">(drawWidth, lineAA);
+  const upperAA = gridTsl.add<"vec2">(drawWidth, lineAA);
+  const antialiased = gridTsl.smoothstep<"vec2">(
+    lowerAA,
+    upperAA,
+    selectedUV,
+  );
+  const initialGrid = gridTsl.sub<"vec2">(
+    gridTsl.vec2(1),
+    antialiased,
+  );
+
+  const safeDrawWidth = gridTsl.max<"vec2">(
+    drawWidth,
+    gridTsl.vec2(1e-6),
+  );
+  const widthRatio = gridTsl.div<"vec2">(targetWidth, safeDrawWidth);
+  const widthFade = gridTsl.clamp<"vec2">(widthRatio, 0, 1);
+  const widthAdjusted = gridTsl.mul<"vec2">(initialGrid, widthFade);
+
+  const doubledDerivative = gridTsl.mul<"vec2">(uvDeriv, 2);
+  const derivativeFadeInput = gridTsl.sub<"vec2">(
+    doubledDerivative,
+    1,
+  );
+  const derivativeFade = gridTsl.clamp<"vec2">(
+    derivativeFadeInput,
+    0,
+    1,
+  );
+  const distantGrid = gridTsl.mix<"vec2">(
+    widthAdjusted,
     targetWidth,
-    clamp(uvDeriv * 2.0 - 1.0, 0.0, 1.0)
+    derivativeFade,
   );
-  grid = mix(grid, vec2(1.0) - grid, invertLine);
-  return mix(grid.x, 1.0, grid.y);
+
+  const invertedGrid = gridTsl.sub<"vec2">(
+    gridTsl.vec2(1),
+    distantGrid,
+  );
+  const selectedGrid = gridTsl.mix<"vec2">(
+    distantGrid,
+    invertedGrid,
+    invertLine,
+  );
+
+  const combinedGrid = gridTsl.mix<"float">(
+    selectedGrid.x,
+    1,
+    selectedGrid.y,
+  );
+  return combinedGrid;
 }
-`;
-
-const GRID_FRAGMENT_COLOR = /* glsl */ `
-// The non-inverted Pristine Grid branch is already centered on integer UVs.
-// Keeping both coordinates unshifted makes every major line replace a minor.
-float ardyMinorGrid = ardyPristineGrid(
-  ardyGroundGridPosition / ardyGroundMinorSpacing,
-  vec2(ardyGroundMinorLineWidth)
-);
-float ardyMajorGrid = ardyPristineGrid(
-  ardyGroundGridPosition / ardyGroundMajorSpacing,
-  vec2(ardyGroundMajorLineWidth)
-);
-diffuseColor.rgb = mix(
-  diffuseColor.rgb,
-  ardyGroundMinorColor,
-  ardyMinorGrid * ardyGroundMinorOpacity
-);
-diffuseColor.rgb = mix(
-  diffuseColor.rgb,
-  ardyGroundMajorColor,
-  ardyMajorGrid * ardyGroundMajorOpacity
-);
-`;
-
-type StandardMaterialShader = Parameters<
-  THREE.MeshStandardMaterial["onBeforeCompile"]
->[0];
 
 interface GroundGridState {
-  origin: THREE.Vector2;
-  phase: { value: THREE.Vector2 };
-  minorColor: { value: THREE.Color };
-  majorColor: { value: THREE.Color };
-  minorSpacing: { value: number };
-  majorSpacing: { value: number };
-  minorLineWidth: { value: number };
-  majorLineWidth: { value: number };
-  minorOpacity: { value: number };
-  majorOpacity: { value: number };
+  origin: Vector2;
+  phase: MutableGridUniform<"vec2", Vector2>;
+  minorColor: MutableGridUniform<"color", Color>;
+  majorColor: MutableGridUniform<"color", Color>;
+  minorSpacing: MutableGridUniform<"float", number>;
+  majorSpacing: MutableGridUniform<"float", number>;
+  minorLineWidth: MutableGridUniform<"float", number>;
+  majorLineWidth: MutableGridUniform<"float", number>;
+  minorOpacity: MutableGridUniform<"float", number>;
+  majorOpacity: MutableGridUniform<"float", number>;
 }
 
-const gridStates = new WeakMap<THREE.MeshStandardMaterial, GroundGridState>();
+const gridStates = new WeakMap<MeshStandardNodeMaterial, GroundGridState>();
 
 export interface CameraRelativeGroundOptions {
   /** Current orbit target in world-space metres. */
@@ -139,9 +235,9 @@ export interface CameraRelativeGroundLayout {
 }
 
 export interface GroundGridMaterialOptions {
-  baseColor?: THREE.ColorRepresentation;
-  minorColor?: THREE.ColorRepresentation;
-  majorColor?: THREE.ColorRepresentation;
+  baseColor?: ColorRepresentation;
+  minorColor?: ColorRepresentation;
+  majorColor?: ColorRepresentation;
   minorSpacing?: number;
   majorSpacing?: number;
   /** Full line width as a fraction of a minor cell. */
@@ -175,17 +271,6 @@ function unitInterval(value: number, label: string): number {
     throw new RangeError(`${label} must be between zero and one.`);
   }
   return value;
-}
-
-function replaceShaderChunk(
-  source: string,
-  chunk: string,
-  addition: string,
-): string {
-  if (!source.includes(chunk)) {
-    throw new Error(`Unable to inject the ground grid after ${chunk}.`);
-  }
-  return source.replace(chunk, `${chunk}\n${addition}`);
 }
 
 /**
@@ -313,69 +398,89 @@ function resolveState(
     return current;
   }
   return {
-    origin: new THREE.Vector2(),
-    phase: { value: new THREE.Vector2() },
-    minorColor: {
-      value: new THREE.Color(options.minorColor ?? DEFAULTS.minorColor),
-    },
-    majorColor: {
-      value: new THREE.Color(options.majorColor ?? DEFAULTS.majorColor),
-    },
-    minorSpacing: { value: minorSpacing },
-    majorSpacing: { value: majorSpacing },
-    minorLineWidth: { value: minorLineWidth },
-    majorLineWidth: { value: majorLineWidth },
-    minorOpacity: { value: minorOpacity },
-    majorOpacity: { value: majorOpacity },
+    origin: new Vector2(),
+    phase: gridTsl.uniform<"vec2", Vector2>(new Vector2()),
+    minorColor: gridTsl.uniform<"color", Color>(
+      new Color(options.minorColor ?? DEFAULTS.minorColor),
+    ),
+    majorColor: gridTsl.uniform<"color", Color>(
+      new Color(options.majorColor ?? DEFAULTS.majorColor),
+    ),
+    minorSpacing: gridTsl.uniform<"float", number>(minorSpacing),
+    majorSpacing: gridTsl.uniform<"float", number>(majorSpacing),
+    minorLineWidth: gridTsl.uniform<"float", number>(minorLineWidth),
+    majorLineWidth: gridTsl.uniform<"float", number>(majorLineWidth),
+    minorOpacity: gridTsl.uniform<"float", number>(minorOpacity),
+    majorOpacity: gridTsl.uniform<"float", number>(majorOpacity),
   };
 }
 
-function injectGroundGrid(
-  shader: StandardMaterialShader,
+function createGroundGridColorNode(
   state: GroundGridState,
-): void {
-  shader.uniforms.ardyGroundGridPhase = state.phase;
-  shader.uniforms.ardyGroundMinorColor = state.minorColor;
-  shader.uniforms.ardyGroundMajorColor = state.majorColor;
-  shader.uniforms.ardyGroundMinorSpacing = state.minorSpacing;
-  shader.uniforms.ardyGroundMajorSpacing = state.majorSpacing;
-  shader.uniforms.ardyGroundMinorLineWidth = state.minorLineWidth;
-  shader.uniforms.ardyGroundMajorLineWidth = state.majorLineWidth;
-  shader.uniforms.ardyGroundMinorOpacity = state.minorOpacity;
-  shader.uniforms.ardyGroundMajorOpacity = state.majorOpacity;
+): Node<"vec3"> {
+  // Use a direction (w = 0) so model translation is discarded. The small
+  // periodic phase restores world-grid alignment without feeding large world
+  // coordinates into fract().
+  const localPosition = gridTsl.vec4(gridTsl.positionLocal, 0);
+  const untranslatedWorldPosition = gridTsl.mul<"vec4">(
+    gridTsl.modelWorldMatrix,
+    localPosition,
+  );
+  const gridPosition = gridTsl.add<"vec2">(
+    untranslatedWorldPosition.xz,
+    state.phase,
+  );
+  const minorUV = gridTsl.div<"vec2">(
+    gridPosition,
+    state.minorSpacing,
+  );
+  const minorWidth = gridTsl.vec2(state.minorLineWidth);
+  const minorGrid = pristineGrid(
+    minorUV,
+    minorWidth,
+  );
+  const majorUV = gridTsl.div<"vec2">(
+    gridPosition,
+    state.majorSpacing,
+  );
+  const majorWidth = gridTsl.vec2(state.majorLineWidth);
+  const majorGrid = pristineGrid(
+    majorUV,
+    majorWidth,
+  );
 
-  shader.vertexShader = replaceShaderChunk(
-    shader.vertexShader,
-    "#include <common>",
-    GRID_VERTEX_DECLARATIONS,
+  const minorBlend = gridTsl.mul<"float">(
+    minorGrid,
+    state.minorOpacity,
   );
-  shader.vertexShader = replaceShaderChunk(
-    shader.vertexShader,
-    "#include <begin_vertex>",
-    GRID_VERTEX_POSITION,
+  const minorColor = gridTsl.mix<"vec3">(
+    gridTsl.materialColor.rgb,
+    state.minorColor,
+    minorBlend,
   );
-  shader.fragmentShader = replaceShaderChunk(
-    shader.fragmentShader,
-    "#include <common>",
-    GRID_FRAGMENT_DECLARATIONS,
+  const majorBlend = gridTsl.mul<"float">(
+    majorGrid,
+    state.majorOpacity,
   );
-  shader.fragmentShader = replaceShaderChunk(
-    shader.fragmentShader,
-    "#include <color_fragment>",
-    GRID_FRAGMENT_COLOR,
+  const groundColor = gridTsl.mix<"vec3">(
+    minorColor,
+    state.majorColor,
+    majorBlend,
   );
+  return groundColor as unknown as Node<"vec3">;
 }
 
 /**
- * Adds the Pristine Grid shader to an existing standard material.
+ * Adds the Pristine Grid TSL graph to an existing standard node material.
  *
- * The grid is mixed into `diffuseColor` before Three.js applies lighting,
- * shadows, fog, tone mapping, and dithering.
+ * The grid is mixed into the material color before Three.js applies lighting,
+ * shadows, fog, and tone mapping. Display-space dithering is handled by the
+ * viewer's final-output pipeline.
  */
 export function configureGroundGridMaterial(
-  material: THREE.MeshStandardMaterial,
+  material: MeshStandardNodeMaterial,
   options: GroundGridMaterialOptions = {},
-): THREE.MeshStandardMaterial {
+): MeshStandardNodeMaterial {
   const current = gridStates.get(material);
   const state = resolveState(options, current);
   gridStates.set(material, state);
@@ -389,18 +494,11 @@ export function configureGroundGridMaterial(
   if (options.metalness !== undefined) {
     material.metalness = unitInterval(options.metalness, "Ground metalness");
   }
-  material.dithering = true;
   material.userData.pristineGrid = true;
 
   if (!current) {
-    const previousOnBeforeCompile = material.onBeforeCompile.bind(material);
-    const previousCacheKey = material.customProgramCacheKey.bind(material);
-    material.onBeforeCompile = (shader, renderer): void => {
-      previousOnBeforeCompile(shader, renderer);
-      injectGroundGrid(shader, state);
-    };
-    material.customProgramCacheKey = (): string =>
-      `${previousCacheKey()}|${GRID_SHADER_CACHE_KEY}`;
+    const colorNode: Node<"vec3"> = createGroundGridColorNode(state);
+    material.colorNode = colorNode;
   }
 
   material.needsUpdate = true;
@@ -410,8 +508,8 @@ export function configureGroundGridMaterial(
 /** Creates the one-pass, shadow-receiving ground material. */
 export function createGroundGridMaterial(
   options: GroundGridMaterialOptions = {},
-): THREE.MeshStandardMaterial {
-  const material = new THREE.MeshStandardMaterial({
+): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial({
     color: options.baseColor ?? DEFAULTS.baseColor,
     roughness: options.roughness ?? 1,
     metalness: options.metalness ?? 0,
@@ -423,7 +521,7 @@ export function createGroundGridMaterial(
  * Updates the rebased shader origin after moving the camera-relative mesh.
  */
 export function updateGroundGridOrigin(
-  material: THREE.MeshStandardMaterial,
+  material: MeshStandardNodeMaterial,
   originX: number,
   originZ: number,
 ): void {

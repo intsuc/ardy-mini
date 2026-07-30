@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { VRM } from "@pixiv/three-vrm";
 
@@ -45,6 +45,7 @@ import {
   createGroundGridMaterial,
   updateGroundGridOrigin,
 } from "./ground-grid";
+import { DitheredRenderPipeline } from "./dithered-render-pipeline";
 import {
   loadVrmAvatar,
   type LoadedVrmAvatar,
@@ -203,6 +204,28 @@ export function cameraMovementDistance(
   );
 }
 
+export function isWebGpuRendererBackend(renderer: {
+  readonly isWebGPURenderer?: unknown;
+  readonly backend?: unknown;
+}): boolean {
+  return (
+    renderer.isWebGPURenderer === true &&
+    (renderer.backend as { readonly isWebGPUBackend?: unknown } | undefined)
+      ?.isWebGPUBackend === true
+  );
+}
+
+function requireNativeWebGpuBackend(renderer: THREE.WebGPURenderer): void {
+  // WebGPURenderer installs a WebGL2 fallback internally and currently exposes
+  // no public force-WebGPU option. This application already requires WebGPU,
+  // so reject initialization instead of silently changing rendering backends.
+  (
+    renderer as unknown as {
+      _getFallback: ((error: unknown) => unknown) | null;
+    }
+  )._getFallback = null;
+}
+
 /** Counts used by the instanced skeleton layers for a dynamic skeleton. */
 export function skeletonInstanceCounts(
   skeleton: SkeletonMetadata,
@@ -291,7 +314,8 @@ export class SkeletonViewer {
   private readonly canvas: HTMLCanvasElement;
   private readonly scene: THREE.Scene;
   private readonly camera: THREE.PerspectiveCamera;
-  private readonly renderer: THREE.WebGLRenderer;
+  private readonly renderer: THREE.WebGPURenderer;
+  private readonly renderPipeline: DitheredRenderPipeline;
   private readonly controls: OrbitControls;
   private joints!: THREE.InstancedMesh;
   private bones!: THREE.InstancedMesh;
@@ -376,6 +400,8 @@ export class SkeletonViewer {
   private cameraMovementForward = 0;
   private cameraMovementRight = 0;
   private lastCameraMovementTime: number | null = null;
+  private rendererReady = false;
+  private disposed = false;
   private needsRender = true;
   private pageVisible = !document.hidden;
   private playbackListener: PlaybackListener | null = null;
@@ -465,7 +491,29 @@ export class SkeletonViewer {
     }
   };
 
-  constructor(canvas: HTMLCanvasElement) {
+  static async create(canvas: HTMLCanvasElement): Promise<SkeletonViewer> {
+    const viewer = new SkeletonViewer(canvas);
+    try {
+      await viewer.renderer.init();
+      if (!isWebGpuRendererBackend(viewer.renderer)) {
+        throw new Error(
+          "Three.js initialized a WebGL fallback instead of the required WebGPU backend.",
+        );
+      }
+      // Build the complete scene/output pipeline inside the initialization
+      // boundary so setup failures reach the unavailable-preview UI instead
+      // of surfacing from a later animation frame.
+      viewer.renderPipeline.render();
+      viewer.rendererReady = true;
+      viewer.invalidate();
+      return viewer;
+    } catch (error) {
+      viewer.dispose();
+      throw error;
+    }
+  }
+
+  private constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     this.canvas.style.touchAction = "none";
     this.scene = new THREE.Scene();
@@ -475,17 +523,23 @@ export class SkeletonViewer {
     this.camera = new THREE.PerspectiveCamera(38, 1, 0.01, 100);
     this.camera.position.set(3.1, 2.15, 3.4);
 
-    this.renderer = new THREE.WebGLRenderer({
+    this.renderer = new THREE.WebGPURenderer({
       canvas,
       antialias: true,
       alpha: false,
       powerPreference: "high-performance",
     });
+    requireNativeWebGpuBackend(this.renderer);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderPipeline = new DitheredRenderPipeline(
+      this.renderer,
+      this.scene,
+      this.camera,
+    );
 
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.target.set(0, 0.85, 0);
@@ -1142,6 +1196,9 @@ export class SkeletonViewer {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.rendererReady = false;
     cancelAnimationFrame(this.animationFrame);
     cancelAnimationFrame(this.resizeFrame);
     this.resizeObserver.disconnect();
@@ -1167,6 +1224,7 @@ export class SkeletonViewer {
       this.initialTransformGroup,
       this.waypointGroup,
     ].forEach(clearGroup);
+    this.renderPipeline.dispose();
     this.renderer.dispose();
   }
 
@@ -1209,7 +1267,7 @@ export class SkeletonViewer {
     }
     if (this.needsRender || poseChanged || controlsChanged || cameraMoved) {
       this.updateGroundSurfaceLayout();
-      this.renderer.render(this.scene, this.camera);
+      this.renderPipeline.render();
       this.needsRender = false;
     }
     if (this.playing || controlsChanged || this.hasCameraMovement()) {
@@ -1245,7 +1303,12 @@ export class SkeletonViewer {
   }
 
   private scheduleFrame(): void {
-    if (!this.animationFrame && this.pageVisible) {
+    if (
+      !this.animationFrame &&
+      this.pageVisible &&
+      this.rendererReady &&
+      !this.disposed
+    ) {
       this.animationFrame = requestAnimationFrame(this.animate);
     }
   }

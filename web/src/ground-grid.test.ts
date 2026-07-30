@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-import * as THREE from "three";
+import {
+  MeshStandardNodeMaterial,
+  type Node,
+  Vector2,
+} from "three/webgpu";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -11,6 +15,22 @@ import {
   groundGridPhase,
   updateGroundGridOrigin,
 } from "./ground-grid";
+
+interface MutableUniformValue {
+  value: unknown;
+}
+
+function materialUniforms(
+  material: MeshStandardNodeMaterial,
+): MutableUniformValue[] {
+  const uniforms: MutableUniformValue[] = [];
+  material.colorNode?.traverse((node: Node) => {
+    if ("isUniformNode" in node && node.isUniformNode === true) {
+      uniforms.push(node as unknown as MutableUniformValue);
+    }
+  });
+  return uniforms;
+}
 
 describe("camera-relative ground layout", () => {
   it("snaps its center and coverage to the major grid period", () => {
@@ -56,138 +76,63 @@ describe("camera-relative ground layout", () => {
 });
 
 describe("Pristine Grid material", () => {
-  it("enables dithering and supplies a stable shader marker", () => {
+  it("uses a standard node material with a TSL color graph", () => {
     const material = createGroundGridMaterial();
 
-    expect(material).toBeInstanceOf(THREE.MeshStandardMaterial);
-    expect(material.dithering).toBe(true);
+    expect(material).toBeInstanceOf(MeshStandardNodeMaterial);
+    // Node materials ignore Material.dithering in Three.js r185. The viewer
+    // applies effective dithering in its final-output pipeline instead.
+    expect(material.dithering).toBe(false);
     expect(material.userData.pristineGrid).toBe(true);
-    expect(material.customProgramCacheKey()).toContain(
-      "ardy-pristine-ground-grid-v1",
-    );
-  });
-
-  it("injects rebased grid coordinates and both grid scales before lighting", () => {
-    const material = createGroundGridMaterial();
-    const shader = {
-      uniforms: {},
-      vertexShader: `
-#include <common>
-void main() {
-  #include <begin_vertex>
-}
-`,
-      fragmentShader: `
-#include <common>
-void main() {
-  vec4 diffuseColor = vec4(1.0);
-  #include <color_fragment>
-  #include <lights_fragment_begin>
-}
-`,
-    } as unknown as Parameters<typeof material.onBeforeCompile>[0];
-
-    material.onBeforeCompile(
-      shader,
-      {} as Parameters<typeof material.onBeforeCompile>[1],
-    );
-
-    expect(shader.vertexShader).toContain("mat3(modelMatrix) * transformed");
-    expect(shader.vertexShader).not.toContain(
-      "modelMatrix * vec4(transformed",
-    );
-    expect(shader.fragmentShader).toContain("float ardyPristineGrid");
-    expect(shader.fragmentShader).toContain("ardyGroundMinorSpacing");
-    expect(shader.fragmentShader).toContain("ardyGroundMajorSpacing");
-    expect(shader.fragmentShader).toContain(
-      "ardyGroundGridPosition / ardyGroundMinorSpacing",
-    );
-    expect(shader.fragmentShader).toContain(
-      "ardyGroundGridPosition / ardyGroundMajorSpacing",
-    );
-    expect(shader.fragmentShader).not.toContain("+ vec2(0.5)");
-    expect(shader.fragmentShader.indexOf("float ardyMinorGrid")).toBeLessThan(
-      shader.fragmentShader.indexOf("#include <lights_fragment_begin>"),
-    );
+    expect(material.colorNode).not.toBeNull();
+    expect(material.colorNode?.isNode).toBe(true);
   });
 
   it("updates only a small periodic phase after the ground is recentered", () => {
     const material = configureGroundGridMaterial(
-      new THREE.MeshStandardMaterial(),
+      new MeshStandardNodeMaterial(),
     );
     updateGroundGridOrigin(material, 1_000_002.25, -1_000_002.75);
-    const shader = {
-      uniforms: {},
-      vertexShader:
-        "#include <common>\nvoid main(){\n#include <begin_vertex>\n}",
-      fragmentShader:
-        "#include <common>\nvoid main(){\n#include <color_fragment>\n}",
-    } as unknown as Parameters<typeof material.onBeforeCompile>[0];
-
-    material.onBeforeCompile(
-      shader,
-      {} as Parameters<typeof material.onBeforeCompile>[1],
+    const phase = materialUniforms(material).find(
+      (uniform) => uniform.value instanceof Vector2,
     );
-    const phase = (
-      shader.uniforms.ardyGroundGridPhase as { value: THREE.Vector2 }
-    ).value;
 
-    expect(phase.toArray()).toEqual([2.25, 2.25]);
+    expect(phase?.value).toBeInstanceOf(Vector2);
+    expect((phase?.value as Vector2).toArray()).toEqual([2.25, 2.25]);
   });
 
-  it("reuses the injected shader while updating its uniform configuration", () => {
+  it("reuses the TSL graph while updating its uniform configuration", () => {
     const material = createGroundGridMaterial();
-    const shader = {
-      uniforms: {},
-      vertexShader:
-        "#include <common>\nvoid main(){\n#include <begin_vertex>\n}",
-      fragmentShader:
-        "#include <common>\nvoid main(){\n#include <color_fragment>\n}",
-    } as unknown as Parameters<typeof material.onBeforeCompile>[0];
-
-    material.onBeforeCompile(
-      shader,
-      {} as Parameters<typeof material.onBeforeCompile>[1],
+    const colorNode = material.colorNode;
+    const uniforms = materialUniforms(material);
+    const minorSpacingUniform = uniforms.find(
+      (uniform) => uniform.value === 0.5,
     );
-    const minorSpacingUniform = shader.uniforms.ardyGroundMinorSpacing;
-    const majorSpacingUniform = shader.uniforms.ardyGroundMajorSpacing;
+    const majorSpacingUniform = uniforms.find(
+      (uniform) => uniform.value === 5,
+    );
 
     configureGroundGridMaterial(material, {
       minorSpacing: 1,
       majorSpacing: 10,
     });
 
-    expect(shader.uniforms.ardyGroundMinorSpacing).toBe(minorSpacingUniform);
-    expect(shader.uniforms.ardyGroundMajorSpacing).toBe(majorSpacingUniform);
-    expect(minorSpacingUniform).toEqual({ value: 1 });
-    expect(majorSpacingUniform).toEqual({ value: 10 });
-    expect(
-      material.customProgramCacheKey().match(/pristine-ground-grid/g),
-    ).toHaveLength(1);
+    expect(material.colorNode).toBe(colorNode);
+    expect(minorSpacingUniform?.value).toBe(1);
+    expect(majorSpacingUniform?.value).toBe(10);
   });
 
   it("rebases an existing origin after changing the major period", () => {
     const material = createGroundGridMaterial();
-    const shader = {
-      uniforms: {},
-      vertexShader:
-        "#include <common>\nvoid main(){\n#include <begin_vertex>\n}",
-      fragmentShader:
-        "#include <common>\nvoid main(){\n#include <color_fragment>\n}",
-    } as unknown as Parameters<typeof material.onBeforeCompile>[0];
-    material.onBeforeCompile(
-      shader,
-      {} as Parameters<typeof material.onBeforeCompile>[1],
-    );
 
     updateGroundGridOrigin(material, 7.25, -2.75);
     configureGroundGridMaterial(material, {
       majorSpacing: 10,
     });
 
-    const phase = (
-      shader.uniforms.ardyGroundGridPhase as { value: THREE.Vector2 }
-    ).value;
-    expect(phase.toArray()).toEqual([7.25, 7.25]);
+    const phase = materialUniforms(material).find(
+      (uniform) => uniform.value instanceof Vector2,
+    );
+    expect((phase?.value as Vector2).toArray()).toEqual([7.25, 7.25]);
   });
 });

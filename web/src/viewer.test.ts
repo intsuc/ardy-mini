@@ -12,6 +12,7 @@ import {
   CORE27_PARENTS,
   CORE27_SKELETON,
   frameAfterElapsed,
+  isWebGpuRendererBackend,
   normalizeMotionClip,
   normalizeSkeletonMetadata,
   SkeletonViewer,
@@ -29,6 +30,29 @@ describe("Core27 rendering contract", () => {
       }
     });
     expect(CORE27_FOOT_CONTACT_JOINTS).toEqual([25, 26, 21, 22]);
+  });
+});
+
+describe("renderer backend contract", () => {
+  it("accepts only a WebGPURenderer using its native WebGPU backend", () => {
+    expect(
+      isWebGpuRendererBackend({
+        isWebGPURenderer: true,
+        backend: { isWebGPUBackend: true },
+      }),
+    ).toBe(true);
+    expect(
+      isWebGpuRendererBackend({
+        isWebGPURenderer: true,
+        backend: { isWebGLBackend: true },
+      }),
+    ).toBe(false);
+    expect(
+      isWebGpuRendererBackend({
+        isWebGPURenderer: false,
+        backend: { isWebGPUBackend: true },
+      }),
+    ).toBe(false);
   });
 });
 

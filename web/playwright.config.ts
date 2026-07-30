@@ -13,6 +13,11 @@ const webGpuLaunchArgs = [
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
+  // Every page owns a native WebGPU device. Running many Chromium pages in
+  // parallel can exhaust Vulkan device/queue resources and leave adapter
+  // initialization pending, which is not representative of the single-page
+  // application runtime.
+  workers: 1,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? "github" : "list",
