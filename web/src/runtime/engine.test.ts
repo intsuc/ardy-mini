@@ -14,13 +14,13 @@ import {
   MIXED_PRECISION_PUBLIC_IO_DTYPE,
   REQUIRED_WEBGPU_FEATURE,
   type BrowserGraphPrecisionSummary,
-  type BrowserModelPackManifest,
+  type BrowserModelManifest,
 } from "./manifest";
 import { ort, type RuntimeSessions } from "./sessions";
 import type { LocalTokenizer } from "./tokenizer";
 
-function precision(): BrowserModelPackManifest["precision"] {
-  const summary = <GraphName extends keyof BrowserModelPackManifest["graphs"]>(
+function precision(): BrowserModelManifest["precision"] {
+  const summary = <GraphName extends keyof BrowserModelManifest["graphs"]>(
     graphName: GraphName,
   ): BrowserGraphPrecisionSummary<GraphName> => {
     const isIdentity =
@@ -76,14 +76,14 @@ function precision(): BrowserModelPackManifest["precision"] {
   };
 }
 
-function manifest(): BrowserModelPackManifest {
+function manifest(): BrowserModelManifest {
   return {
-    format: "ardy-browser-model-pack",
-    schema_version: 2,
-    model: { id: "fixture", variant: "session" },
+    format: "ardy-browser-model-files",
+    schema_version: 1,
+    model: { id: "fixture", variant: "session", revision: "fixture-r1" },
     files: {},
     tokenizer: { directory: "tokenizer", max_length: 8 },
-    graphs: {} as BrowserModelPackManifest["graphs"],
+    graphs: {} as BrowserModelManifest["graphs"],
     precision: precision(),
     dimensions: {
       fps: 20,
@@ -219,11 +219,11 @@ describe("stateful browser generation session", () => {
   });
 });
 
-function generationManifest(): BrowserModelPackManifest {
+function generationManifest(): BrowserModelManifest {
   return {
-    format: "ardy-browser-model-pack",
-    schema_version: 2,
-    model: { id: "fixture", variant: "generation" },
+    format: "ardy-browser-model-files",
+    schema_version: 1,
+    model: { id: "fixture", variant: "generation", revision: "fixture-r1" },
     files: {},
     tokenizer: { directory: "tokenizer", max_length: 8 },
     graphs: {
@@ -322,7 +322,7 @@ function generationManifest(): BrowserModelPackManifest {
 
 describe("stateful generation coordinates", () => {
   it("preserves an external y translation after history is reconstructed", async () => {
-    const pack = generationManifest();
+    const modelManifest = generationManifest();
     const decoderTranslations: number[][] = [];
     const denoiserWindows: Float32Array[] = [];
     const tokenizer = {
@@ -353,9 +353,9 @@ describe("stateful generation coordinates", () => {
               pred_x0: new ort.Tensor(
                 "float32",
                 new Float32Array(
-                  pack.dimensions.max_tokens * pack.dimensions.hybrid_dim,
+                  modelManifest.dimensions.max_tokens * modelManifest.dimensions.hybrid_dim,
                 ),
-                [1, pack.dimensions.max_tokens, pack.dimensions.hybrid_dim],
+                [1, modelManifest.dimensions.max_tokens, modelManifest.dimensions.hybrid_dim],
               ),
             };
           },
@@ -369,19 +369,19 @@ describe("stateful generation coordinates", () => {
             );
             decoderTranslations.push(translation);
             const motion = new Float32Array(
-              pack.dimensions.max_frames * pack.dimensions.motion_dim,
+              modelManifest.dimensions.max_frames * modelManifest.dimensions.motion_dim,
             );
             const joints = new Float32Array(
-              pack.dimensions.max_frames * pack.dimensions.num_joints * 3,
+              modelManifest.dimensions.max_frames * modelManifest.dimensions.num_joints * 3,
             );
             const rotations = new Float32Array(
-              pack.dimensions.max_frames * pack.dimensions.num_joints * 9,
+              modelManifest.dimensions.max_frames * modelManifest.dimensions.num_joints * 9,
             );
             const rootPositions = new Float32Array(
-              pack.dimensions.max_frames * 3,
+              modelManifest.dimensions.max_frames * 3,
             );
-            for (let frame = 0; frame < pack.dimensions.max_frames; frame += 1) {
-              const motionOffset = frame * pack.dimensions.motion_dim;
+            for (let frame = 0; frame < modelManifest.dimensions.max_frames; frame += 1) {
+              const motionOffset = frame * modelManifest.dimensions.motion_dim;
               motion.set(
                 [
                   translation[0] + frame,
@@ -405,15 +405,15 @@ describe("stateful generation coordinates", () => {
               normalized_motion: new ort.Tensor(
                 "float32",
                 motion,
-                [1, pack.dimensions.max_frames, pack.dimensions.motion_dim],
+                [1, modelManifest.dimensions.max_frames, modelManifest.dimensions.motion_dim],
               ),
               posed_joints: new ort.Tensor(
                 "float32",
                 joints,
                 [
                   1,
-                  pack.dimensions.max_frames,
-                  pack.dimensions.num_joints,
+                  modelManifest.dimensions.max_frames,
+                  modelManifest.dimensions.num_joints,
                   3,
                 ],
               ),
@@ -422,8 +422,8 @@ describe("stateful generation coordinates", () => {
                 rotations,
                 [
                   1,
-                  pack.dimensions.max_frames,
-                  pack.dimensions.num_joints,
+                  modelManifest.dimensions.max_frames,
+                  modelManifest.dimensions.num_joints,
                   3,
                   3,
                 ],
@@ -433,8 +433,8 @@ describe("stateful generation coordinates", () => {
                 rotations,
                 [
                   1,
-                  pack.dimensions.max_frames,
-                  pack.dimensions.num_joints,
+                  modelManifest.dimensions.max_frames,
+                  modelManifest.dimensions.num_joints,
                   3,
                   3,
                 ],
@@ -442,17 +442,17 @@ describe("stateful generation coordinates", () => {
               root_positions: new ort.Tensor(
                 "float32",
                 rootPositions,
-                [1, pack.dimensions.max_frames, 3],
+                [1, modelManifest.dimensions.max_frames, 3],
               ),
               foot_contacts: new ort.Tensor(
                 "bool",
-                new Uint8Array(pack.dimensions.max_frames * 4),
-                [1, pack.dimensions.max_frames, 4],
+                new Uint8Array(modelManifest.dimensions.max_frames * 4),
+                [1, modelManifest.dimensions.max_frames, 4],
               ),
               global_root_heading: new ort.Tensor(
                 "float32",
-                new Float32Array(pack.dimensions.max_frames * 2),
-                [1, pack.dimensions.max_frames, 2],
+                new Float32Array(modelManifest.dimensions.max_frames * 2),
+                [1, modelManifest.dimensions.max_frames, 2],
               ),
             };
           },
@@ -460,7 +460,7 @@ describe("stateful generation coordinates", () => {
       },
     } as unknown as RuntimeSessions;
     const runtimeSession = new BrowserArdyGenerationSession(
-      pack,
+      modelManifest,
       tokenizer,
       sessions,
       {
@@ -486,7 +486,7 @@ describe("stateful generation coordinates", () => {
     // (2.5), because the decoder applies the external y translation again.
     expect(denoiserWindows[1][1]).toBe(0);
     expect(
-      denoiserWindows[1][pack.dimensions.hybrid_dim + 1],
+      denoiserWindows[1][modelManifest.dimensions.hybrid_dim + 1],
     ).toBe(0);
   });
 });

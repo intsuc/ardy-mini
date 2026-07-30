@@ -1,8 +1,9 @@
-# Browser mixed-FP16 model pack
+# Browser mixed-FP16 model files
 
 The browser exporter applies a reviewed, graph-specific mixed-FP16 policy
-before writing the gzip model pack. Public graph inputs and outputs remain
-FP32, so diffusion state and the JavaScript runtime contract do not change.
+before writing `model.json.gz` and one gzip transport per declared model file.
+Public graph inputs and outputs remain FP32, so diffusion state and the
+JavaScript runtime contract do not change.
 The text encoder and autoregressive denoiser remain byte-identical to their
 FP32 exports after continuation-rollout ablation. Only the structured decoder
 contains FP16 compute. The browser requires WebGPU's native `shader-f16`
@@ -121,7 +122,7 @@ remains FP16.
 
 ## Final 64 × 3 × 5 evaluation
 
-The adopted decoder-only mixed-FP16 pack was evaluated on 64 frozen test
+The adopted decoder-only mixed-FP16 model was evaluated on 64 frozen test
 prompts from the pinned NVIDIA SEED Timeline Annotations corpus, three fixed
 seeds, and five consecutive 40-frame windows (192 paired 200-frame motions;
 960 windows total). These are fidelity errors relative to the FP32 browser
@@ -142,7 +143,7 @@ decoder.
 
 The Git-tracked machine-readable aggregate, including prompt-corpus
 provenance, content hashes, evaluation parameters, per-window distributions,
-pack identities, and the Python/ONNX Runtime/CPU evaluation environment, is
+model identities, and the Python/ONNX Runtime/CPU evaluation environment, is
 [`reports/browser_fp16_ablation.json`](../reports/browser_fp16_ablation.json).
 It deliberately excludes prompt text, local absolute paths, and per-case
 worst-case attribution. The detailed local report retains those diagnostics
@@ -151,17 +152,17 @@ under the ignored `artifacts/` directory.
 Reproduce the paired evaluation with:
 
 ```bash
-uv run --extra browser python scripts/export_browser.py \
+uv run --extra browser python scripts/export_browser_models.py \
   --checkpoints-dir checkpoints \
   --minilm-artifact artifacts/minilm-ardy-core40 \
-  --output artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz \
-  --fp32-reference-output \
-    artifacts/browser/ardy-minilm-core40-browser-v1-fp32-reference.tar.gz
+  --output-directory artifacts/browser/ardy-minilm-core40-browser-v1 \
+  --fp32-reference-output-directory \
+    artifacts/browser/ardy-minilm-core40-browser-v1-fp32-reference
 
 uv run --extra browser python scripts/evaluate_browser_fp16.py \
-  --reference-pack \
-    artifacts/browser/ardy-minilm-core40-browser-v1-fp32-reference.tar.gz \
-  --candidate-pack artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz \
+  --reference-dir \
+    artifacts/browser/ardy-minilm-core40-browser-v1-fp32-reference \
+  --candidate-dir artifacts/browser/ardy-minilm-core40-browser-v1 \
   --prompts artifacts/data/prompts-core40-timeline.jsonl \
   --prompt-metadata artifacts/data/prompts-core40-timeline.metadata.json \
   --split test \
@@ -178,28 +179,35 @@ The evaluator validates that sidecar against the complete prompt-manifest
 filename, SHA-256, row count, and split counts. The public aggregate records
 that identity and the digest of the deterministically selected prompts, so the
 selection can be reproduced without checking prompt bodies into Git.
-Before creating any ONNX Runtime session, it also validates bounded canonical
-archive members, every declared file hash and size, the complete FP32 reference
-graphs, the production mixed-precision policy, public graph I/O, and the absence
-of external ONNX data. Input archives are prehashed and rechecked after
-extraction; any non-finite inference output or metric aborts report creation.
+Before creating any ONNX Runtime session, it decompresses the bounded
+`model.json.gz`, validates the fixed format and schema, rejects unsafe or
+duplicate paths and undeclared directory entries, and checks the compressed
+and raw size and SHA-256 of every declared transport. It materializes verified
+raw files in an evaluator-owned temporary directory, then validates the
+complete FP32 reference graphs, the production mixed-precision policy, public
+graph I/O, and the absence of external ONNX data. Every compressed input is
+prehashed and rechecked after use; any non-finite inference output or metric
+aborts report creation.
 
 ## Size result
 
-| Asset | FP32 bytes | Mixed-FP16 bytes | Saved |
+| Distribution total | FP32 bytes | Mixed-FP16 bytes | Saved |
 |---|---:|---:|---:|
-| Gzip model pack | 718,077,804 | 684,776,137 | 33,301,667 |
+| Raw manifest and model files | 775,578,788 | 740,125,267 | 35,453,521 |
+| `model.json.gz` and per-file gzip transports | 717,533,184 | 684,220,414 | 33,312,770 |
 
-The final gzip pack is 4.6376% smaller, saving 31.76 MiB (0.0310 GiB) on
-transfer. The production policy keeps the text encoder and denoiser
-byte-identical to FP32 and applies mixed FP16 only to the decoder. The
-candidate archive SHA-256 is
-`8641b8fbb94c245866300dcdbb3ad75a634d5427566fc4a8bd2fc8b9fe533a68`;
-the FP32 reference archive SHA-256 is
-`a9f5b37a0552e45dd7880fb347d4c3aa1206bc735b87cd2250a61178236074c3`.
-These are verified file/transfer reductions, not a claim that peak GPU memory
-drops by the same amount. Runtime allocations also include FP32 regions,
-activations, staging buffers, and browser/driver overhead.
+The mixed-FP16 distribution is 4.6427% smaller after per-file gzip, saving
+31.77 MiB (0.0310 GiB) on transfer. The production policy keeps the text
+encoder and denoiser byte-identical to FP32 and applies mixed FP16 only to the
+decoder. The decompressed candidate manifest SHA-256 is
+`1a6434946d8db8a6e18d9be53995e376e4ee1b4b2a650e90ab79f3c30ad48bf1`;
+the matching FP32 reference manifest SHA-256 is
+`1c073d6ddfc5f5258c35eb0987bc674c9fa62c10bf6bf0e2ecb00f638defc7d0`.
+The report records these portable manifest identities together with the model
+ID, immutable revision, and measured raw/transport totals; it records no local
+directory path. These are verified file/transfer reductions, not a claim that
+peak GPU memory drops by the same amount. Runtime allocations also include
+FP32 regions, activations, staging buffers, and browser/driver overhead.
 
 CPU FP16 inference is intentionally not used by the application and was slower
 than FP32 in the evaluation environment: the candidate took `1.31786`
@@ -213,8 +221,8 @@ The runtime feature gate and model-load order were exercised with Chromium
 `151.0.7922.34` (Dawn
 `583f3600453cc982a3dac39308cac8939875d7af`) on an NVIDIA GB10, Vulkan
 `1.4.312`, driver `580.159.3.0`. The adapter did not expose optional
-`shader-f16`, so the application correctly rejected the pack before reading or
-decompressing it. NVIDIA and SwiftShader adapters, the default and Vulkan
+`shader-f16`, so the application correctly rejected the model before reading
+or decompressing its graph transports. NVIDIA and SwiftShader adapters, the default and Vulkan
 ANGLE paths, three power preferences, core/compatibility requests, and unsafe
 WebGPU developer flags were checked; all reported `shader-f16=false`. The
 preflight produced no console error or page error, and its seven focused

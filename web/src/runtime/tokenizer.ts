@@ -3,7 +3,7 @@
 
 import { Tokenizer } from "@huggingface/tokenizers";
 
-import type { ModelPack } from "./model-pack";
+import type { ModelAssets } from "./model-assets";
 
 export interface EncodedPrompt {
   inputIds: BigInt64Array;
@@ -62,14 +62,14 @@ export class LocalTokenizer {
     this.#maxLength = maxLength;
   }
 
-  static async create(pack: ModelPack): Promise<LocalTokenizer> {
-    const { directory, max_length: maxLength } = pack.manifest.tokenizer;
+  static async create(assets: ModelAssets): Promise<LocalTokenizer> {
+    const { directory, max_length: maxLength } = assets.manifest.tokenizer;
     const tokenizerJsonPath = `${directory}/tokenizer.json`;
     const tokenizerConfigPath = `${directory}/tokenizer_config.json`;
     try {
       const [tokenizerJson, tokenizerConfig] = await Promise.all([
-        pack.read(tokenizerJsonPath),
-        pack.read(tokenizerConfigPath),
+        assets.read(tokenizerJsonPath),
+        assets.read(tokenizerConfigPath),
       ]);
       return new LocalTokenizer(
         new Tokenizer(
@@ -79,9 +79,9 @@ export class LocalTokenizer {
         maxLength,
       );
     } finally {
-      for (const path of Object.keys(pack.manifest.files)) {
+      for (const path of Object.keys(assets.manifest.files)) {
         if (path.startsWith(`${directory}/`)) {
-          pack.release(path);
+          assets.release(path);
         }
       }
     }

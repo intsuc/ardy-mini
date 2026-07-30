@@ -11,12 +11,12 @@ import {
   MIXED_PRECISION_PUBLIC_IO_DTYPE,
   REQUIRED_WEBGPU_FEATURE,
   type BrowserGraphPrecisionSummary,
-  type BrowserModelPackManifest,
+  type BrowserModelManifest,
 } from "./manifest";
 import { postprocessMotion } from "./postprocess";
 
-function precision(): BrowserModelPackManifest["precision"] {
-  const summary = <GraphName extends keyof BrowserModelPackManifest["graphs"]>(
+function precision(): BrowserModelManifest["precision"] {
+  const summary = <GraphName extends keyof BrowserModelManifest["graphs"]>(
     graphName: GraphName,
   ): BrowserGraphPrecisionSummary<GraphName> => {
     const isIdentity =
@@ -72,14 +72,14 @@ function precision(): BrowserModelPackManifest["precision"] {
   };
 }
 
-function manifest(): BrowserModelPackManifest {
+function manifest(): BrowserModelManifest {
   return {
-    format: "ardy-browser-model-pack",
-    schema_version: 2,
-    model: { id: "test", variant: "test" },
+    format: "ardy-browser-model-files",
+    schema_version: 1,
+    model: { id: "test", variant: "test", revision: "fixture-r1" },
     files: {},
     tokenizer: { directory: "tokenizer", max_length: 8 },
-    graphs: {} as BrowserModelPackManifest["graphs"],
+    graphs: {} as BrowserModelManifest["graphs"],
     precision: precision(),
     dimensions: {
       fps: 20,
@@ -127,7 +127,7 @@ function manifest(): BrowserModelPackManifest {
         std: [1, 1, 1, 1, 1],
         normalization_denominator: [1, 1, 1, 1, 1],
       },
-    } as BrowserModelPackManifest["stats"],
+    } as BrowserModelManifest["stats"],
     runtime: {
       contract_revision: 3,
       text_only: true,

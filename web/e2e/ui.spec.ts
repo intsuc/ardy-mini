@@ -1,15 +1,30 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-import { writeFile } from "node:fs/promises";
-
 import { expect, test, type Page } from "@playwright/test";
 
 import {
+  allowRequiredWebGpuFeatureForPreflight,
   openPreviewSettings,
   setSliderValue,
   waitForPreviewReady,
 } from "./control-helpers";
+import {
+  createMockModelFiles,
+  installMockModelWorker,
+  missingDevelopmentModelRoute,
+  routeMockModelFiles,
+} from "./model-files-fixture";
+
+test.beforeEach(async ({ page }) => {
+  await allowRequiredWebGpuFeatureForPreflight(page);
+  await page.route(
+    missingDevelopmentModelRoute,
+    async (route) => {
+      await route.fulfill({ status: 404, body: "Not found" });
+    },
+  );
+});
 
 interface CameraMovementProbeState {
   initialPosition: [number, number, number] | null;
@@ -165,7 +180,9 @@ test("renders the two-pane technical workspace without motion parameters", async
         .catch(() => false),
     )
     .toBe(true);
-  await expect(page.locator("#model-state")).toHaveText("Not loaded");
+  await expect(page.locator("#model-runtime-state")).toHaveText(
+    "Unavailable",
+  );
   await expect(page.locator("#generator-panel")).toBeVisible();
   await expect(page.locator("#viewport-panel")).toBeVisible();
   await expect(page.locator(".inspector-panel")).toHaveCount(0);
@@ -211,21 +228,15 @@ test("renders the two-pane technical workspace without motion parameters", async
       { exact: true },
     ),
   ).toHaveCount(0);
-  await expect(page.locator("#model-setup-help")).toContainText(
-    "ardy-minilm-core40-browser-v1.tar.gz",
-  );
   await expect(page.locator("#privacy-badge")).toHaveCount(0);
   await expect(page.locator("#gpu-badge")).toHaveCount(0);
   await expect(page.locator("#isolation-badge")).toHaveCount(0);
   await expect(page.locator("#backend")).toHaveCount(0);
-  await expect(page.locator("#import-model")).toContainText("Choose model pack");
-  await expect(page.locator("#model-file-input")).toHaveAttribute(
-    "accept",
-    ".tar.gz,application/gzip",
+  await expect(page.locator("#model-cache")).toBeVisible();
+  await expect(page.locator("#model-cache-state")).toHaveText(
+    "Needs attention",
   );
-  await expect(page.locator("#model-file-input")).not.toHaveAttribute(
-    "multiple",
-  );
+  await expect(page.locator("#download-model")).toHaveText("Retry download");
   await expect(page.getByText("20 FPS", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Core40", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Runtime notes", { exact: true })).toHaveCount(0);
@@ -339,6 +350,9 @@ test("renders the two-pane technical workspace without motion parameters", async
 test("blocks model loading with a non-dismissible dialog when WebGPU is unavailable", async ({
   page,
 }) => {
+  const modelFiles = createMockModelFiles();
+  await page.unroute(missingDevelopmentModelRoute);
+  await routeMockModelFiles(page, modelFiles);
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "gpu", {
       configurable: true,
@@ -358,20 +372,116 @@ test("blocks model loading with a non-dismissible dialog when WebGPU is unavaila
   await expect(
     page.getByText(unavailableReason, { exact: true }),
   ).toHaveCount(1);
-  await expect(page.locator("#model-title")).not.toContainText(
-    unavailableReason,
-  );
-  await expect(page.locator("#model-detail")).not.toContainText(
-    unavailableReason,
-  );
-  await expect(page.locator("#import-model")).toBeDisabled();
-  await expect(page.locator("#model-file-input")).toBeDisabled();
+  await expect(
+    page.getByRole("alertdialog", {
+      name: "Download model files?",
+    }),
+  ).toHaveCount(0);
+  await expect(page.locator("#download-model")).toHaveCount(0);
+  await expect(page.locator("#generate")).toBeDisabled();
 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeVisible();
   await page.mouse.click(2, 2);
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("button")).toHaveCount(0);
+});
+
+test("confirms model download and manages the browser cache", async ({
+  page,
+}) => {
+  const modelFiles = createMockModelFiles();
+  const modelRequests: string[] = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path.includes("/models/ardy-minilm-core40-browser-v1/")) {
+      modelRequests.push(path);
+    }
+  });
+  await page.unroute(missingDevelopmentModelRoute);
+  await routeMockModelFiles(page, modelFiles);
+  await installMockModelWorker(page, modelFiles.manifest);
+
+  await page.goto("/");
+
+  const downloadDialog = page.getByRole("alertdialog", {
+    name: "Download model files?",
+  });
+  const postpone = downloadDialog.getByRole("button", {
+    name: "Not now",
+    exact: true,
+  });
+  const confirmDownload = downloadDialog.getByRole("button", {
+    name: "Download model",
+    exact: true,
+  });
+  await expect(downloadDialog).toBeVisible();
+  await expect(postpone).toBeFocused();
+  await expect(page.locator("#model-cache-state")).toHaveText(
+    "Not cached",
+  );
+  await expect(page.locator("#model-cache-files")).toHaveText("0 of 5");
+  await expect(page.locator("#model-runtime-state")).toHaveText(
+    "Not loaded",
+  );
+  expect(
+    modelRequests.filter((path) => !path.endsWith("model.json.gz")),
+  ).toEqual([]);
+
+  await postpone.click();
+  await expect(downloadDialog).toBeHidden();
+  const downloadButton = page.locator("#download-model");
+  await expect(downloadButton).toHaveText("Download model");
+  await downloadButton.click();
+  await expect(downloadDialog).toBeVisible();
+  await expect(postpone).toBeFocused();
+
+  await confirmDownload.click();
+  await expect(downloadDialog).toBeHidden();
+  await expect(page.locator("#model-cache-state")).toHaveText(
+    /Downloading|Verifying/,
+  );
+  await expect(page.locator("#model-download-progress")).toBeVisible();
+  await expect(page.locator("#model-cache-state")).toHaveText("Cached");
+  await expect(page.locator("#model-cache-files")).toHaveText("5 of 5");
+  await expect(page.locator("#model-runtime-state")).toHaveText("Ready");
+  await expect(page.locator("#model-download-progress")).toHaveCount(0);
+  const payloadRequestCount = modelRequests.filter(
+    (path) => !path.endsWith("model.json.gz"),
+  ).length;
+  expect(payloadRequestCount).toBe(5);
+
+  await page.reload();
+  await expect(downloadDialog).toHaveCount(0);
+  await expect(page.locator("#model-cache-state")).toHaveText("Cached");
+  await expect(page.locator("#model-runtime-state")).toHaveText("Ready");
+  expect(
+    modelRequests.filter((path) => !path.endsWith("model.json.gz")),
+  ).toHaveLength(payloadRequestCount);
+
+  const clearCache = page.locator("#clear-model-cache");
+  await expect(clearCache).toBeVisible();
+  await clearCache.click();
+  const clearDialog = page.getByRole("alertdialog", {
+    name: "Clear cached model files?",
+  });
+  const cancelClear = clearDialog.getByRole("button", {
+    name: "Cancel",
+    exact: true,
+  });
+  await expect(clearDialog).toBeVisible();
+  await expect(cancelClear).toBeFocused();
+  await clearDialog
+    .getByRole("button", { name: "Clear cache", exact: true })
+    .click();
+  await expect(clearDialog).toBeHidden();
+  await expect(page.locator("#model-cache-state")).toHaveText(
+    "Not cached",
+  );
+  await expect(page.locator("#model-cache-files")).toHaveText("0 of 5");
+  await expect(page.locator("#model-runtime-state")).toHaveText("Ready");
+  await expect(downloadButton).toBeVisible();
+  await expect(clearCache).toHaveCount(0);
 });
 
 test("rejects renderer initialization instead of using a WebGL fallback", async ({
@@ -405,10 +515,19 @@ test("rejects renderer initialization instead of using a WebGL fallback", async 
       configurable: true,
       value: requestedContexts,
     });
+    let adapterRequestCount = 0;
     Object.defineProperty(navigator, "gpu", {
       configurable: true,
       value: {
-        requestAdapter: async () => null,
+        requestAdapter: async () => {
+          adapterRequestCount += 1;
+          if (adapterRequestCount > 1) return null;
+          return {
+            features: {
+              has: (feature: string) => feature === "shader-f16",
+            },
+          };
+        },
       },
     });
   });
@@ -439,7 +558,7 @@ test("retains the square Lyra treatment on standard shadcn surfaces", async ({
 
   const radii = await page.evaluate(() =>
     [
-      "#model-card",
+      "#model-cache",
       "#generate",
       "#prompt",
       '[data-slot="combobox-trigger"]',
@@ -1228,7 +1347,9 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
     page.getByRole("slider", { name: "Buffer ahead", exact: true }),
   ).toHaveCount(1);
 
-  await expect(page.locator("#model-state")).toHaveText("Not loaded");
+  await expect(page.locator("#model-runtime-state")).toHaveText(
+    "Unavailable",
+  );
   const canvas = page.locator("#motion-canvas");
   await expect(canvas).toHaveAttribute("aria-keyshortcuts", /W A S D/);
   await canvas.focus();
@@ -1449,31 +1570,6 @@ test("clears held camera movement when the window loses focus", async ({
   await page.keyboard.up("d");
 });
 
-test("keeps invalid model-pack errors beside the model setup action", async ({
-  page,
-}, testInfo) => {
-  await page.goto("/");
-  await waitForPreviewReady(page);
-
-  const invalidPack = testInfo.outputPath("invalid-pack.tar.gz");
-  await writeFile(invalidPack, "not a gzip archive");
-  await page.locator("#model-file-input").setInputFiles(invalidPack);
-
-  const modelError = page.locator("#model-error-banner");
-  await expect(modelError).toBeVisible();
-  await expect(modelError).toBeFocused();
-  await expect(modelError).toContainText(/decompress|gzip|shader-f16/i);
-  await expect
-    .poll(() =>
-      page.evaluate(() => {
-        const setup = document.querySelector(".model-setup");
-        const error = document.querySelector("#model-error-banner");
-        return Boolean(setup && error && setup.contains(error));
-      }),
-    )
-    .toBe(true);
-});
-
 test("reports internal failures to the console without rendering an error panel", async ({
   page,
 }) => {
@@ -1556,27 +1652,25 @@ test("reports internal failures to the console without rendering an error panel"
   expect(pageErrors).toEqual([]);
 });
 
-test("keeps saved model actions inside the input panel at minimum width", async ({
+test("keeps model cache actions inside the input panel at minimum width", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 320, height: 800 });
   await page.goto("/");
-  await page.locator("#remove-model").evaluate((element) => {
-    (element as HTMLButtonElement).hidden = false;
-  });
+  await openMotionControls(page);
 
-  const [panel, importButton, removeButton] = await Promise.all(
-    ["#generator-panel", "#import-model", "#remove-model"].map((selector) =>
+  const [panel, modelCard, downloadButton] = await Promise.all(
+    ["#generator-panel", "#model-cache", "#download-model"].map((selector) =>
       page.locator(selector).boundingBox(),
     ),
   );
   expect(panel).not.toBeNull();
-  expect(importButton).not.toBeNull();
-  expect(removeButton).not.toBeNull();
-  expect(importButton!.x + importButton!.width).toBeLessThanOrEqual(
+  expect(modelCard).not.toBeNull();
+  expect(downloadButton).not.toBeNull();
+  expect(modelCard!.x + modelCard!.width).toBeLessThanOrEqual(
     panel!.x + panel!.width,
   );
-  expect(removeButton!.x + removeButton!.width).toBeLessThanOrEqual(
+  expect(downloadButton!.x + downloadButton!.width).toBeLessThanOrEqual(
     panel!.x + panel!.width,
   );
   expect(
@@ -1797,27 +1891,27 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
     targetBufferTrackBox!.x + targetBufferTrackBox!.width + 1,
   );
 
-  const importModel = page.locator("#import-model");
-  const importModelBox = await importModel.boundingBox();
-  expect(importModelBox).not.toBeNull();
+  const downloadModel = page.locator("#download-model");
+  const downloadModelBox = await downloadModel.boundingBox();
+  expect(downloadModelBox).not.toBeNull();
   await page.mouse.move(
-    importModelBox!.x + importModelBox!.width / 2,
-    importModelBox!.y + importModelBox!.height / 2,
+    downloadModelBox!.x + downloadModelBox!.width / 2,
+    downloadModelBox!.y + downloadModelBox!.height / 2,
   );
   await page.mouse.down();
   await expect
     .poll(() =>
-      importModel.evaluate((element) => getComputedStyle(element).translate),
+      downloadModel.evaluate(
+        (element) => getComputedStyle(element).translate,
+      ),
     )
     .toBe("none");
+  await page.mouse.move(0, 0);
   await page.mouse.up();
 
-  await page.locator("#remove-model").evaluate((element) => {
-    (element as HTMLButtonElement).hidden = false;
-  });
   const modelActionBounds = await Promise.all(
-    ["#import-model", "#remove-model", "#generator-panel"].map((selector) =>
-      page.locator(selector).boundingBox(),
+    ["#download-model", "#model-cache", "#generator-panel"].map(
+      (selector) => page.locator(selector).boundingBox(),
     ),
   );
   expect(modelActionBounds.every(Boolean)).toBe(true);
@@ -1953,7 +2047,7 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
 
   await openMotionControls(page);
   const drawerControls = [
-    page.locator("#import-model"),
+    page.locator("#download-model"),
     page.locator("#randomize-seed"),
     page.locator("#target-buffer"),
     page.locator("#restart-generation"),
@@ -2031,49 +2125,4 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
   await expect(orientations).toHaveAttribute("aria-checked", "false");
   await page.keyboard.press("Escape");
   await expect(page.locator("#preview-settings")).toBeHidden();
-});
-
-test("returns focus to model selection after saved pack removal", async ({
-  page,
-}) => {
-  await page.goto("/");
-  await expect(page.locator("#model-state")).toHaveText("Not loaded");
-
-  const removeModel = page.locator("#remove-model");
-  await removeModel.evaluate((element) => {
-    (element as HTMLButtonElement).hidden = false;
-  });
-  await removeModel.click();
-  const dialog = page.getByRole("alertdialog", {
-    name: "Remove the saved model pack?",
-  });
-  const cancel = page.getByRole("button", { name: "Cancel", exact: true });
-  const confirm = page.locator("#confirm-remove-model");
-
-  await expect(dialog).toBeVisible();
-  await expect(cancel).toBeFocused();
-  await page.keyboard.press("Shift+Tab");
-  await expect(confirm).toBeFocused();
-  await page.keyboard.press("Tab");
-  await expect(cancel).toBeFocused();
-
-  await page.keyboard.press("Escape");
-  await expect(dialog).toBeHidden();
-  await expect(removeModel).toBeFocused();
-
-  await removeModel.click();
-  await expect(cancel).toBeFocused();
-  await cancel.click();
-  await expect(dialog).toBeHidden();
-  await expect(removeModel).toBeFocused();
-
-  await removeModel.click();
-  await expect(cancel).toBeFocused();
-  await page.mouse.click(2, 2);
-  await expect(dialog).toBeVisible();
-
-  await confirm.click();
-  await expect(dialog).toBeHidden();
-  await expect(page.locator("#import-model")).toBeFocused();
-  await expect(removeModel).toBeHidden();
 });

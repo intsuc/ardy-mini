@@ -3,7 +3,14 @@
 
 import { expect, test } from "@playwright/test";
 
-import { waitForPreviewReady } from "./control-helpers";
+import {
+  allowRequiredWebGpuFeatureForPreflight,
+  waitForPreviewReady,
+} from "./control-helpers";
+
+test.beforeEach(async ({ page }) => {
+  await allowRequiredWebGpuFeatureForPreflight(page);
+});
 
 test("aligns each major line with a minor line in the GPU shader", async ({
   page,

@@ -42,12 +42,14 @@ export interface MotionSessionProvenance {
   prompt?: string;
   seed?: number;
   modelId?: string;
+  modelRevision?: string;
   modelVariant?: string;
   createdAt?: string;
 }
 
 export interface MotionModelIdentity {
   id: string;
+  revision: string;
   variant: string;
 }
 
@@ -179,6 +181,11 @@ function normalizeProvenance(value: unknown): MotionSessionProvenance | undefine
     prompt: boundedString(value.prompt, "Session prompt", 16_384),
     seed,
     modelId: boundedString(value.modelId ?? value.model_id, "Session model id", 512),
+    modelRevision: boundedString(
+      value.modelRevision ?? value.model_revision,
+      "Session model revision",
+      512,
+    ),
     modelVariant: boundedString(
       value.modelVariant ?? value.model_variant,
       "Session model variant",
@@ -809,6 +816,8 @@ export function isContinuationModelCompatible(
   return (
     (provenance?.modelId === undefined ||
       provenance.modelId === model.id) &&
+    (provenance?.modelRevision === undefined ||
+      provenance.modelRevision === model.revision) &&
     (provenance?.modelVariant === undefined ||
       provenance.modelVariant === model.variant)
   );

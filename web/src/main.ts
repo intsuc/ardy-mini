@@ -6,11 +6,19 @@ import {
   type RuntimeGenerationChunk,
   type RuntimeGenerationResult,
 } from "./runtime/engine";
-import { type BrowserModelPackManifest } from "./runtime/manifest";
+import { type BrowserModelManifest } from "./runtime/manifest";
+import {
+  clearModelCache,
+  fetchModelManifest,
+  inspectModelCache,
+  modelTransportSize,
+  type ModelCacheStatus,
+  type ModelManifestSource,
+} from "./runtime/model-assets";
 import {
   type GenerationCompleteEvent,
   type GenerationMode,
-  type LoadModelPackCommand,
+  type LoadModelCommand,
   type ModelLoadedEvent,
   type ProgressEvent,
   type WorkerCommand,
@@ -37,12 +45,13 @@ import {
 } from "./viewer";
 import { PROMPT_EXAMPLE_EVENT } from "./prompt-examples";
 import {
+  clearModelCacheAction,
   generationProgressControl,
-  modelProgressControl,
+  modelDownloadAction,
+  modelUiControl,
   playbackSpeedControl,
   playPauseControl,
   previewSettingsControl,
-  removeSavedModelAction,
   showContactsControl,
   showOrientationsControl,
   showSkeletonControl,
@@ -54,8 +63,8 @@ import {
 } from "./ui-control-store";
 
 const UINT32_MAX = 0xffff_ffff;
-const CACHE_ROOT = "ardy-mini-model-cache";
-const CACHE_ARCHIVE = "active-pack.tar.gz";
+const DEVELOPMENT_MODEL_BASE_URL =
+  "/models/ardy-minilm-core40-browser-v1/";
 const DEFAULT_TEXT_CFG_WEIGHT = 3.5;
 const DEFAULT_HISTORY_FRAMES = 40;
 const DEFAULT_REPLAN_BUFFER_FRAMES = 20;
@@ -74,13 +83,29 @@ interface FormValidation {
 
 type WebGpuState = "checking" | "ready" | "unavailable";
 
-function webGpuUnavailableReason(): string | null {
+interface WebGpuApi {
+  requestAdapter(): Promise<GPUAdapter | null>;
+}
+
+async function webGpuUnavailableReason(): Promise<string | null> {
   if (globalThis.isSecureContext === false) {
     return "Open this demo over HTTPS or localhost, then reload the page.";
   }
-  const gpu = (navigator as Navigator & { gpu?: unknown }).gpu;
+  const gpu = (navigator as Navigator & { gpu?: WebGpuApi }).gpu;
   if (!gpu) {
     return "Use a browser and device that support WebGPU, then reload the page.";
+  }
+  let adapter: GPUAdapter | null;
+  try {
+    adapter = await gpu.requestAdapter();
+  } catch {
+    return "The browser could not initialize a WebGPU adapter. Check GPU acceleration, then reload the page.";
+  }
+  if (!adapter) {
+    return "No compatible WebGPU adapter is available on this device.";
+  }
+  if (!adapter.features.has("shader-f16")) {
+    return "This model requires native WebGPU FP16 shader support, which is unavailable on this device.";
   }
   return null;
 }
@@ -196,8 +221,17 @@ export function formatBytes(bytes: number): string {
   return `${value >= 10 || exponent === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[exponent]}`;
 }
 
-export function isModelPackArchive(file: File): boolean {
-  return file.size > 0 && file.name.toLowerCase().endsWith(".tar.gz");
+function configuredModelBaseUrl(): string | null {
+  if (import.meta.env.DEV) {
+    return new URL(DEVELOPMENT_MODEL_BASE_URL, globalThis.location.href).href;
+  }
+  const configured = import.meta.env.VITE_MODEL_BASE_URL?.trim();
+  return configured
+    ? new URL(
+        configured.endsWith("/") ? configured : `${configured}/`,
+        globalThis.location.href,
+      ).href
+    : null;
 }
 
 export function isVrmFile(file: File): boolean {
@@ -297,8 +331,8 @@ function requestId(prefix: string): string {
 
 function humanizeStage(stage: string): string {
   const labels: Record<string, string> = {
-    "reading-pack": "Reading model pack",
-    "hashing-pack": "Verifying model files",
+    "downloading-model": "Downloading model files",
+    "verifying-model": "Verifying model files",
     "loading-tokenizer": "Loading tokenizer",
     "loading-sessions": "Preparing inference sessions",
     "encoding-text": "Encoding motion prompt",
@@ -320,126 +354,6 @@ function generationProgress(event: ProgressEvent): number {
   if (stage === "denoising") return 0.1 + local * 0.78;
   if (stage === "decoding") return 0.88 + local * 0.12;
   return local;
-}
-
-function modelLoadProgress(event: ProgressEvent): number {
-  const local = progressFraction(event);
-  const ranges: Partial<
-    Record<ProgressEvent["stage"], readonly [number, number]>
-  > = {
-    "reading-pack": [0, 0.18],
-    "hashing-pack": [0.18, 0.38],
-    "loading-tokenizer": [0.38, 0.48],
-    "loading-sessions": [0.48, 1],
-  };
-  const range = ranges[event.stage];
-  return range ? range[0] + local * (range[1] - range[0]) : local;
-}
-
-function supportsPersistentPackCache(): boolean {
-  return Boolean(navigator.storage && "getDirectory" in navigator.storage);
-}
-
-async function getCacheRoot(
-  create: boolean,
-): Promise<FileSystemDirectoryHandle | null> {
-  if (!supportsPersistentPackCache()) return null;
-  const opfs = await navigator.storage.getDirectory();
-  try {
-    return await opfs.getDirectoryHandle(CACHE_ROOT, { create });
-  } catch (error) {
-    if (
-      !create &&
-      error instanceof DOMException &&
-      error.name === "NotFoundError"
-    ) {
-      return null;
-    }
-    throw error;
-  }
-}
-
-async function cacheModelPack(
-  archive: File,
-  onProgress: (completedBytes: number, totalBytes: number) => void,
-): Promise<void> {
-  const root = await getCacheRoot(true);
-  if (!root) throw new Error("Persistent browser storage is unavailable.");
-
-  const totalBytes = archive.size;
-  const estimate = await navigator.storage.estimate();
-  const available = (estimate.quota ?? 0) - (estimate.usage ?? 0);
-  if (estimate.quota !== undefined && available < totalBytes * 1.05) {
-    throw new Error(
-      `The model pack needs ${formatBytes(totalBytes)}, but only about ${formatBytes(Math.max(0, available))} is available.`,
-    );
-  }
-
-  await navigator.storage.persist?.();
-  const handle = await root.getFileHandle(CACHE_ARCHIVE, {
-    create: true,
-  });
-  const writable = await handle.createWritable();
-  const reader = archive.stream().getReader();
-  let completedBytes = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      await writable.write(value);
-      completedBytes += value.byteLength;
-      onProgress(completedBytes, totalBytes);
-    }
-    await writable.close();
-  } catch (error) {
-    await reader.cancel(error).catch(() => {});
-    await writable.abort(error).catch(() => {});
-    throw error;
-  }
-}
-
-async function readCachedModelPack(): Promise<File | null> {
-  const root = await getCacheRoot(false);
-  if (!root) return null;
-  try {
-    const stored = await (
-      await root.getFileHandle(CACHE_ARCHIVE)
-    ).getFile();
-    if (stored.size === 0) {
-      await removeCachedModelPack();
-      return null;
-    }
-    return new File([stored], CACHE_ARCHIVE, {
-      type: "application/gzip",
-      lastModified: stored.lastModified,
-    });
-  } catch (error) {
-    if (
-      error instanceof DOMException &&
-      (error.name === "NotFoundError" || error.name === "TypeMismatchError")
-    ) {
-      // The former directory-pack cache used this same root. It is not a
-      // supported input and would otherwise consume quota beside the new
-      // archive-only cache.
-      await removeCachedModelPack();
-      return null;
-    }
-    throw error;
-  }
-}
-
-async function removeCachedModelPack(): Promise<void> {
-  const opfs = supportsPersistentPackCache()
-    ? await navigator.storage.getDirectory()
-    : null;
-  if (!opfs) return;
-  try {
-    await opfs.removeEntry(CACHE_ROOT, { recursive: true });
-  } catch (error) {
-    if (!(error instanceof DOMException && error.name === "NotFoundError")) {
-      throw error;
-    }
-  }
 }
 
 function sameSkeleton(
@@ -631,7 +545,7 @@ function mergeMotion(
 
 function motionFromRuntime(
   payload: RuntimeGenerationChunk | RuntimeGenerationResult,
-  manifest: BrowserModelPackManifest | null,
+  manifest: BrowserModelManifest | null,
 ): StructuredMotionResult {
   return normalizeStructuredMotion(
     {
@@ -691,6 +605,7 @@ export function bootstrap(): () => void {
   const lifecycle = new AbortController();
   let disposed = false;
   unsupportedDeviceControl.setState({ open: false });
+  modelUiControl.dispatch({ type: "reset" });
 
   const form = requiredElement<HTMLFormElement>("generation-form");
   const prompt = requiredElement<HTMLTextAreaElement>("prompt");
@@ -699,22 +614,6 @@ export function bootstrap(): () => void {
   const seed = requiredElement<HTMLInputElement>("seed");
   const seedError = requiredElement<HTMLElement>("seed-error");
   const randomizeSeed = requiredElement<HTMLButtonElement>("randomize-seed");
-  const importModel = requiredElement<HTMLButtonElement>("import-model");
-  const importModelLabel = requiredElement<HTMLElement>("import-model-label");
-  const removeModel = requiredElement<HTMLButtonElement>("remove-model");
-  const fileInput = requiredElement<HTMLInputElement>("model-file-input");
-  const modelCard = requiredElement<HTMLElement>("model-card");
-  const modelTitle = requiredElement<HTMLElement>("model-title");
-  const modelDetail = requiredElement<HTMLElement>("model-detail");
-  const modelSetupHelp = requiredElement<HTMLElement>("model-setup-help");
-  const modelState = requiredElement<HTMLElement>("model-state");
-  const modelProgress = requiredElement<HTMLElement>("model-progress");
-  const modelProgressLabel = requiredElement<HTMLElement>("model-progress-label");
-  const modelErrorBanner = requiredElement<HTMLElement>("model-error-banner");
-  const modelErrorTitle = requiredElement<HTMLElement>("model-error-title");
-  const modelErrorMessage = requiredElement<HTMLElement>("model-error-message");
-  const dismissModelError =
-    requiredElement<HTMLButtonElement>("dismiss-model-error");
   const generate = requiredElement<HTMLButtonElement>("generate");
   const generateSpinner =
     requiredElement<SVGSVGElement>("generate-spinner");
@@ -758,7 +657,6 @@ export function bootstrap(): () => void {
 
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
-  let modelErrorReturnFocus: HTMLElement | null = null;
   let vrmErrorReturnFocus: HTMLElement | null = null;
   let viewer: SkeletonViewer | null = null;
   let viewerInitialization: Promise<SkeletonViewer> | null = null;
@@ -784,20 +682,16 @@ export function bootstrap(): () => void {
   let workerReady = false;
   let modelReady = false;
   let modelLoading = false;
-  let modelCaching = false;
   let activeLoadRequest: string | null = null;
   let activeGeneration: ActiveGeneration | null = null;
   let activeRestoreRequest: string | null = null;
   let announceContinuationRestore = true;
-  let lastPackArchive: File | null = null;
-  let packPendingCache = false;
-  let cachedPack = false;
-  let modelLabel = "";
   let modelInfo: ModelLoadedEvent["model"] | null = null;
   let webGpuState: WebGpuState = "checking";
-  let activeManifest: BrowserModelPackManifest | null = null;
+  let modelSource: ModelManifestSource | null = null;
+  let activeManifest: BrowserModelManifest | null = null;
+  let modelProgressFiles = new Set<string>();
   let generationProgressValue = 0;
-  let modelProgressValue = 0;
   let generationReturnFocus: HTMLElement | null = null;
   let currentMotion: StructuredMotionResult | null = null;
   let currentContinuation: RuntimeContinuationState | null = null;
@@ -822,7 +716,7 @@ export function bootstrap(): () => void {
   }
 
   function setProgress(
-    control: typeof modelProgressControl,
+    control: typeof generationProgressControl,
     fraction: number,
   ): number {
     const safeFraction = Math.max(0, Math.min(1, fraction));
@@ -860,47 +754,8 @@ export function bootstrap(): () => void {
       : fallback;
   }
 
-  function setModelStatus(
-    state: "missing" | "loading" | "ready" | "unavailable",
-    title: string,
-    detail: string,
-    label: string,
-  ): void {
-    modelCard.dataset.state = state;
-    modelState.dataset.state = state;
-    modelTitle.textContent = title;
-    modelDetail.textContent = detail;
-    modelState.textContent = label;
-    modelSetupHelp.hidden = state === "ready" || state === "unavailable";
-    importModelLabel.textContent =
-      state === "ready" ? "Replace model pack" : "Choose model pack";
-    form.dataset.modelState = state;
-  }
-
   function reportInternalError(title: string, error: unknown): void {
     console.error(`[ARDY] ${title}`, error);
-  }
-
-  function showModelError(
-    title: string,
-    message: string,
-    focus = true,
-  ): void {
-    modelErrorReturnFocus =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
-    modelErrorTitle.textContent = title;
-    modelErrorMessage.textContent = message;
-    modelErrorBanner.hidden = false;
-    if (focus) modelErrorBanner.focus();
-    announce(`${title}: ${message}`);
-  }
-
-  function clearModelError(restoreFocus = false): void {
-    modelErrorBanner.hidden = true;
-    if (restoreFocus) modelErrorReturnFocus?.focus();
-    modelErrorReturnFocus = null;
   }
 
   function vrmDetailText(info: VrmModelInfo): string {
@@ -1056,7 +911,7 @@ export function bootstrap(): () => void {
         prompt.value,
         workerReady,
         modelReady,
-        modelLoading || modelCaching,
+        modelLoading,
         generationBusy,
       ) || !promptAction.canSubmit;
     generate.dataset.dirty = String(promptAction.dirty);
@@ -1071,14 +926,10 @@ export function bootstrap(): () => void {
         prompt.value,
         workerReady,
         modelReady,
-        modelLoading || modelCaching,
+        modelLoading,
         generationBusy,
       );
     restartFromNow.disabled = !continuationAvailable;
-    importModel.disabled =
-      webGpuState !== "ready" || modelLoading || modelCaching;
-    fileInput.disabled = importModel.disabled;
-    removeModel.disabled = modelLoading || modelCaching;
 
     if (generationBusy) {
       generateHelp.textContent = activeRestoreRequest
@@ -1087,11 +938,11 @@ export function bootstrap(): () => void {
     } else if (webGpuState === "checking") {
       generateHelp.textContent = "Checking WebGPU support.";
     } else if (webGpuState === "unavailable") {
-      generateHelp.textContent = "Load a model pack to enable generation.";
-    } else if (modelLoading || modelCaching) {
-      generateHelp.textContent = "Preparing the local model pack.";
+      generateHelp.textContent = "This device cannot run the model.";
+    } else if (modelLoading) {
+      generateHelp.textContent = "Preparing the model.";
     } else if (!modelReady) {
-      generateHelp.textContent = "Load a model pack to enable generation.";
+      generateHelp.textContent = "Download the model to enable generation.";
     } else if (prompt.value.trim().length === 0) {
       generateHelp.textContent = "Describe a motion to enable generation.";
     } else if (currentMotion !== null && currentContinuation === null) {
@@ -1116,9 +967,9 @@ export function bootstrap(): () => void {
         ? "Ready to generate"
         : webGpuState === "checking"
           ? "Checking WebGPU"
-          : modelLoading || modelCaching
+          : modelLoading
             ? "Preparing model"
-            : "Load a model to start";
+            : "Download the model to start";
       generationPercent.textContent = "—";
     }
   }
@@ -1245,107 +1096,55 @@ export function bootstrap(): () => void {
     return true;
   }
 
-  async function loadModelPack(
-    archive: File,
-    shouldCache: boolean,
-  ): Promise<void> {
-    clearModelError();
+  function loadModel(): void {
     if (webGpuState !== "ready") {
       throw new Error(
         "WebGPU is required. Use a supported browser and device over HTTPS or localhost.",
       );
     }
-    if (!isModelPackArchive(archive)) {
-      throw new Error("Choose a non-empty .tar.gz model-pack file.");
+    if (!modelSource) {
+      throw new Error("The model source is unavailable.");
     }
-    const totalBytes = archive.size;
     activeLoadRequest = requestId("load");
-    lastPackArchive = archive;
-    packPendingCache = shouldCache;
     modelLoading = true;
     modelReady = false;
-    modelCard.setAttribute("aria-busy", "true");
-    modelProgress.hidden = false;
-    modelProgressValue = 0;
-    setProgress(modelProgressControl, 0);
-    modelProgressLabel.textContent = "0%";
-    setModelStatus(
-      "loading",
-      "Loading Core40 model",
-      `${archive.name} · ${formatBytes(totalBytes)}`,
-      "Loading",
-    );
+    modelProgressFiles = new Set();
+    modelUiControl.dispatch({ type: "runtime-loading" });
     updateGenerateAvailability();
     announce(
-      `Loading model pack, ${formatBytes(totalBytes)}. The archive stays on this device.`,
+      `Preparing ${formatBytes(modelTransportSize(modelSource.manifest))} of model files.`,
     );
-    const command: LoadModelPackCommand = {
-      type: "loadModelPack",
+    const command: LoadModelCommand = {
+      type: "loadModel",
       requestId: activeLoadRequest,
-      archive,
+      baseUrl: modelSource.baseUrl,
     };
     postCommand(command);
   }
 
-  async function persistLoadedPack(archive: File): Promise<void> {
-    if (!supportsPersistentPackCache()) {
-      modelDetail.textContent = modelInfo?.id ?? modelLabel;
-      return;
-    }
-    modelCaching = true;
-    modelCard.setAttribute("aria-busy", "true");
-    modelState.dataset.state = "loading";
-    modelState.textContent = "Saving";
-    modelProgress.hidden = false;
-    modelProgressValue = 0;
-    setProgress(modelProgressControl, 0);
-    modelProgressLabel.textContent = "Caching";
-    updateGenerateAvailability();
-    try {
-      await cacheModelPack(archive, (completed, total) => {
-        const percent =
-          total > 0 ? Math.round((completed / total) * 100) : 0;
-        modelProgressValue = Math.max(modelProgressValue, percent / 100);
-        setProgress(modelProgressControl, modelProgressValue);
-        modelProgressLabel.textContent = `Saving ${percent}%`;
-      });
-      cachedPack = true;
-      removeModel.hidden = false;
-      modelDetail.textContent = modelInfo?.id ?? modelLabel;
-    } catch (error) {
-      cachedPack = false;
-      removeModel.hidden = true;
-      modelDetail.textContent = modelInfo?.id ?? modelLabel;
-      showModelError(
-        "Model loaded, but not cached",
-        error instanceof Error
-          ? error.message
-          : "The browser could not persist this model pack.",
-        false,
-      );
-    } finally {
-      modelCaching = false;
-      modelCard.removeAttribute("aria-busy");
-      modelState.dataset.state = "ready";
-      modelState.textContent = "Ready";
-      modelProgress.hidden = true;
-      updateGenerateAvailability();
-    }
-  }
-
   function handleProgress(event: ProgressEvent): void {
     if (event.requestId === activeLoadRequest) {
-      modelProgressValue = Math.max(
-        modelProgressValue,
-        modelLoadProgress(event),
-      );
-      const percent = setProgress(
-        modelProgressControl,
-        modelProgressValue,
-      );
-      modelProgress.hidden = false;
-      modelProgressLabel.textContent = `${percent}%`;
-      modelTitle.textContent = event.message || humanizeStage(event.stage);
+      if (event.stage === "downloading-model") {
+        if (event.message) modelProgressFiles.add(event.message);
+        const snapshot = modelUiControl.getSnapshot();
+        modelUiControl.dispatch({
+          type: "download-progress",
+          cachedFiles: Math.min(
+            snapshot.totalFiles,
+            modelProgressFiles.size,
+          ),
+          totalFiles: snapshot.totalFiles,
+          cachedBytes: event.completed,
+          totalBytes: event.total,
+        });
+      } else if (event.stage === "verifying-model") {
+        modelUiControl.dispatch({ type: "verification-started" });
+      } else if (
+        event.stage === "loading-tokenizer" ||
+        event.stage === "loading-sessions"
+      ) {
+        modelUiControl.dispatch({ type: "runtime-loading" });
+      }
       return;
     }
     if (event.requestId === activeGeneration?.id) {
@@ -1395,36 +1194,48 @@ export function bootstrap(): () => void {
     activeLoadRequest = null;
     activeManifest = event.model.manifest;
     modelInfo = event.model;
-    modelLabel = event.model.variant || event.model.id;
-    modelCard.removeAttribute("aria-busy");
-    modelProgress.hidden = true;
-    setModelStatus(
-      "ready",
-      event.model.variant || "ARDY Mini Core40",
-      event.model.id,
-      "Ready",
-    );
+    modelUiControl.dispatch({ type: "runtime-ready" });
+    if (modelSource) {
+      void inspectModelCache(modelSource)
+        .then((cache) => {
+          if (disposed) return;
+          modelUiControl.dispatch(
+            cache.complete
+              ? {
+                  type: "cache-ready",
+                  totalFiles: cache.fileCount,
+                  totalBytes: cache.transportSizeBytes,
+                }
+              : {
+                  type: "cache-missing",
+                  cachedFiles: cache.cachedFileCount,
+                  totalFiles: cache.fileCount,
+                  cachedBytes: cache.cachedTransportSizeBytes,
+                  totalBytes: cache.transportSizeBytes,
+                  showDownloadPrompt: false,
+                },
+          );
+        })
+        .catch((error) =>
+          reportInternalError("Could not refresh model cache status", error),
+        );
+    }
     const incompatibleContinuation =
       currentContinuation !== null &&
       !isContinuationModelCompatible(currentProvenance, event.model);
     if (incompatibleContinuation) {
       markCurrentMotionPlaybackOnly();
     }
-    removeModel.hidden = !cachedPack && !packPendingCache;
     updateGenerateAvailability();
     announce(
       incompatibleContinuation
-        ? `${event.model.variant || "ARDY Mini Core40"} is ready on WebGPU. The displayed motion remains playback-only because its continuation belongs to a different model pack.`
+        ? `${event.model.variant || "ARDY Mini Core40"} is ready on WebGPU. The displayed motion remains playback-only because its continuation belongs to a different model revision.`
         : `${event.model.variant || "ARDY Mini Core40"} is ready on WebGPU.`,
     );
     if (currentContinuation) {
       restoreWorkerContinuation();
     } else {
       resetWorkerSession();
-    }
-    if (packPendingCache && lastPackArchive) {
-      packPendingCache = false;
-      void persistLoadedPack(lastPackArchive);
     }
   }
 
@@ -1468,6 +1279,7 @@ export function bootstrap(): () => void {
       prompt: chunk.prompt,
       seed: chunk.seed,
       modelId: modelInfo?.id,
+      modelRevision: modelInfo?.revision,
       modelVariant: modelInfo?.variant,
       createdAt: new Date().toISOString(),
     };
@@ -1803,11 +1615,13 @@ export function bootstrap(): () => void {
         case "status":
           if (event.status.state === "empty" && !modelLoading) {
             modelReady = false;
+            modelUiControl.dispatch({ type: "runtime-idle" });
           } else if (
             event.status.state === "ready" ||
             event.status.state === "generating"
           ) {
             modelReady = true;
+            modelUiControl.dispatch({ type: "runtime-ready" });
           }
           updateGenerateAvailability();
           break;
@@ -1819,14 +1633,11 @@ export function bootstrap(): () => void {
             activeLoadRequest = null;
             modelLoading = false;
             modelReady = false;
-            modelProgress.hidden = true;
-            modelCard.removeAttribute("aria-busy");
-            setModelStatus(
-              "missing",
-              "Model pack could not be loaded",
-              "Check the pack and try importing it again.",
-              "Error",
-            );
+            modelUiControl.dispatch({ type: "runtime-error" });
+            modelUiControl.dispatch({
+              type: "cache-error",
+              operation: "download",
+            });
           }
           if (wasGenerating) {
             activeGeneration = null;
@@ -1839,11 +1650,12 @@ export function bootstrap(): () => void {
             markCurrentMotionPlaybackOnly();
             resetWorkerSession();
             announce(
-              "The saved continuation is incompatible with this model pack. The motion remains available for playback only.",
+              "The saved continuation is incompatible with this model revision. The motion remains available for playback only.",
             );
           }
           if (wasLoading) {
-            showModelError("Model import failed", event.error.message);
+            reportInternalError("Model loading failed", event.error);
+            announce("The model could not be prepared. Retry the download.");
           } else if (wasRestoring) {
             reportInternalError(
               "Continuation unavailable",
@@ -1857,6 +1669,7 @@ export function bootstrap(): () => void {
         }
         case "disposed":
           modelReady = false;
+          modelUiControl.dispatch({ type: "runtime-idle" });
           updateGenerateAvailability();
           break;
         default:
@@ -1873,17 +1686,12 @@ export function bootstrap(): () => void {
       modelReady = false;
       activeGeneration = null;
       setGenerationBusy(false);
-      modelCard.removeAttribute("aria-busy");
-      setModelStatus(
-        "missing",
-        "Inference worker unavailable",
-        "Reload the page to try again.",
-        "Error",
-      );
-      showModelError(
+      modelUiControl.dispatch({ type: "runtime-error" });
+      reportInternalError(
         "Inference worker stopped",
         event.message || "An unexpected worker error occurred.",
       );
+      announce("The inference worker stopped. Reload the page to try again.");
     },
     { signal: lifecycle.signal },
   );
@@ -1937,45 +1745,60 @@ export function bootstrap(): () => void {
     updateSeed();
   });
 
-  importModel.addEventListener("click", () => {
-    fileInput.click();
-  });
-
-  fileInput.addEventListener("change", () => {
-    const selected = fileInput.files?.item(0) ?? null;
-    fileInput.value = "";
-    if (!selected) return;
-    void loadModelPack(selected, true).catch((error) =>
-      showModelError(
-        "Could not open model pack",
-        error instanceof Error ? error.message : String(error),
-      ),
-    );
-  });
-
-  removeSavedModelAction.onTrigger(async () => {
+  modelDownloadAction.onTrigger(async () => {
     try {
-      await removeCachedModelPack();
-      cachedPack = false;
-      lastPackArchive = null;
-      activeManifest = null;
-      currentContinuation = null;
-      modelReady = false;
-      removeModel.hidden = true;
-      postCommand({ type: "dispose", requestId: requestId("dispose") });
-      setModelStatus(
-        "missing",
-        "Model pack required",
-        "Choose the exported Core40 .tar.gz model pack.",
-        "Not loaded",
-      );
-      updateGenerateAvailability();
-      announce("The model and its saved browser copy were removed.");
+      if (!modelSource) {
+        modelUiControl.dispatch({ type: "cache-check-started" });
+        const cache = await discoverModelSource(false);
+        if (cache.complete) {
+          loadModel();
+          return;
+        }
+        modelUiControl.dispatch({ type: "download-started" });
+      }
+      if (!modelSource) throw new Error("The model source is unavailable.");
+      const totalBytes = modelTransportSize(modelSource.manifest);
+      const estimate = await navigator.storage?.estimate?.();
+      const available =
+        estimate?.quota === undefined
+          ? undefined
+          : estimate.quota - (estimate.usage ?? 0);
+      if (available !== undefined && available < totalBytes * 1.05) {
+        throw new Error(
+          `The model needs ${formatBytes(totalBytes)}, but only about ${formatBytes(Math.max(0, available))} is available.`,
+        );
+      }
+      await navigator.storage?.persist?.();
+      loadModel();
     } catch (error) {
-      showModelError(
-        "Could not remove cached pack",
-        error instanceof Error ? error.message : String(error),
+      modelUiControl.dispatch({
+        type: "cache-error",
+        operation: "download",
+      });
+      modelUiControl.dispatch({ type: "runtime-error" });
+      reportInternalError("Could not download model files", error);
+      announce("The model download could not start. Try again.");
+      updateGenerateAvailability();
+    }
+  }, lifecycle.signal);
+
+  clearModelCacheAction.onTrigger(async () => {
+    try {
+      await clearModelCache();
+      modelUiControl.dispatch({ type: "cache-cleared" });
+      updateGenerateAvailability();
+      announce(
+        modelReady
+          ? "Cached model files removed. The loaded model remains available in this tab."
+          : "Cached model files removed.",
       );
+    } catch (error) {
+      modelUiControl.dispatch({
+        type: "cache-error",
+        operation: "clear",
+      });
+      reportInternalError("Could not clear model cache", error);
+      announce("The model cache could not be cleared. Try again.");
     }
   }, lifecycle.signal);
 
@@ -2102,7 +1925,6 @@ export function bootstrap(): () => void {
     announce(checked ? "VRM avatar shown." : "VRM avatar hidden.");
   }, lifecycle.signal);
 
-  dismissModelError.addEventListener("click", () => clearModelError(true));
   dismissVrmError.addEventListener("click", () => clearVrmError(true));
   playPause.addEventListener("click", () => {
     setPlaybackIntent(!playbackIntent);
@@ -2239,12 +2061,12 @@ export function bootstrap(): () => void {
     signal: lifecycle.signal,
   });
 
-  async function initializeModelPack(): Promise<void> {
-    const unavailableReason = webGpuUnavailableReason();
+  async function initializeModel(): Promise<void> {
+    const unavailableReason = await webGpuUnavailableReason();
     if (disposed) return;
     if (unavailableReason) {
       webGpuState = "unavailable";
-      modelCard.removeAttribute("aria-busy");
+      modelUiControl.dispatch({ type: "runtime-error" });
       updateGenerateAvailability();
       unsupportedDeviceControl.commit({
         open: true,
@@ -2260,7 +2082,7 @@ export function bootstrap(): () => void {
       if (disposed) return;
       const message = error instanceof Error ? error.message : String(error);
       webGpuState = "unavailable";
-      modelCard.removeAttribute("aria-busy");
+      modelUiControl.dispatch({ type: "runtime-error" });
       updateGenerateAvailability();
       unsupportedDeviceControl.commit({
         open: true,
@@ -2271,45 +2093,58 @@ export function bootstrap(): () => void {
     }
 
     webGpuState = "ready";
-    setModelStatus(
-      "loading",
-      "Checking local model cache",
-      "No network request is made.",
-      "Checking",
-    );
+    modelUiControl.dispatch({ type: "cache-check-started" });
     updateGenerateAvailability();
     try {
-      const archive = await readCachedModelPack();
+      const cache = await discoverModelSource(true);
       if (disposed) return;
-      if (archive) {
-        cachedPack = true;
-        removeModel.hidden = false;
-        await loadModelPack(archive, false);
-      } else {
-        modelCard.removeAttribute("aria-busy");
-        setModelStatus(
-          "missing",
-          "Model pack required",
-          "Choose the exported Core40 .tar.gz model pack.",
-          "Not loaded",
-        );
-        updateGenerateAvailability();
+      if (cache.complete) {
+        loadModel();
       }
     } catch (error) {
       if (disposed) return;
-      modelCard.removeAttribute("aria-busy");
-      setModelStatus(
-        "missing",
-        "Model pack required",
-        "Persistent cache could not be read.",
-        "Not loaded",
-      );
-      showModelError(
-        "Could not read model cache",
-        error instanceof Error ? error.message : String(error),
-      );
+      modelUiControl.dispatch({
+        type: "cache-error",
+        operation: "download",
+      });
+      modelUiControl.dispatch({ type: "runtime-error" });
+      reportInternalError("Could not initialize model files", error);
+      announce("The model files are unavailable. Check the model source and retry.");
       updateGenerateAvailability();
     }
+  }
+
+  async function discoverModelSource(
+    showDownloadPrompt: boolean,
+  ): Promise<ModelCacheStatus> {
+    const baseUrl = configuredModelBaseUrl();
+    if (!baseUrl) {
+      throw new Error(
+        "Set VITE_MODEL_BASE_URL to an immutable hosted model directory for production.",
+      );
+    }
+    modelSource = await fetchModelManifest(baseUrl, {
+      signal: lifecycle.signal,
+    });
+    const cache = await inspectModelCache(modelSource);
+    modelUiControl.dispatch(
+      cache.complete
+        ? {
+            type: "cache-ready",
+            totalFiles: cache.fileCount,
+            totalBytes: cache.transportSizeBytes,
+          }
+        : {
+            type: "cache-missing",
+            cachedFiles: cache.cachedFileCount,
+            totalFiles: cache.fileCount,
+            cachedBytes: cache.cachedTransportSizeBytes,
+            totalBytes: cache.transportSizeBytes,
+            showDownloadPrompt,
+          },
+    );
+    updateGenerateAvailability();
+    return cache;
   }
 
   updatePrompt();
@@ -2318,14 +2153,7 @@ export function bootstrap(): () => void {
   syncOutputVisibility();
   setVrmStatus(null);
   setVrmLoading(false);
-  modelCard.setAttribute("aria-busy", "true");
-  setModelStatus(
-    "loading",
-    "Checking WebGPU",
-    "A compatible GPU and secure context are required.",
-    "Checking",
-  );
   updateGenerateAvailability();
-  void initializeModelPack();
+  void initializeModel();
   return cleanup;
 }

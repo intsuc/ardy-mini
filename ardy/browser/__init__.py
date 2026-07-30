@@ -3,10 +3,10 @@
 """Browser-export helpers for the distilled MiniLM ARDY runtime."""
 
 from .export import (
-    BROWSER_PACK_FORMAT,
-    BROWSER_PACK_SCHEMA_VERSION,
+    BROWSER_MODEL_FILES_FORMAT,
+    BROWSER_MODEL_FILES_SCHEMA_VERSION,
     BrowserExportConfig,
-    export_browser_model_pack,
+    export_browser_model_files,
 )
 from .wrappers import (
     BrowserMiniLMEncoder,
@@ -15,11 +15,11 @@ from .wrappers import (
 )
 
 __all__ = [
-    "BROWSER_PACK_FORMAT",
-    "BROWSER_PACK_SCHEMA_VERSION",
+    "BROWSER_MODEL_FILES_FORMAT",
+    "BROWSER_MODEL_FILES_SCHEMA_VERSION",
     "BrowserExportConfig",
     "BrowserMiniLMEncoder",
     "BrowserMotionDecoder",
     "BrowserTextCFGDenoiser",
-    "export_browser_model_pack",
+    "export_browser_model_files",
 ]

@@ -1,19 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 # SPDX-License-Identifier: Apache-2.0
-"""Build the self-contained ONNX model pack consumed by the browser demo."""
+"""Build the compressed ONNX model files consumed by the browser runtime."""
 
 from __future__ import annotations
 
 import copy
-import gzip
 import hashlib
 import json
 import math
 import os
 import shutil
-import tarfile
 import tempfile
 import threading
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import metadata
@@ -41,8 +40,8 @@ from .wrappers import (
     BrowserTextCFGDenoiser,
 )
 
-BROWSER_PACK_FORMAT = "ardy-browser-model-pack"
-BROWSER_PACK_SCHEMA_VERSION = 2
+BROWSER_MODEL_FILES_FORMAT = "ardy-browser-model-files"
+BROWSER_MODEL_FILES_SCHEMA_VERSION = 1
 DEFAULT_MODEL_ID = "ardy-minilm-core40-browser-v1"
 DEFAULT_MAX_TOKENS = 20
 DEFAULT_MAX_PROMPT_TOKENS = 128
@@ -118,11 +117,11 @@ def _onnx_export_mode():
 
 @dataclass(frozen=True)
 class BrowserExportConfig:
-    """Inputs and fixed dimensions for one browser model-pack export."""
+    """Inputs and fixed dimensions for one browser model-file export."""
 
-    output_path: Path
+    output_directory: Path
     minilm_artifact: Path
-    fp32_reference_output_path: Path | None = None
+    fp32_reference_output_directory: Path | None = None
     checkpoints_dir: Path | None = None
     model: str = "core"
     model_id: str = DEFAULT_MODEL_ID
@@ -182,6 +181,48 @@ def _local_checkpoint_identity(
     }
 
 
+def _model_revision(
+    *,
+    resolved_model: str,
+    minilm_artifact_fingerprint: Any,
+    checkpoint_identity: dict[str, Any] | None,
+) -> str:
+    """Derive an immutable revision from both sets of exported weights."""
+
+    if not isinstance(minilm_artifact_fingerprint, str):
+        raise TypeError("MiniLM artifact fingerprint must be a string.")
+    checkpoint_fingerprint = (
+        checkpoint_identity.get("fingerprint")
+        if isinstance(checkpoint_identity, dict)
+        else None
+    )
+    for label, fingerprint in (
+        ("MiniLM artifact", minilm_artifact_fingerprint),
+        ("ARDY checkpoint", checkpoint_fingerprint),
+    ):
+        if (
+            not isinstance(fingerprint, str)
+            or len(fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in fingerprint)
+        ):
+            raise ValueError(f"{label} fingerprint must be a lowercase SHA-256.")
+
+    identity = {
+        "format": "ardy-browser-model-identity",
+        "schema_version": 1,
+        "ardy_model": resolved_model,
+        "ardy_checkpoint_fingerprint": checkpoint_fingerprint,
+        "minilm_artifact_fingerprint": minilm_artifact_fingerprint,
+    }
+    encoded = json.dumps(
+        identity,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _tensor_values(tensor: torch.Tensor) -> list:
     return tensor.detach().to(device="cpu", dtype=torch.float32).tolist()
 
@@ -214,18 +255,65 @@ def _validate_config(config: BrowserExportConfig) -> None:
         raise ValueError("max_output_frames must be positive.")
     if not config.minilm_artifact.is_dir():
         raise FileNotFoundError(f"MiniLM artifact directory not found: {config.minilm_artifact}")
-    if config.output_path.exists() and config.output_path.is_dir():
-        raise IsADirectoryError(f"Browser model-pack output must be a .tar.gz file: {config.output_path}")
-    if not config.output_path.name.endswith(".tar.gz"):
-        raise ValueError(f"Browser model-pack output must end in .tar.gz: {config.output_path}")
-    reference_path = config.fp32_reference_output_path
-    if reference_path is not None:
-        if reference_path.exists() and reference_path.is_dir():
-            raise IsADirectoryError(f"FP32 reference output must be a .tar.gz file: {reference_path}")
-        if not reference_path.name.endswith(".tar.gz"):
-            raise ValueError(f"FP32 reference output must end in .tar.gz: {reference_path}")
-        if reference_path.resolve() == config.output_path.resolve():
-            raise ValueError("Mixed-FP16 and FP32 reference outputs must use different paths.")
+    if config.checkpoints_dir is None:
+        raise ValueError(
+            "checkpoints_dir is required to derive an immutable ARDY checkpoint revision."
+        )
+    if not config.checkpoints_dir.is_dir():
+        raise FileNotFoundError(
+            f"ARDY checkpoints directory not found: {config.checkpoints_dir}"
+        )
+
+    output_directory = config.output_directory
+    if output_directory.is_symlink() or (
+        output_directory.exists() and not output_directory.is_dir()
+    ):
+        raise NotADirectoryError(
+            f"Browser model output must be a directory: {output_directory}"
+        )
+
+    reference_directory = config.fp32_reference_output_directory
+    destination_directories = [output_directory]
+    if reference_directory is not None:
+        destination_directories.append(reference_directory)
+        if reference_directory.is_symlink() or (
+            reference_directory.exists() and not reference_directory.is_dir()
+        ):
+            raise NotADirectoryError(
+                f"FP32 reference output must be a directory: {reference_directory}"
+            )
+        resolved_output = output_directory.resolve()
+        resolved_reference = reference_directory.resolve()
+        if resolved_reference == resolved_output:
+            raise ValueError(
+                "Mixed-FP16 and FP32 reference outputs must use different directories."
+            )
+        if (
+            resolved_output in resolved_reference.parents
+            or resolved_reference in resolved_output.parents
+        ):
+            raise ValueError(
+                "Mixed-FP16 and FP32 reference outputs must not contain one another."
+            )
+
+    protected_directories = [
+        config.minilm_artifact.resolve(),
+        config.checkpoints_dir.resolve(),
+    ]
+    for destination in destination_directories:
+        resolved_destination = destination.resolve()
+        if resolved_destination.parent == resolved_destination:
+            raise ValueError("Browser model output cannot replace a filesystem root.")
+        for protected in protected_directories:
+            if (
+                resolved_destination == protected
+                or resolved_destination in protected.parents
+                or protected in resolved_destination.parents
+            ):
+                raise ValueError(
+                    "Browser model outputs must not overlap model input "
+                    f"directories: {destination}"
+                )
 
 
 def _specialize_denoiser_position_tables(
@@ -281,65 +369,141 @@ def _specialize_denoiser_position_tables(
         motion_encoder.max_len = max_motion_tokens
 
 
-def _write_deterministic_tar_gz(
-    source_dir: Path,
-    member_paths: list[Path],
-    output_path: Path,
-) -> None:
-    """Write an atomic, reproducible POSIX ustar archive."""
-    archive_names = {path.relative_to(source_dir).as_posix() for path in member_paths}
-    if "manifest.json" not in archive_names:
-        raise ValueError("Browser model-pack archive requires manifest.json.")
+def _write_deterministic_gzip(
+    source: Path,
+    destination: Path,
+) -> dict[str, Any]:
+    """Compress one regular file with reproducible gzip level 9 settings."""
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    file_descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{output_path.name}.",
-        suffix=".tmp",
-        dir=output_path.parent,
+    if not source.is_file() or source.is_symlink():
+        raise FileNotFoundError(
+            f"Browser model source is not a regular file: {source}"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    size_bytes = 0
+    with (
+        source.open("rb") as input_file,
+        destination.open("wb") as raw_output,
+    ):
+        compressor = zlib.compressobj(
+            level=9,
+            method=zlib.DEFLATED,
+            wbits=31,
+            memLevel=9,
+            strategy=zlib.Z_DEFAULT_STRATEGY,
+        )
+        while chunk := input_file.read(8 * 1024 * 1024):
+            digest.update(chunk)
+            size_bytes += len(chunk)
+            raw_output.write(compressor.compress(chunk))
+        raw_output.write(compressor.flush())
+    destination.chmod(0o644)
+    return {
+        "sha256": digest.hexdigest(),
+        "size_bytes": size_bytes,
+    }
+
+
+def _write_model_files_directory(
+    *,
+    source_directory: Path,
+    payload_paths: list[Path],
+    manifest: dict[str, Any],
+    output_directory: Path,
+) -> Path:
+    """Write a compressed manifest and one gzip transport per asset."""
+
+    if manifest.get("format") != BROWSER_MODEL_FILES_FORMAT:
+        raise ValueError(
+            f"Browser model format must be {BROWSER_MODEL_FILES_FORMAT!r}."
+        )
+    if manifest.get("schema_version") != BROWSER_MODEL_FILES_SCHEMA_VERSION:
+        raise ValueError(
+            "Browser model schema_version must be "
+            f"{BROWSER_MODEL_FILES_SCHEMA_VERSION}."
+        )
+    model = manifest.get("model")
+    if not isinstance(model, dict):
+        raise TypeError("Browser model manifest requires a model object.")
+    revision = model.get("revision")
+    if (
+        not isinstance(revision, str)
+        or len(revision) != 64
+        or any(character not in "0123456789abcdef" for character in revision)
+    ):
+        raise ValueError("Browser model revision must be a lowercase SHA-256.")
+
+    if output_directory.exists():
+        if not output_directory.is_dir() or output_directory.is_symlink():
+            raise NotADirectoryError(
+                f"Browser model output must be a directory: {output_directory}"
+            )
+        if any(output_directory.iterdir()):
+            raise FileExistsError(
+                f"Browser model staging directory is not empty: {output_directory}"
+            )
+    else:
+        output_directory.mkdir(parents=True)
+
+    expected_records = manifest.get("files")
+    if not isinstance(expected_records, dict):
+        raise TypeError("Browser model manifest requires a files object.")
+
+    relative_paths: dict[str, Path] = {}
+    for source in payload_paths:
+        try:
+            relative_path = source.relative_to(source_directory).as_posix()
+        except ValueError as error:
+            raise ValueError(
+                f"Browser model source is outside its working directory: {source}"
+            ) from error
+        if relative_path in relative_paths:
+            raise ValueError(f"Duplicate browser model asset: {relative_path}")
+        relative_paths[relative_path] = source
+
+    if set(relative_paths) != set(expected_records):
+        raise ValueError(
+            "Browser model assets do not match manifest files; "
+            f"assets={sorted(relative_paths)}, records={sorted(expected_records)}."
+        )
+
+    finalized_manifest = copy.deepcopy(manifest)
+    for relative_path, source in sorted(relative_paths.items()):
+        transport_path = f"{relative_path}.gz"
+        compressed_path = output_directory / transport_path
+        raw_record = _write_deterministic_gzip(source, compressed_path)
+        if raw_record != expected_records[relative_path]:
+            raise RuntimeError(
+                f"Browser model asset changed after manifest creation: {relative_path}"
+            )
+        finalized_manifest["files"][relative_path] = {
+            **raw_record,
+            "transport": {
+                "path": transport_path,
+                "compression": "gzip",
+                **_file_record(compressed_path),
+            },
+        }
+
+    raw_manifest_path = output_directory / "model.json"
+    raw_manifest_path.write_text(
+        json.dumps(
+            finalized_manifest,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
     )
-    os.close(file_descriptor)
-    temporary_path = Path(temporary_name)
-
-    try:
-        with (
-            temporary_path.open("wb") as raw_output,
-            gzip.GzipFile(
-                filename="",
-                mode="wb",
-                compresslevel=9,
-                fileobj=raw_output,
-                mtime=0,
-            ) as gzip_output,
-            tarfile.open(
-                fileobj=gzip_output,
-                mode="w",
-                format=tarfile.USTAR_FORMAT,
-            ) as archive,
-        ):
-            for path in sorted(
-                member_paths,
-                key=lambda item: (
-                    item.relative_to(source_dir).as_posix() != "manifest.json",
-                    item.relative_to(source_dir).as_posix(),
-                ),
-            ):
-                if not path.is_file():
-                    raise FileNotFoundError(f"Browser model-pack payload is not a regular file: {path}")
-                archive_name = path.relative_to(source_dir).as_posix()
-                info = tarfile.TarInfo(archive_name)
-                info.size = path.stat().st_size
-                info.mode = 0o644
-                info.mtime = 0
-                info.uid = 0
-                info.gid = 0
-                info.uname = "root"
-                info.gname = "root"
-                with path.open("rb") as input_file:
-                    archive.addfile(info, input_file)
-        temporary_path.replace(output_path)
-        output_path.chmod(0o644)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+    compressed_manifest_path = output_directory / "model.json.gz"
+    _write_deterministic_gzip(
+        raw_manifest_path,
+        compressed_manifest_path,
+    )
+    raw_manifest_path.unlink()
+    return compressed_manifest_path
 
 
 def _unused_sibling_path(destination: Path, suffix: str) -> Path:
@@ -355,31 +519,40 @@ def _unused_sibling_path(destination: Path, suffix: str) -> Path:
     return path
 
 
-def _publish_archive_set(
-    staged_archives: list[tuple[Path, Path]],
+def _publish_directory_set(
+    staged_directories: list[tuple[Path, Path]],
 ) -> None:
-    """Publish a prepared archive set together, rolling back ordinary failures."""
+    """Publish prepared directories together, rolling back ordinary failures."""
 
-    if not staged_archives:
-        raise ValueError("At least one staged archive is required.")
-    destinations = [destination.resolve() for _, destination in staged_archives]
+    if not staged_directories:
+        raise ValueError("At least one staged directory is required.")
+    destinations = [
+        destination.resolve() for _, destination in staged_directories
+    ]
     if len(set(destinations)) != len(destinations):
-        raise ValueError("Archive publication destinations must be distinct.")
-    for staged, destination in staged_archives:
-        if not staged.is_file():
-            raise FileNotFoundError(f"Staged browser archive is missing: {staged}")
-        if destination.exists() and destination.is_dir():
-            raise IsADirectoryError(f"Browser archive destination is a directory: {destination}")
+        raise ValueError("Directory publication destinations must be distinct.")
+    for staged, destination in staged_directories:
+        if not staged.is_dir() or staged.is_symlink():
+            raise FileNotFoundError(
+                f"Staged browser model directory is missing: {staged}"
+            )
+        if destination.is_symlink() or (
+            destination.exists() and not destination.is_dir()
+        ):
+            raise NotADirectoryError(
+                f"Browser model destination is not a directory: {destination}"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
 
     backups: dict[Path, Path] = {}
     published: list[tuple[Path, Path]] = []
     try:
-        for _, destination in staged_archives:
+        for _, destination in staged_directories:
             if destination.exists() or destination.is_symlink():
                 backup = _unused_sibling_path(destination, ".rollback")
                 os.replace(destination, backup)
                 backups[destination] = backup
-        for staged, destination in staged_archives:
+        for staged, destination in staged_directories:
             os.replace(staged, destination)
             published.append((staged, destination))
     except BaseException as error:
@@ -398,13 +571,13 @@ def _publish_archive_set(
                 rollback_errors.append(rollback_error)
         if rollback_errors:
             raise RuntimeError(
-                "Browser archive publication failed and rollback was incomplete: "
+                "Browser model publication failed and rollback was incomplete: "
                 f"{rollback_errors}"
             ) from error
         raise
     else:
         for backup in backups.values():
-            backup.unlink(missing_ok=True)
+            shutil.rmtree(backup)
 
 
 def _export_graph(
@@ -577,7 +750,7 @@ def _check_onnx_models(paths: list[Path]) -> None:
         import onnx
     except ImportError as error:
         raise RuntimeError(
-            "ONNX validation requires the `onnx` package. Run the exporter with `uv run --with onnx ...`."
+            "ONNX validation requires the `onnx` dependency. Run the exporter with `uv run --with onnx ...`."
         ) from error
     for path in paths:
         onnx.checker.check_model(str(path))
@@ -947,15 +1120,22 @@ def _build_manifest(
     alphas_cumprod_prev = diffusion.alphas_cumprod_prev.detach().cpu()
     source_onnx_bytes = sum(report.source_size_bytes for report in precision_reports.values())
     mixed_onnx_bytes = sum(report.output_size_bytes for report in precision_reports.values())
+    artifact_fingerprint = artifact_config.get("artifact_fingerprint")
+    revision = _model_revision(
+        resolved_model=resolved_model,
+        minilm_artifact_fingerprint=artifact_fingerprint,
+        checkpoint_identity=checkpoint_identity,
+    )
 
     manifest: dict[str, Any] = {
-        "format": BROWSER_PACK_FORMAT,
-        "schema_version": BROWSER_PACK_SCHEMA_VERSION,
+        "format": BROWSER_MODEL_FILES_FORMAT,
+        "schema_version": BROWSER_MODEL_FILES_SCHEMA_VERSION,
         "model": {
             "id": config.model_id,
+            "revision": revision,
             "variant": "MiniLM Core40 interactive",
             "ardy_model": resolved_model,
-            "minilm_artifact_fingerprint": artifact_config.get("artifact_fingerprint"),
+            "minilm_artifact_fingerprint": artifact_fingerprint,
             **(
                 {"ardy_checkpoint": checkpoint_identity}
                 if checkpoint_identity is not None
@@ -974,7 +1154,10 @@ def _build_manifest(
             "policy_version": MIXED_FP16_POLICY_VERSION,
             "public_io_dtype": "float32",
             "required_webgpu_features": ["shader-f16"],
-            "toolchain": {package: metadata.version(package) for package in ("onnx", "onnxruntime", "torch")},
+            "toolchain": {
+                dependency: metadata.version(dependency)
+                for dependency in ("onnx", "onnxruntime", "torch")
+            },
             "source_onnx_bytes": source_onnx_bytes,
             "mixed_onnx_bytes": mixed_onnx_bytes,
             "saved_onnx_bytes": source_onnx_bytes - mixed_onnx_bytes,
@@ -1065,7 +1248,7 @@ def _build_manifest(
             ("The specialized text encoder is based on sentence-transformers/all-MiniLM-L6-v2."),
             (
                 "Review THIRD_PARTY_MODELS_AND_DATA.md and all source "
-                "model/data terms before distributing this model pack."
+                "model/data terms before distributing these model files."
             ),
         ],
         "license_notices": [
@@ -1090,7 +1273,7 @@ def _build_manifest(
                 "notice": (
                     "This local export contains trained weights. Review "
                     "THIRD_PARTY_MODELS_AND_DATA.md and all source model/data "
-                    "terms before distributing the model pack."
+                    "terms before distributing these model files."
                 ),
             },
         ],
@@ -1107,8 +1290,8 @@ def _build_fp32_reference_payload(
     graph_paths: dict[str, Path],
     tokenizer_paths: list[Path],
     verification: dict[str, Any] | None,
-) -> list[Path]:
-    """Build a matching FP32 pack payload from the already exported graphs."""
+) -> tuple[dict[str, Any], list[Path]]:
+    """Build matching FP32 metadata and assets from the exported graphs."""
     expected_graphs = set(candidate_manifest["graphs"])
     if set(graph_paths) != expected_graphs:
         raise ValueError(
@@ -1152,26 +1335,25 @@ def _build_fp32_reference_payload(
         "graphs": graph_precision,
     }
 
-    # Keep the runtime contract identical to the candidate. The FP32 archive
-    # is an evaluator reference, and evaluate_browser_fp16 intentionally
-    # permits differences only in files, precision, and verification.
+    # Keep the runtime contract identical to the candidate. The FP32 files are
+    # an evaluator reference; only files, precision, and verification differ.
     if verification is None:
         manifest.pop("verification", None)
     else:
         manifest["verification"] = {"fp32_export": verification}
 
-    manifest_path = output_dir / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return [manifest_path, *payload_paths]
+    return manifest, payload_paths
 
 
-def _export_browser_model_pack_directory(
+def _export_browser_model_files_working_directory(
     config: BrowserExportConfig,
     output_dir: Path,
-) -> tuple[list[Path], list[Path] | None]:
+) -> tuple[
+    dict[str, Any],
+    list[Path],
+    dict[str, Any] | None,
+    list[Path] | None,
+]:
     """Export and validate the three browser graphs in a temporary directory."""
     device = _resolve_device(config.device)
 
@@ -1363,6 +1545,14 @@ def _export_browser_model_pack_directory(
         config.minilm_artifact,
         output_dir,
     )
+    final_checkpoint_identity = _local_checkpoint_identity(
+        config.checkpoints_dir,
+        resolved_model,
+    )
+    if final_checkpoint_identity != checkpoint_identity:
+        raise RuntimeError(
+            "ARDY checkpoint files changed while the browser models were exported."
+        )
     payload_paths = list(graph_paths.values()) + tokenizer_paths
     manifest = _build_manifest(
         config=config,
@@ -1375,75 +1565,95 @@ def _export_browser_model_pack_directory(
         precision_reports=precision_reports,
         checkpoint_identity=checkpoint_identity,
     )
-    manifest_path = output_dir / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    reference_manifest = None
     reference_payload_paths = None
-    if config.fp32_reference_output_path is not None:
-        reference_payload_paths = _build_fp32_reference_payload(
+    if config.fp32_reference_output_directory is not None:
+        reference_manifest, reference_payload_paths = _build_fp32_reference_payload(
             candidate_manifest=manifest,
             output_dir=fp32_dir,
             graph_paths=fp32_graph_paths,
             tokenizer_paths=tokenizer_paths,
             verification=fp32_verification,
         )
-    return [manifest_path, *payload_paths], reference_payload_paths
+    return (
+        manifest,
+        payload_paths,
+        reference_manifest,
+        reference_payload_paths,
+    )
 
 
-def export_browser_model_pack(config: BrowserExportConfig) -> Path:
-    """Export a reproducible, self-contained three-graph Core40 browser pack."""
+def _stage_directory(destination: Path, label: str) -> Path:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    return Path(
+        tempfile.mkdtemp(
+            prefix=f".{destination.name}.",
+            suffix=f".{label}.stage",
+            dir=destination.parent,
+        )
+    )
+
+
+def export_browser_model_files(config: BrowserExportConfig) -> Path:
+    """Export reproducible, individually compressed Core40 browser files."""
+
     _validate_config(config)
     with tempfile.TemporaryDirectory(prefix="ardy-browser-export-") as temporary_directory:
-        output_dir = Path(temporary_directory)
-        member_paths, reference_member_paths = _export_browser_model_pack_directory(config, output_dir)
-        if config.fp32_reference_output_path is None:
-            _write_deterministic_tar_gz(
-                output_dir,
-                member_paths,
-                config.output_path,
+        working_directory = Path(temporary_directory)
+        (
+            manifest,
+            payload_paths,
+            reference_manifest,
+            reference_payload_paths,
+        ) = _export_browser_model_files_working_directory(
+            config,
+            working_directory,
+        )
+        candidate_stage = _stage_directory(
+            config.output_directory,
+            "candidate",
+        )
+        stages = [candidate_stage]
+        publications = [(candidate_stage, config.output_directory)]
+        try:
+            _write_model_files_directory(
+                source_directory=working_directory,
+                payload_paths=payload_paths,
+                manifest=manifest,
+                output_directory=candidate_stage,
             )
-        else:
-            if reference_member_paths is None:
-                raise RuntimeError("FP32 reference payload was not produced.")
-            candidate_stage = _unused_sibling_path(
-                config.output_path,
-                ".candidate-stage",
-            )
-            reference_stage = _unused_sibling_path(
-                config.fp32_reference_output_path,
-                ".reference-stage",
-            )
-            try:
-                _write_deterministic_tar_gz(
-                    output_dir,
-                    member_paths,
-                    candidate_stage,
+            reference_destination = config.fp32_reference_output_directory
+            if reference_destination is not None:
+                if (
+                    reference_manifest is None
+                    or reference_payload_paths is None
+                ):
+                    raise RuntimeError("FP32 reference files were not produced.")
+                reference_stage = _stage_directory(
+                    reference_destination,
+                    "reference",
                 )
-                _write_deterministic_tar_gz(
-                    output_dir / ".fp32-reference",
-                    reference_member_paths,
-                    reference_stage,
+                stages.append(reference_stage)
+                _write_model_files_directory(
+                    source_directory=working_directory / ".fp32-reference",
+                    payload_paths=reference_payload_paths,
+                    manifest=reference_manifest,
+                    output_directory=reference_stage,
                 )
-                _publish_archive_set(
-                    [
-                        (candidate_stage, config.output_path),
-                        (
-                            reference_stage,
-                            config.fp32_reference_output_path,
-                        ),
-                    ]
+                publications.append(
+                    (reference_stage, reference_destination)
                 )
-            finally:
-                candidate_stage.unlink(missing_ok=True)
-                reference_stage.unlink(missing_ok=True)
-    return config.output_path
+            _publish_directory_set(publications)
+        finally:
+            for stage in stages:
+                if stage.exists():
+                    shutil.rmtree(stage)
+    return config.output_directory
 
 
 __all__ = [
-    "BROWSER_PACK_FORMAT",
-    "BROWSER_PACK_SCHEMA_VERSION",
+    "BROWSER_MODEL_FILES_FORMAT",
+    "BROWSER_MODEL_FILES_SCHEMA_VERSION",
     "BrowserExportConfig",
-    "export_browser_model_pack",
+    "export_browser_model_files",
 ]

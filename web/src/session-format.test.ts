@@ -191,7 +191,11 @@ describe("portable motion sessions", () => {
 
   it("only restores continuation state with its originating model identity", () => {
     const session = exampleSession();
-    const matching = { id: "ardy-mini", variant: "core40-minilm" };
+    const matching = {
+      id: "ardy-mini",
+      revision: "weights-v1",
+      variant: "core40-minilm",
+    };
     expect(isContinuationModelCompatible(session.provenance, matching)).toBe(
       true,
     );
@@ -220,6 +224,7 @@ describe("portable motion sessions", () => {
     expect(
       getSessionRestoreMode(variantSession, {
         id: "ardy-mini",
+        revision: "weights-v1",
         variant: "different-weights",
       }),
     ).toBe("playback-only");

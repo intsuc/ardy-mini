@@ -4,10 +4,15 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import {
+  allowRequiredWebGpuFeatureForPreflight,
   openPreviewSettings,
   setCheckedState,
   waitForPreviewReady,
 } from "./control-helpers";
+
+test.beforeEach(async ({ page }) => {
+  await allowRequiredWebGpuFeatureForPreflight(page);
+});
 
 interface TestVrmMetadata {
   readonly name: string;

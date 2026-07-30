@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { MotionConstraint } from "./motion-constraint";
-import type { BrowserModelPackManifest } from "./manifest";
+import type { BrowserModelManifest } from "./manifest";
 
 const DEFAULT_CONTACT_THRESHOLD = 0.5;
 const DEFAULT_ROOT_MARGIN = 0.04;
@@ -44,7 +44,7 @@ export interface MotionPostprocessInput {
   /** Constraints use absolute session-frame coordinates. */
   constraints?: readonly MotionConstraint[];
   /** Required when `constraints` is non-empty. */
-  constraintManifest?: BrowserModelPackManifest;
+  constraintManifest?: BrowserModelManifest;
   /** Absolute session frame represented by local frame zero. */
   frameOffset?: number;
 }
@@ -375,20 +375,20 @@ function constraintTargets(
   const manifest = input.constraintManifest;
   if (manifest === undefined) {
     throw new TypeError(
-      "A model-pack manifest is required to decode normalized constraints",
+      "Model metadata is required to decode normalized constraints",
     );
   }
   const rootSlice = manifest.motion_layout?.root_pos;
   const stats = manifest.stats?.motion;
   if (rootSlice === undefined || rootSlice[1] - rootSlice[0] < 3) {
-    throw new TypeError("The model pack does not expose a 3D root-position slice");
+    throw new TypeError("The model does not expose a 3D root-position slice");
   }
   if (
     stats === undefined ||
     stats.mean.length < rootSlice[0] + 3 ||
     stats.normalization_denominator.length < rootSlice[0] + 3
   ) {
-    throw new TypeError("The model pack has incomplete root normalization statistics");
+    throw new TypeError("The model has incomplete root normalization statistics");
   }
 
   const values = new Float64Array(input.frameCount * 3);

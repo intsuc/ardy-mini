@@ -8,7 +8,7 @@ import {
   type BrowserGraphSpecs,
   type GraphSpec,
 } from "./manifest";
-import type { ModelPack } from "./model-pack";
+import type { ModelAssets } from "./model-assets";
 
 export { ort };
 
@@ -93,7 +93,7 @@ function configureOrt(): void {
 }
 
 async function createSession(
-  pack: ModelPack,
+  assets: ModelAssets,
   graph: GraphSpec<
     Record<string, string>,
     Record<string, string | undefined>
@@ -101,11 +101,11 @@ async function createSession(
 ): Promise<ort.InferenceSession> {
   try {
     const [model, externalData] = await Promise.all([
-      pack.read(graph.model),
+      assets.read(graph.model),
       Promise.all(
         (graph.external_data ?? []).map(async (spec) => ({
           path: spec.path,
-          data: await pack.read(spec.file),
+          data: await assets.read(spec.file),
         })),
       ),
     ]);
@@ -115,9 +115,9 @@ async function createSession(
       ...(externalData.length === 0 ? {} : { externalData }),
     });
   } finally {
-    pack.release(graph.model);
+    assets.release(graph.model);
     for (const external of graph.external_data ?? []) {
-      pack.release(external.file);
+      assets.release(external.file);
     }
   }
 }
@@ -127,20 +127,20 @@ async function releaseSessions(sessions: ort.InferenceSession[]): Promise<void> 
 }
 
 async function createAll(
-  pack: ModelPack,
+  assets: ModelAssets,
   graphs: BrowserGraphSpecs,
   onProgress?: SessionProgressCallback,
 ): Promise<RuntimeSessions> {
   const created: ort.InferenceSession[] = [];
   const total = 3;
   try {
-    const decoder = await createSession(pack, graphs.decoder);
+    const decoder = await createSession(assets, graphs.decoder);
     created.push(decoder);
     onProgress?.(1, total, "decoder.onnx");
-    const textEncoder = await createSession(pack, graphs.text_encoder);
+    const textEncoder = await createSession(assets, graphs.text_encoder);
     created.push(textEncoder);
     onProgress?.(2, total, "text_encoder.onnx");
-    const denoiser = await createSession(pack, graphs.denoiser);
+    const denoiser = await createSession(assets, graphs.denoiser);
     created.push(denoiser);
     onProgress?.(total, total, "denoiser.onnx");
     return {
@@ -155,12 +155,12 @@ async function createAll(
 }
 
 export async function createRuntimeSessions(
-  pack: ModelPack,
+  assets: ModelAssets,
   onProgress?: SessionProgressCallback,
 ): Promise<RuntimeSessions> {
   await assertWebGpuAvailable();
   configureOrt();
-  return createAll(pack, pack.manifest.graphs, onProgress);
+  return createAll(assets, assets.manifest.graphs, onProgress);
 }
 
 export async function disposeRuntimeSessions(

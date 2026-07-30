@@ -3,10 +3,67 @@
 
 import { expect, type Page } from "@playwright/test"
 
-export async function waitForPreviewReady(page: Page): Promise<void> {
-  await expect(page.locator("#model-state")).toHaveText("Not loaded", {
-    timeout: 15_000,
+export async function allowRequiredWebGpuFeatureForPreflight(
+  page: Page
+): Promise<void> {
+  await page.addInitScript(() => {
+    const gpu = (
+      navigator as Navigator & {
+        gpu?: {
+          requestAdapter(...options: unknown[]): Promise<GPUAdapter | null>
+        }
+      }
+    ).gpu
+    if (!gpu) return
+
+    const requestAdapter = gpu.requestAdapter.bind(gpu)
+    let preflightPending = true
+    Object.defineProperty(gpu, "requestAdapter", {
+      configurable: true,
+      value: async (...options: unknown[]) => {
+        const adapter = await requestAdapter(...options)
+        if (!adapter || !preflightPending) return adapter
+        preflightPending = false
+
+        const features = new Proxy(adapter.features, {
+          get(target, property) {
+            if (property === "has") {
+              return (feature: GPUFeatureName) =>
+                feature === "shader-f16" || target.has(feature)
+            }
+            const value = Reflect.get(target, property, target)
+            return typeof value === "function" ? value.bind(target) : value
+          },
+        })
+        return new Proxy(adapter, {
+          get(target, property) {
+            if (property === "features") return features
+            const value = Reflect.get(target, property, target)
+            return typeof value === "function" ? value.bind(target) : value
+          },
+        })
+      },
+    })
   })
+}
+
+export async function waitForPreviewReady(page: Page): Promise<void> {
+  await expect(page.locator("#model-cache-state")).not.toHaveText(
+    "Checking",
+    { timeout: 15_000 }
+  )
+  const downloadDialog = page.getByRole("alertdialog", {
+    name: "Download model files?",
+  })
+  if (await downloadDialog.isVisible()) {
+    await downloadDialog
+      .getByRole("button", { name: "Not now", exact: true })
+      .click()
+  }
+  await expect(page.locator("#model-runtime-state")).toHaveText(
+    /^(?:Not loaded|Unavailable)$/,
+    { timeout: 15_000 }
+  )
   await expect(page.locator("#import-vrm")).toBeEnabled()
 }
 

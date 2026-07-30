@@ -5,7 +5,7 @@ export * from "./ddim";
 export * from "./engine";
 export * from "./hash";
 export * from "./manifest";
-export * from "./model-pack";
+export * from "./model-assets";
 export * from "./motion-constraint";
 export * from "./postprocess";
 export * from "./protocol";

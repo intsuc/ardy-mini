@@ -7,18 +7,19 @@ import type {
   RuntimeGenerationResult,
 } from "./engine";
 import type { PortableRandomState } from "./random";
-import type { BrowserModelPackManifest } from "./manifest";
+import type { BrowserModelManifest } from "./manifest";
+import { normalizeModelBaseUrl } from "./model-assets";
 
-export const WORKER_PROTOCOL_VERSION = 4;
+export const WORKER_PROTOCOL_VERSION = 5;
 
 export const MAX_WORKER_REQUEST_ID_LENGTH = 256;
 export const MAX_WORKER_PROMPT_LENGTH = 4_096;
 export const MAX_WORKER_SEED_LENGTH = 512;
+export const MAX_WORKER_MODEL_BASE_URL_LENGTH = 4_096;
 export const MAX_WORKER_FRAME_COUNT = 1_000_000;
 export const MAX_WORKER_HYBRID_DIM = 65_536;
 export const MAX_WORKER_CONTINUATION_VALUES = 100_000_000;
 
-const MAX_MODEL_PACK_BYTES = 8 * 1024 * 1024 * 1024;
 const MAX_CFG_WEIGHT = 100;
 const MAX_DURATION_SECONDS = 3_600;
 const UINT32_RANGE = 0x1_0000_0000;
@@ -26,8 +27,8 @@ const UINT32_RANGE = 0x1_0000_0000;
 export type GenerationMode = "replace" | "append" | "branch";
 
 export type RuntimeProgressStage =
-  | "reading-pack"
-  | "hashing-pack"
+  | "downloading-model"
+  | "verifying-model"
   | "loading-tokenizer"
   | "loading-sessions"
   | "encoding-text"
@@ -50,10 +51,10 @@ interface RequestMessage {
   requestId: string;
 }
 
-export interface LoadModelPackCommand extends RequestMessage {
-  type: "loadModelPack";
-  /** The canonical gzip-compressed POSIX ustar model pack. */
-  archive: File;
+export interface LoadModelCommand extends RequestMessage {
+  type: "loadModel";
+  /** Directory URL containing model.json.gz and its individual files. */
+  baseUrl: string;
 }
 
 export interface GenerateCommand extends RequestMessage {
@@ -101,7 +102,7 @@ export interface GetStatusCommand extends RequestMessage {
 }
 
 export type WorkerCommand =
-  | LoadModelPackCommand
+  | LoadModelCommand
   | GenerateCommand
   | ResetSessionCommand
   | RestoreContinuationCommand
@@ -127,13 +128,14 @@ export interface ModelLoadedEvent extends RequestMessage {
   model: {
     id: string;
     variant: string;
+    revision: string;
     fps: number;
     minFrames: number;
     maxFrames: number;
     generationFrames: number;
     capabilities: RuntimeCapabilities;
     /** Validated conditioning/skeleton metadata needed by the browser editor. */
-    manifest: BrowserModelPackManifest;
+    manifest: BrowserModelManifest;
   };
 }
 
@@ -292,20 +294,6 @@ function cfgWeight(value: unknown, label: string): number | undefined {
     throw new RangeError(`${label} must be between 0 and ${MAX_CFG_WEIGHT}`);
   }
   return weight;
-}
-
-function isFile(value: unknown): value is File {
-  if (typeof File !== "undefined") {
-    return value instanceof File;
-  }
-  return (
-    isRecord(value) &&
-    typeof value.name === "string" &&
-    typeof value.size === "number" &&
-    Number.isFinite(value.size) &&
-    value.size >= 0 &&
-    typeof value.arrayBuffer === "function"
-  );
 }
 
 function initialTranslation(
@@ -543,33 +531,22 @@ export function parseWorkerCommand(value: unknown): WorkerCommand {
   }
   const id = requestId(value.requestId);
   switch (value.type) {
-    case "loadModelPack": {
-      if (!isFile(value.archive)) {
-        throw new TypeError("loadModelPack.archive must be a File object");
-      }
-      if (!value.archive.name.toLowerCase().endsWith(".tar.gz")) {
-        throw new TypeError("loadModelPack.archive must be a .tar.gz file");
-      }
-      if (value.archive.size === 0) {
-        throw new RangeError("loadModelPack.archive must not be empty");
-      }
-      if (
-        !Number.isSafeInteger(value.archive.size) ||
-        value.archive.size > MAX_MODEL_PACK_BYTES
-      ) {
-        throw new RangeError(
-          `loadModelPack.archive must be at most ${MAX_MODEL_PACK_BYTES} bytes`,
-        );
-      }
-      if ("backend" in value || "wasmPaths" in value) {
+    case "loadModel": {
+      const allowedFields = new Set(["type", "requestId", "baseUrl"]);
+      if (Object.keys(value).some((field) => !allowedFields.has(field))) {
         throw new TypeError(
-          "loadModelPack no longer accepts backend configuration; the runtime requires WebGPU.",
+          "loadModel accepts only type, requestId, and baseUrl.",
         );
       }
+      const rawBaseUrl = boundedString(
+        value.baseUrl,
+        "loadModel.baseUrl",
+        MAX_WORKER_MODEL_BASE_URL_LENGTH,
+      );
       return {
-        type: "loadModelPack",
+        type: "loadModel",
         requestId: id,
-        archive: value.archive,
+        baseUrl: normalizeModelBaseUrl(rawBaseUrl),
       };
     }
     case "generate":

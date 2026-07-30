@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-export const MODEL_PACK_FORMAT = "ardy-browser-model-pack";
-export const MODEL_PACK_SCHEMA_VERSION = 2;
-export const MODEL_PACK_MANIFEST_FILE = "manifest.json";
+export const MODEL_FILES_FORMAT = "ardy-browser-model-files";
+export const MODEL_FILES_SCHEMA_VERSION = 1;
+export const MODEL_MANIFEST_FILE = "model.json.gz";
 export const MIXED_PRECISION_FORMAT = "mixed-fp16";
 export const MIXED_PRECISION_POLICY_VERSION = 3;
 export const MIXED_PRECISION_PUBLIC_IO_DTYPE = "float32";
@@ -11,16 +11,25 @@ export const REQUIRED_WEBGPU_FEATURE = "shader-f16";
 
 export type Sha256Hex = string;
 
+export interface ModelFileTransport {
+  path: string;
+  compression: "gzip";
+  sha256: Sha256Hex;
+  size_bytes: number;
+}
+
 export interface ManifestFile {
+  /** SHA-256 and size after transport decompression. */
   sha256: Sha256Hex;
   size_bytes: number;
   media_type?: string;
+  transport: ModelFileTransport;
 }
 
 export interface ExternalDataSpec {
   /** Path embedded in the ONNX protobuf. This is not necessarily the asset path. */
   path: string;
-  /** Relative path of the asset in the model pack. */
+  /** Logical file path of the separately transported model asset. */
   file: string;
 }
 
@@ -267,12 +276,14 @@ export interface BrowserCapabilities {
   motion_correction?: boolean;
 }
 
-export interface BrowserModelPackManifest {
-  format: typeof MODEL_PACK_FORMAT;
-  schema_version: typeof MODEL_PACK_SCHEMA_VERSION;
+export interface BrowserModelManifest {
+  format: typeof MODEL_FILES_FORMAT;
+  schema_version: typeof MODEL_FILES_SCHEMA_VERSION;
   model: {
     id: string;
     variant: string;
+    /** Immutable identity for cache keys and continuation compatibility. */
+    revision: string;
   };
   files: Record<string, ManifestFile>;
   tokenizer: BrowserTokenizerSpec;
@@ -294,12 +305,13 @@ export interface BrowserModelPackManifest {
 
 export class ManifestValidationError extends Error {
   constructor(message: string) {
-    super(`Invalid ARDY browser model-pack manifest: ${message}`);
+    super(`Invalid ARDY browser model manifest: ${message}`);
     this.name = "ManifestValidationError";
   }
 }
 
 const SHA256_RE = /^[0-9a-f]{64}$/;
+const SAFE_MODEL_PATH_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const EXPECTED_GRAPH_NAMES = [
   "text_encoder",
   "denoiser",
@@ -428,13 +440,20 @@ function integerArrayAt(value: unknown, path: string, length: number): number[] 
   });
 }
 
-export function normalizePackPath(path: string): string {
+export function normalizeModelPath(path: string): string {
   const normalized = path.replaceAll("\\", "/").replace(/^\.\/+/, "");
+  const segments = normalized.split("/");
   if (
     normalized.length === 0 ||
     normalized.startsWith("/") ||
     normalized.endsWith("/") ||
-    normalized.split("/").some((part) => part === "" || part === "." || part === "..")
+    segments.some(
+      (part) =>
+        part === "" ||
+        part === "." ||
+        part === ".." ||
+        !SAFE_MODEL_PATH_SEGMENT_RE.test(part),
+    )
   ) {
     fail(`unsafe relative asset path ${JSON.stringify(path)}`);
   }
@@ -471,7 +490,7 @@ function validateGraph(
   requiredOutputs: readonly string[],
 ): Set<string> {
   const graph = objectAt(value, path);
-  const model = normalizePackPath(stringAt(graph.model, `${path}.model`));
+  const model = normalizeModelPath(stringAt(graph.model, `${path}.model`));
   if (!files.has(model)) {
     fail(`${path}.model references undeclared file ${JSON.stringify(model)}`);
   }
@@ -494,7 +513,7 @@ function validateGraph(
         fail(`${path}.external_data contains duplicate ONNX path ${embeddedPath}`);
       }
       embeddedPaths.add(embeddedPath);
-      const file = normalizePackPath(
+      const file = normalizeModelPath(
         stringAt(external.file, `${path}.external_data[${index}].file`),
       );
       if (!files.has(file)) {
@@ -509,13 +528,17 @@ function validateGraph(
 function validateManifestFiles(value: unknown): Set<string> {
   const files = objectAt(value, "files");
   const normalizedPaths = new Set<string>();
+  const transportPaths = new Set<string>();
   if (Object.keys(files).length === 0) {
     fail("files must not be empty");
   }
   for (const [rawPath, rawDescription] of Object.entries(files)) {
-    const path = normalizePackPath(rawPath);
+    const path = normalizeModelPath(rawPath);
     if (path !== rawPath) {
       fail(`files key ${JSON.stringify(rawPath)} is not in canonical form`);
+    }
+    if (path === MODEL_MANIFEST_FILE) {
+      fail(`${MODEL_MANIFEST_FILE} must not declare itself as a model file`);
     }
     if (normalizedPaths.has(path)) {
       fail(`files contains duplicate normalized path ${JSON.stringify(path)}`);
@@ -531,6 +554,42 @@ function validateManifestFiles(value: unknown): Set<string> {
     if (description.media_type !== undefined) {
       stringAt(description.media_type, `files.${path}.media_type`);
     }
+
+    const transport = objectAt(
+      description.transport,
+      `files.${path}.transport`,
+    );
+    const transportPath = normalizeModelPath(
+      stringAt(transport.path, `files.${path}.transport.path`),
+    );
+    if (transportPath !== transport.path) {
+      fail(`files.${path}.transport.path is not in canonical form`);
+    }
+    if (transportPath === MODEL_MANIFEST_FILE) {
+      fail(`files.${path}.transport.path must not be ${MODEL_MANIFEST_FILE}`);
+    }
+    if (transportPaths.has(transportPath)) {
+      fail(
+        `files contains duplicate transport path ${JSON.stringify(transportPath)}`,
+      );
+    }
+    transportPaths.add(transportPath);
+    if (transport.compression !== "gzip") {
+      fail(`files.${path}.transport.compression must be "gzip"`);
+    }
+    const transportSha256 = stringAt(
+      transport.sha256,
+      `files.${path}.transport.sha256`,
+    );
+    if (!SHA256_RE.test(transportSha256)) {
+      fail(
+        `files.${path}.transport.sha256 must be a lowercase SHA-256 hex digest`,
+      );
+    }
+    positiveIntegerAt(
+      transport.size_bytes,
+      `files.${path}.transport.size_bytes`,
+    );
   }
   return normalizedPaths;
 }
@@ -826,7 +885,7 @@ function validateMixedPrecision(
     }
 
     const graph = objectAt(graphs[graphName], `graphs.${graphName}`);
-    const modelPath = normalizePackPath(
+    const modelPath = normalizeModelPath(
       stringAt(graph.model, `graphs.${graphName}.model`),
     );
     const file = objectAt(files[modelPath], `files.${modelPath}`);
@@ -996,26 +1055,27 @@ function validateDiffusion(value: unknown, steps: number): void {
 /**
  * Validate an untrusted JSON value and narrow it to the current runtime contract.
  *
- * Model packs are user-selected archives, so all fields used for allocation,
- * file lookup, tensor shapes, or numerical kernels are checked before any model
- * bytes are handed to ONNX Runtime.
+ * Model metadata is fetched separately from large model files. All fields used
+ * for allocation, file lookup, tensor shapes, or numerical kernels are checked
+ * before any model bytes are handed to ONNX Runtime.
  */
-export function validateModelPackManifest(value: unknown): BrowserModelPackManifest {
+export function validateModelManifest(value: unknown): BrowserModelManifest {
   const manifest = objectAt(value, "manifest");
-  if (manifest.format !== MODEL_PACK_FORMAT) {
-    fail(`format must be ${JSON.stringify(MODEL_PACK_FORMAT)}`);
+  if (manifest.format !== MODEL_FILES_FORMAT) {
+    fail(`format must be ${JSON.stringify(MODEL_FILES_FORMAT)}`);
   }
-  if (manifest.schema_version !== MODEL_PACK_SCHEMA_VERSION) {
-    fail(`schema_version must be ${MODEL_PACK_SCHEMA_VERSION}`);
+  if (manifest.schema_version !== MODEL_FILES_SCHEMA_VERSION) {
+    fail(`schema_version must be ${MODEL_FILES_SCHEMA_VERSION}`);
   }
 
   const model = objectAt(manifest.model, "model");
   stringAt(model.id, "model.id");
   stringAt(model.variant, "model.variant");
+  stringAt(model.revision, "model.revision");
   const files = validateManifestFiles(manifest.files);
 
   const tokenizer = objectAt(manifest.tokenizer, "tokenizer");
-  const tokenizerDirectory = normalizePackPath(
+  const tokenizerDirectory = normalizeModelPath(
     stringAt(tokenizer.directory, "tokenizer.directory"),
   );
   positiveIntegerAt(tokenizer.max_length, "tokenizer.max_length");
@@ -1343,5 +1403,5 @@ export function validateModelPackManifest(value: unknown): BrowserModelPackManif
     }
   }
 
-  return manifest as unknown as BrowserModelPackManifest;
+  return manifest as unknown as BrowserModelManifest;
 }

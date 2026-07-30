@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  type RefObject,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -37,10 +38,11 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
-import { Button, ButtonLink } from "@/components/ui/button"
+import { Button } from "@/components/ui/button"
 import {
   Card,
   CardAction,
+  CardContent,
   CardDescription,
   CardFooter,
   CardHeader,
@@ -97,6 +99,11 @@ import {
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import {
+  Progress,
+  ProgressLabel,
+  ProgressValue,
+} from "@/components/ui/progress"
+import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -115,12 +122,13 @@ import {
 } from "@/prompt-examples"
 import { bootstrap } from "@/main"
 import {
+  clearModelCacheAction,
   generationProgressControl,
-  modelProgressControl,
+  modelDownloadAction,
+  modelUiControl,
   playbackSpeedControl,
   playPauseControl,
   previewSettingsControl,
-  removeSavedModelAction,
   showContactsControl,
   showOrientationsControl,
   showSkeletonControl,
@@ -130,6 +138,7 @@ import {
   timelineControl,
   unsupportedDeviceControl,
   useControlState,
+  useModelUiState,
 } from "@/ui-control-store"
 
 function EmptyFieldError({
@@ -273,15 +282,194 @@ function UnsupportedDeviceDialog() {
   )
 }
 
-function ModelSection() {
-  const importModelRef = useRef<HTMLButtonElement>(null)
-  const removeDialogCancelRef = useRef<HTMLButtonElement>(null)
-  const focusImportAfterCloseRef = useRef(false)
-  const [removeDialogOpen, setRemoveDialogOpen] = useState(false)
+function formatModelBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "—"
+  const units = ["B", "KiB", "MiB", "GiB"]
+  const exponent = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    units.length - 1
+  )
+  const value = bytes / 1024 ** exponent
+  return `${value >= 10 || exponent === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[exponent]}`
+}
+
+function modelCacheLabel(
+  cache: ReturnType<typeof modelUiControl.getSnapshot>["cache"]
+): string {
+  const labels = {
+    checking: "Checking",
+    missing: "Not cached",
+    downloading: "Downloading",
+    verifying: "Verifying",
+    ready: "Cached",
+    clearing: "Clearing",
+    error: "Needs attention",
+  } as const
+  return labels[cache]
+}
+
+function modelRuntimeLabel(
+  runtime: ReturnType<typeof modelUiControl.getSnapshot>["runtime"]
+): string {
+  const labels = {
+    idle: "Not loaded",
+    loading: "Preparing",
+    ready: "Ready",
+    error: "Unavailable",
+  } as const
+  return labels[runtime]
+}
+
+function modelCacheDescription(
+  state: ReturnType<typeof modelUiControl.getSnapshot>
+): string {
+  if (state.cache === "checking") {
+    return "Checking this browser for cached model files."
+  }
+  if (state.cache === "downloading") {
+    return "Downloading model files to this browser."
+  }
+  if (state.cache === "verifying") {
+    return "Verifying the downloaded model files."
+  }
+  if (state.cache === "clearing") {
+    return "Removing cached model files from this browser."
+  }
+  if (state.cache === "error") {
+    return state.errorOperation === "clear"
+      ? "The cached files could not be cleared. Try again."
+      : "The download did not finish. Retry to continue."
+  }
+  if (state.cache === "missing") {
+    return "Download the model files to use ARDY Mini in this browser."
+  }
+  return "Model files are stored in this browser for faster startup."
+}
+
+function modelProgressPercent(
+  state: ReturnType<typeof modelUiControl.getSnapshot>
+): number | null {
+  if (state.cache === "verifying") return 100
+  if (state.totalBytes <= 0) return null
+  return Math.min(
+    100,
+    Math.round((state.cachedBytes / state.totalBytes) * 100)
+  )
+}
+
+function preferredModelDialogFocus(
+  actionRef: RefObject<HTMLButtonElement | null>
+): HTMLElement | true {
+  const action = actionRef.current
+  if (
+    action &&
+    !action.disabled &&
+    action.getClientRects().length > 0 &&
+    !action.closest("[inert]")
+  ) {
+    return action
+  }
+  return document.getElementById("motion-canvas") ?? true
+}
+
+function ModelDownloadDialog({
+  actionRef,
+}: {
+  actionRef: RefObject<HTMLButtonElement | null>
+}) {
+  const state = useModelUiState()
+  const unsupported = useControlState(unsupportedDeviceControl)
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  const size =
+    state.totalFiles > 0 && state.totalBytes > 0
+      ? `${formatModelBytes(state.totalBytes)} across ${state.totalFiles} ${state.totalFiles === 1 ? "file" : "files"}`
+      : "the model files"
+  const open = state.downloadDialogOpen && !unsupported.open
+
+  return (
+    <AlertDialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen && state.downloadDialogOpen) {
+          modelUiControl.dispatch({
+            type: "download-prompt-dismissed",
+          })
+        }
+      }}
+    >
+      <AlertDialogContent
+        size="sm"
+        initialFocus={cancelRef}
+        finalFocus={() => preferredModelDialogFocus(actionRef)}
+      >
+        <AlertDialogHeader>
+          <AlertDialogTitle>Download model files?</AlertDialogTitle>
+          <AlertDialogDescription>
+            ARDY Mini needs {size}. The files will be downloaded and
+            stored in this browser. You can remove them later from
+            Model.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel
+            ref={cancelRef}
+            onClick={() => {
+              modelUiControl.dispatch({
+                type: "download-prompt-dismissed",
+              })
+            }}
+          >
+            Not now
+          </AlertDialogCancel>
+          <AlertDialogAction
+            id="confirm-model-download"
+            onClick={() => {
+              modelUiControl.dispatch({ type: "download-started" })
+              modelDownloadAction.trigger()
+            }}
+          >
+            Download model
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  )
+}
+
+function ModelCacheSection({
+  actionRef,
+}: {
+  actionRef: RefObject<HTMLButtonElement | null>
+}) {
+  const state = useModelUiState()
+  const clearCancelRef = useRef<HTMLButtonElement>(null)
+  const [clearDialogOpen, setClearDialogOpen] = useState(false)
+  const showProgress =
+    state.cache === "downloading" || state.cache === "verifying"
+  const canDownload =
+    state.runtime !== "loading" &&
+    (state.cache === "missing" ||
+      (state.cache === "error" &&
+        state.errorOperation === "download"))
+  const canClear =
+    state.runtime !== "loading" &&
+    state.cachedBytes > 0 &&
+    state.cache !== "checking" &&
+    state.cache !== "downloading" &&
+    state.cache !== "verifying" &&
+    state.cache !== "clearing"
+  const fileValue =
+    state.totalFiles > 0
+      ? `${state.cachedFiles} of ${state.totalFiles}`
+      : "—"
+  const byteValue =
+    state.totalBytes > 0
+      ? `${formatModelBytes(state.cachedBytes)} of ${formatModelBytes(state.totalBytes)}`
+      : "—"
 
   return (
     <section
-      className="model-setup flex flex-col gap-3 border-b p-3"
+      className="flex flex-col gap-3 border-b p-3"
       aria-labelledby="model-step-title"
     >
       <h3
@@ -291,160 +479,153 @@ function ModelSection() {
         Model
       </h3>
 
-      <Card id="model-card" size="sm">
+      <Card id={modelUiControl.id} size="sm">
         <CardHeader>
-          <CardTitle className="flex min-w-0 items-center gap-2">
-            <span
-              className="size-1.5 shrink-0 rounded-full bg-muted-foreground group-data-[state=ready]/card:bg-primary"
-              aria-hidden="true"
-            />
-            <span className="truncate" id="model-title">
-              Model pack required
-            </span>
-          </CardTitle>
-          <CardDescription id="model-detail">
-            Choose the exported Core40 .tar.gz model pack.
+          <CardTitle>Model files</CardTitle>
+          <CardDescription id="model-cache-description">
+            {modelCacheDescription(state)}
           </CardDescription>
           <CardAction>
             <Badge
-              variant="outline"
-              id="model-state"
-              data-state="missing"
+              variant={
+                state.cache === "error"
+                  ? "destructive"
+                  : state.cache === "ready"
+                    ? "secondary"
+                    : "outline"
+              }
+              id="model-cache-state"
+              data-state={state.cache}
             >
-              Not loaded
+              {modelCacheLabel(state.cache)}
             </Badge>
           </CardAction>
-          <div
-            className="col-span-full mt-1 grid grid-cols-[minmax(3rem,1fr)_auto] items-center gap-1.5"
-            id="model-progress"
-            hidden
-          >
-            <BoundProgress
-              control={modelProgressControl}
-              aria-label="Model loading progress"
-            />
-            <span
-              className="text-xs text-muted-foreground"
-              id="model-progress-label"
-            />
-          </div>
         </CardHeader>
-        <CardFooter id="model-setup-help">
-          <CardDescription>
-            Select{" "}
-            <code>
-              artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz
-            </code>
-            . The compressed pack is stored only in this browser.{" "}
-            <ButtonLink
-              variant="link"
-              size="xs"
-              href="https://github.com/intsuc/ardy-mini#fully-in-browser-minilm-demo"
-              target="_blank"
-              rel="noreferrer"
+        <CardContent>
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
+            <dt className="text-muted-foreground">Files</dt>
+            <dd
+              className="truncate text-right tabular-nums"
+              id="model-cache-files"
             >
-              Export instructions
-            </ButtonLink>
-          </CardDescription>
-        </CardFooter>
-      </Card>
-
-      <div className="grid min-w-0 gap-1.5 min-[360px]:grid-cols-[minmax(0,1fr)_auto]">
-        <Button
-          ref={importModelRef}
-          id="import-model"
-          className="min-w-0"
-          variant="secondary"
-          size="lg"
-          type="button"
-        >
-          <span id="import-model-label">Choose model pack</span>
-        </Button>
-        <input
-          id="model-file-input"
-          type="file"
-          accept=".tar.gz,application/gzip"
-          hidden
-          aria-hidden="true"
-        />
-        <AlertDialog
-          open={removeDialogOpen}
-          onOpenChange={(open) => setRemoveDialogOpen(open)}
-        >
-          <AlertDialogTrigger
-            render={
+              {fileValue}
+            </dd>
+            <dt className="text-muted-foreground">Storage</dt>
+            <dd
+              className="truncate text-right tabular-nums"
+              id="model-cache-bytes"
+            >
+              {byteValue}
+            </dd>
+            <dt className="text-muted-foreground">Runtime</dt>
+            <dd
+              className="truncate text-right"
+              id="model-runtime-state"
+              data-state={state.runtime}
+            >
+              {modelRuntimeLabel(state.runtime)}
+            </dd>
+          </dl>
+          {showProgress ? (
+            <Progress
+              id="model-download-progress"
+              className="mt-3"
+              value={modelProgressPercent(state)}
+              getAriaValueText={() =>
+                state.totalBytes > 0
+                  ? `${formatModelBytes(state.cachedBytes)} of ${formatModelBytes(state.totalBytes)}`
+                  : modelCacheLabel(state.cache)
+              }
+            >
+              <ProgressLabel>
+                {state.cache === "verifying"
+                  ? "Verifying model files"
+                  : "Downloading model files"}
+              </ProgressLabel>
+              <ProgressValue>
+                {(_formattedValue, value) =>
+                  value === null ? "—" : `${value}%`
+                }
+              </ProgressValue>
+            </Progress>
+          ) : null}
+        </CardContent>
+        {canDownload || canClear ? (
+          <CardFooter>
+            {canDownload ? (
               <Button
-                id="remove-model"
-                className="min-w-0"
-                variant="destructive"
-                size="lg"
+                ref={actionRef}
+                id="download-model"
                 type="button"
-                hidden
-              >
-                Remove saved pack
-              </Button>
-            }
-          />
-          <AlertDialogContent
-            size="sm"
-            initialFocus={removeDialogCancelRef}
-            finalFocus={() => {
-              if (!focusImportAfterCloseRef.current) return true
-              focusImportAfterCloseRef.current = false
-              return importModelRef.current
-            }}
-          >
-            <AlertDialogHeader>
-              <AlertDialogTitle>
-                Remove the saved model pack?
-              </AlertDialogTitle>
-              <AlertDialogDescription>
-                This unloads the model and removes its browser copy.
-                Generated motion remains available in the preview.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel ref={removeDialogCancelRef}>
-                Cancel
-              </AlertDialogCancel>
-              <AlertDialogAction
-                id="confirm-remove-model"
-                variant="destructive"
                 onClick={() => {
-                  focusImportAfterCloseRef.current = true
-                  setRemoveDialogOpen(false)
-                  removeSavedModelAction.trigger()
+                  modelUiControl.dispatch({
+                    type: "download-prompt-opened",
+                  })
                 }}
               >
-                Remove saved pack
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-      </div>
-
-      <Alert
-        id="model-error-banner"
-        variant="destructive"
-        tabIndex={-1}
-        hidden
-      >
-        <AlertTitle id="model-error-title">
-          Model import failed
-        </AlertTitle>
-        <AlertDescription id="model-error-message" />
-        <AlertAction>
-          <Button
-            id="dismiss-model-error"
-            variant="ghost"
-            size="icon-lg"
-            type="button"
-            aria-label="Dismiss model error"
-          >
-            <IconX data-icon="inline-start" aria-hidden="true" />
-          </Button>
-        </AlertAction>
-      </Alert>
+                {state.cache === "error"
+                  ? "Retry download"
+                  : "Download model"}
+              </Button>
+            ) : null}
+            {canClear ? (
+              <AlertDialog
+                open={clearDialogOpen}
+                onOpenChange={setClearDialogOpen}
+              >
+                <AlertDialogTrigger
+                  render={
+                    <Button
+                      ref={canDownload ? undefined : actionRef}
+                      id="clear-model-cache"
+                      variant="destructive"
+                      type="button"
+                    />
+                  }
+                >
+                  Clear cache
+                </AlertDialogTrigger>
+                <AlertDialogContent
+                  size="sm"
+                  initialFocus={clearCancelRef}
+                  finalFocus={() =>
+                    preferredModelDialogFocus(actionRef)
+                  }
+                >
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>
+                      Clear cached model files?
+                    </AlertDialogTitle>
+                    <AlertDialogDescription>
+                      This removes cached ARDY Mini model files from this
+                      browser. A model already loaded in this tab remains
+                      available until you close it.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel ref={clearCancelRef}>
+                      Cancel
+                    </AlertDialogCancel>
+                    <AlertDialogAction
+                      id="confirm-clear-model-cache"
+                      variant="destructive"
+                      onClick={() => {
+                        modelUiControl.dispatch({
+                          type: "clear-started",
+                        })
+                        setClearDialogOpen(false)
+                        clearModelCacheAction.trigger()
+                      }}
+                    >
+                      Clear cache
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            ) : null}
+          </CardFooter>
+        ) : null}
+      </Card>
     </section>
   )
 }
@@ -540,7 +721,7 @@ function PromptComposer() {
           aria-label="Generation progress"
         />
         <span className="sr-only" id="generate-help">
-          Load a model pack to enable generation.
+          Download the model files to enable generation.
         </span>
       </div>
     </section>
@@ -1139,7 +1320,11 @@ function PreviewSettingsSection({
   )
 }
 
-function GenerationPanel() {
+function GenerationPanel({
+  modelActionRef,
+}: {
+  modelActionRef: RefObject<HTMLButtonElement | null>
+}) {
   return (
     <aside
       className="panel generation-panel"
@@ -1152,7 +1337,7 @@ function GenerationPanel() {
       </h2>
 
       <form id="generation-form" noValidate>
-        <ModelSection />
+        <ModelCacheSection actionRef={modelActionRef} />
 
         <MotionSettingsSection />
 
@@ -1163,6 +1348,7 @@ function GenerationPanel() {
 }
 
 export function App() {
+  const modelActionRef = useRef<HTMLButtonElement>(null)
   const [isMobile, setIsMobile] = useState(
     () => window.matchMedia(MOBILE_LAYOUT_QUERY).matches
   )
@@ -1223,6 +1409,7 @@ export function App() {
 
         <VrmDropTarget />
         <UnsupportedDeviceDialog />
+        <ModelDownloadDialog actionRef={modelActionRef} />
 
         <main
           className="workspace"
@@ -1251,7 +1438,10 @@ export function App() {
           aria-hidden="true"
           inert
         />
-        {createPortal(<GenerationPanel />, motionControlsPortal)}
+        {createPortal(
+          <GenerationPanel modelActionRef={modelActionRef} />,
+          motionControlsPortal
+        )}
       </div>
     </TooltipProvider>
   )

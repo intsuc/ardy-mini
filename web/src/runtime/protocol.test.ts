@@ -10,55 +10,44 @@ import {
   WORKER_PROTOCOL_VERSION,
 } from "./protocol";
 
-describe("worker protocol v4", () => {
-  it("accepts one tar.gz archive and rejects legacy load options", () => {
-    const archive = new File(["gzip"], "model-pack.tar.gz", {
-      type: "application/gzip",
-    });
+describe("worker protocol v5", () => {
+  it("normalizes a model-files base URL and rejects unknown inputs", () => {
     expect(
       parseWorkerCommand({
-        type: "loadModelPack",
+        type: "loadModel",
         requestId: "load",
-        archive,
+        baseUrl: "https://example.test/models/core40",
       }),
     ).toMatchObject({
-      type: "loadModelPack",
-      archive,
+      type: "loadModel",
+      baseUrl: "https://example.test/models/core40/",
     });
     expect(() =>
       parseWorkerCommand({
-        type: "loadModelPack",
-        requestId: "legacy-load",
-        files: [archive],
+        type: "loadModel",
+        requestId: "extra-field",
+        baseUrl: "https://example.test/model/",
+        extra: true,
       }),
-    ).toThrow(/archive/);
+    ).toThrow(/only type, requestId, and baseUrl/);
     expect(() =>
       parseWorkerCommand({
-        type: "loadModelPack",
-        requestId: "legacy-backend",
-        archive,
-        backend: "wasm",
+        type: "loadModel",
+        requestId: "bad-protocol",
+        baseUrl: "ftp://example.test/model/",
       }),
-    ).toThrow(/requires WebGPU/);
+    ).toThrow(/HTTP/);
     expect(() =>
       parseWorkerCommand({
-        type: "loadModelPack",
-        requestId: "legacy-paths",
-        archive,
-        wasmPaths: "/ort/",
+        type: "loadModel",
+        requestId: "bad-query",
+        baseUrl: "https://example.test/model/?mutable=1",
       }),
-    ).toThrow(/requires WebGPU/);
-    expect(() =>
-      parseWorkerCommand({
-        type: "loadModelPack",
-        requestId: "wrong-extension",
-        archive: new File(["gzip"], "model-pack.zip"),
-      }),
-    ).toThrow(/\.tar\.gz/);
+    ).toThrow(/query/);
   });
 
   it("parses a replace-compatible generation command", () => {
-    expect(WORKER_PROTOCOL_VERSION).toBe(4);
+    expect(WORKER_PROTOCOL_VERSION).toBe(5);
     const command = parseWorkerCommand({
       type: "generate",
       requestId: "legacy",

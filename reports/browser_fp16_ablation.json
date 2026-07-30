@@ -57,7 +57,7 @@
     "windows_per_case": 5
   },
   "format": "ardy-browser-fp16-aggregate",
-  "format_version": 1,
+  "format_version": 2,
   "method": {
     "candidate": "mixed-FP16 ONNX Runtime CPU with graph optimizations disabled",
     "case_count": 192,
@@ -464,19 +464,25 @@
       "window_index": 4
     }
   ],
-  "packs": {
+  "models": {
     "candidate": {
-      "file": "ardy-minilm-core40-browser-v1.tar.gz",
-      "sha256": "8641b8fbb94c245866300dcdbb3ad75a634d5427566fc4a8bd2fc8b9fe533a68",
-      "size_bytes": 684776137
+      "id": "ardy-minilm-core40-browser-v1",
+      "manifest_sha256": "1a6434946d8db8a6e18d9be53995e376e4ee1b4b2a650e90ab79f3c30ad48bf1",
+      "raw_size_bytes": 740125267,
+      "revision": "82059e1b3e8c861d1f11128184c58ce17a62795e0e24289a295c0a70cd78befe",
+      "transport_size_bytes": 684220414
     },
+    "raw_saved_bytes": 35453521,
+    "raw_saved_fraction": 0.04571233967270394,
     "reference": {
-      "file": "ardy-minilm-core40-browser-v1-fp32-reference.tar.gz",
-      "sha256": "a9f5b37a0552e45dd7880fb347d4c3aa1206bc735b87cd2250a61178236074c3",
-      "size_bytes": 718077804
+      "id": "ardy-minilm-core40-browser-v1",
+      "manifest_sha256": "1c073d6ddfc5f5258c35eb0987bc674c9fa62c10bf6bf0e2ecb00f638defc7d0",
+      "raw_size_bytes": 775578788,
+      "revision": "82059e1b3e8c861d1f11128184c58ce17a62795e0e24289a295c0a70cd78befe",
+      "transport_size_bytes": 717533184
     },
-    "saved_bytes": 33301667,
-    "saved_fraction": 0.046376126395350936
+    "transport_saved_bytes": 33312770,
+    "transport_saved_fraction": 0.04642680051993242
   },
   "prompt_manifest": {
     "filename": "prompts-core40-timeline.jsonl",
@@ -576,7 +582,7 @@
       "version": "3.11.15"
     }
   },
-  "source_report_schema_version": 2,
+  "source_report_schema_version": 3,
   "text_conditions": {
     "cosine_mean": 1.0,
     "cosine_min": 0.9999998807907104,

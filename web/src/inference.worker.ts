@@ -10,7 +10,10 @@ import {
   type RuntimeGenerationResult,
   type RuntimeProgress,
 } from "./runtime/engine";
-import { loadModelPackFromTarGzip } from "./runtime/model-pack";
+import {
+  loadModelAssets,
+  markModelCacheComplete,
+} from "./runtime/model-assets";
 import { assertWebGpuAvailable } from "./runtime/sessions";
 import {
   parseWorkerCommand,
@@ -141,7 +144,7 @@ function capabilitiesFor(selectedRuntime: BrowserArdyRuntime): RuntimeCapabiliti
     richMotionOutputs,
     // The UI applies a deterministic browser-native correction pass after
     // each completed decode request. This is distinct from ARDY's optional native C++
-    // correction library, which is intentionally not embedded in the pack.
+    // correction library, which is intentionally not embedded in the model files.
     motionCorrection: true,
   };
 }
@@ -242,11 +245,11 @@ function motionTransfers(
   return [...buffers];
 }
 
-function load(command: Extract<WorkerCommand, { type: "loadModelPack" }>): void {
+function load(command: Extract<WorkerCommand, { type: "loadModel" }>): void {
   startOperation(command.requestId, "loading", async (operation) => {
     await assertWebGpuAvailable();
-    const pack = await loadModelPackFromTarGzip(
-      command.archive,
+    const assets = await loadModelAssets(
+      command.baseUrl,
       (progress) => postProgress(command.requestId, progress),
       operation.controller.signal,
     );
@@ -255,10 +258,16 @@ function load(command: Extract<WorkerCommand, { type: "loadModelPack" }>): void 
       runtime = null;
       generationSession = null;
     }
-    const loaded = await BrowserArdyRuntime.create(pack, {
+    const loaded = await BrowserArdyRuntime.create(assets, {
       signal: operation.controller.signal,
       onProgress: (progress) => postProgress(command.requestId, progress),
     });
+    try {
+      await markModelCacheComplete(assets);
+    } catch (error) {
+      await loaded.dispose();
+      throw error;
+    }
     runtime = loaded;
     const capabilities = capabilitiesFor(loaded);
     post({
@@ -267,6 +276,7 @@ function load(command: Extract<WorkerCommand, { type: "loadModelPack" }>): void 
       model: {
         id: loaded.manifest.model.id,
         variant: loaded.manifest.model.variant,
+        revision: loaded.manifest.model.revision,
         fps: loaded.manifest.dimensions.fps,
         minFrames: loaded.manifest.generation.min_frames,
         maxFrames: loaded.manifest.generation.max_frames,
@@ -322,7 +332,7 @@ function generate(command: Extract<WorkerCommand, { type: "generate" }>): void {
     post(
       serializeWorkerError(
         command.requestId,
-        new Error("Load a model pack before generating motion"),
+        new Error("Load the model before generating motion"),
       ),
     );
     return;
@@ -389,7 +399,7 @@ function resetSession(
     throw new Error(`Worker is already ${active.kind}`);
   }
   if (runtime === null) {
-    throw new Error("Load a model pack before resetting the generation session");
+    throw new Error("Load the model before resetting the generation session");
   }
   const options = {
     seed: command.seed,
@@ -416,7 +426,7 @@ function restoreContinuation(
     throw new Error(`Worker is already ${active.kind}`);
   }
   if (runtime === null) {
-    throw new Error("Load a model pack before restoring a continuation");
+    throw new Error("Load the model before restoring a continuation");
   }
   if (generationSession === null) {
     generationSession = runtime.createGenerationSession({
@@ -507,7 +517,7 @@ port.addEventListener("message", (message) => {
     return;
   }
   switch (command.type) {
-    case "loadModelPack":
+    case "loadModel":
       load(command);
       break;
     case "generate":

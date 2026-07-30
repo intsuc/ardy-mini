@@ -13,6 +13,74 @@ export interface UiAction {
   ) => () => void
 }
 
+export type ModelCacheState =
+  | "checking"
+  | "missing"
+  | "downloading"
+  | "verifying"
+  | "ready"
+  | "clearing"
+  | "error"
+
+export type ModelRuntimeState =
+  | "idle"
+  | "loading"
+  | "ready"
+  | "error"
+
+export type ModelCacheErrorOperation = "download" | "clear"
+
+export interface ModelUiState {
+  cache: ModelCacheState
+  errorOperation: ModelCacheErrorOperation | null
+  runtime: ModelRuntimeState
+  cachedFiles: number
+  totalFiles: number
+  cachedBytes: number
+  totalBytes: number
+  downloadDialogOpen: boolean
+}
+
+interface ModelAssetProgress {
+  cachedFiles: number
+  totalFiles: number
+  cachedBytes: number
+  totalBytes: number
+}
+
+export type ModelUiEvent =
+  | { type: "reset" }
+  | { type: "cache-check-started" }
+  | ({
+      type: "cache-missing"
+      showDownloadPrompt: boolean
+    } & ModelAssetProgress)
+  | { type: "download-prompt-opened" }
+  | { type: "download-prompt-dismissed" }
+  | { type: "download-started" }
+  | ({ type: "download-progress" } & ModelAssetProgress)
+  | { type: "verification-started" }
+  | ({
+      type: "cache-ready"
+    } & Pick<ModelAssetProgress, "totalFiles" | "totalBytes">)
+  | { type: "clear-started" }
+  | { type: "cache-cleared" }
+  | {
+      type: "cache-error"
+      operation: ModelCacheErrorOperation
+    }
+  | { type: "runtime-loading" }
+  | { type: "runtime-ready" }
+  | { type: "runtime-idle" }
+  | { type: "runtime-error" }
+
+export interface ModelUiControl {
+  readonly id: string
+  readonly getSnapshot: () => ModelUiState
+  readonly subscribe: (listener: StateListener) => () => void
+  readonly dispatch: (event: ModelUiEvent) => void
+}
+
 export interface ExternalControl<State, Value> {
   readonly id: string
   readonly getSnapshot: () => State
@@ -84,6 +152,200 @@ function createUiAction(): UiAction {
       }
       signal?.addEventListener("abort", unsubscribe, { once: true })
       return unsubscribe
+    },
+  }
+}
+
+const INITIAL_MODEL_UI_STATE: ModelUiState = Object.freeze({
+  cache: "checking",
+  errorOperation: null,
+  runtime: "idle",
+  cachedFiles: 0,
+  totalFiles: 0,
+  cachedBytes: 0,
+  totalBytes: 0,
+  downloadDialogOpen: false,
+})
+
+function finiteWholeNumber(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
+}
+
+function modelAssetProgress(
+  progress: ModelAssetProgress
+): Pick<
+  ModelUiState,
+  "cachedBytes" | "cachedFiles" | "totalBytes" | "totalFiles"
+> {
+  const totalFiles = finiteWholeNumber(progress.totalFiles)
+  const totalBytes = finiteWholeNumber(progress.totalBytes)
+  return {
+    totalFiles,
+    totalBytes,
+    cachedFiles: Math.min(
+      finiteWholeNumber(progress.cachedFiles),
+      totalFiles
+    ),
+    cachedBytes: Math.min(
+      finiteWholeNumber(progress.cachedBytes),
+      totalBytes
+    ),
+  }
+}
+
+function reduceModelUiState(
+  state: ModelUiState,
+  event: ModelUiEvent
+): ModelUiState {
+  switch (event.type) {
+    case "reset":
+      return INITIAL_MODEL_UI_STATE
+    case "cache-check-started":
+      return {
+        ...state,
+        cache: "checking",
+        errorOperation: null,
+        cachedFiles: 0,
+        cachedBytes: 0,
+        downloadDialogOpen: false,
+      }
+    case "cache-missing": {
+      const progress = modelAssetProgress(event)
+      return {
+        ...state,
+        ...progress,
+        cache: "missing",
+        errorOperation: null,
+        downloadDialogOpen: event.showDownloadPrompt,
+      }
+    }
+    case "download-prompt-opened":
+      if (
+        state.downloadDialogOpen ||
+        (state.cache !== "missing" &&
+          !(
+            state.cache === "error" &&
+            state.errorOperation === "download"
+          ))
+      ) {
+        return state
+      }
+      return { ...state, downloadDialogOpen: true }
+    case "download-prompt-dismissed":
+      if (!state.downloadDialogOpen) return state
+      return { ...state, downloadDialogOpen: false }
+    case "download-started":
+      if (
+        state.cache !== "missing" &&
+        !(state.cache === "error" && state.errorOperation === "download")
+      ) {
+        return state
+      }
+      return {
+        ...state,
+        cache: "downloading",
+        errorOperation: null,
+        downloadDialogOpen: false,
+      }
+    case "download-progress":
+      if (state.cache !== "downloading") return state
+      return {
+        ...state,
+        ...modelAssetProgress(event),
+      }
+    case "verification-started":
+      if (state.cache !== "downloading") return state
+      return {
+        ...state,
+        cache: "verifying",
+        cachedFiles: state.totalFiles,
+        cachedBytes: state.totalBytes,
+      }
+    case "cache-ready": {
+      const totalFiles = finiteWholeNumber(event.totalFiles)
+      const totalBytes = finiteWholeNumber(event.totalBytes)
+      return {
+        ...state,
+        cache: "ready",
+        errorOperation: null,
+        cachedFiles: totalFiles,
+        totalFiles,
+        cachedBytes: totalBytes,
+        totalBytes,
+        downloadDialogOpen: false,
+      }
+    }
+    case "clear-started":
+      if (
+        state.cachedBytes === 0 ||
+        state.cache === "checking" ||
+        state.cache === "downloading" ||
+        state.cache === "verifying" ||
+        state.cache === "clearing"
+      ) {
+        return state
+      }
+      return {
+        ...state,
+        cache: "clearing",
+        errorOperation: null,
+        downloadDialogOpen: false,
+      }
+    case "cache-cleared":
+      if (state.cache !== "clearing") return state
+      return {
+        ...state,
+        cache: "missing",
+        errorOperation: null,
+        cachedFiles: 0,
+        cachedBytes: 0,
+        downloadDialogOpen: false,
+      }
+    case "cache-error":
+      if (
+        (event.operation === "download" &&
+          state.cache === "clearing") ||
+        (event.operation === "clear" && state.cache !== "clearing")
+      ) {
+        return state
+      }
+      return {
+        ...state,
+        cache: "error",
+        errorOperation: event.operation,
+        downloadDialogOpen: false,
+      }
+    case "runtime-loading":
+      if (state.runtime === "loading") return state
+      return { ...state, runtime: "loading" }
+    case "runtime-ready":
+      if (state.runtime === "ready") return state
+      return { ...state, runtime: "ready" }
+    case "runtime-idle":
+      if (state.runtime === "idle") return state
+      return { ...state, runtime: "idle" }
+    case "runtime-error":
+      if (state.runtime === "error") return state
+      return { ...state, runtime: "error" }
+  }
+}
+
+function createModelUiControl(): ModelUiControl {
+  let state = INITIAL_MODEL_UI_STATE
+  const listeners = new Set<StateListener>()
+
+  return {
+    id: "model-cache",
+    getSnapshot: () => state,
+    subscribe: (listener) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    dispatch: (event) => {
+      const next = Object.freeze(reduceModelUiState(state, event))
+      if (next === state) return
+      state = next
+      listeners.forEach((listener) => listener())
     },
   }
 }
@@ -247,13 +509,22 @@ function createProgressControl(id: string) {
   )
 }
 
-export const modelProgressControl =
-  createProgressControl("model-progressbar")
-
 export const generationProgressControl =
   createProgressControl("generation-progressbar")
 
-export const removeSavedModelAction = createUiAction()
+export const modelUiControl = createModelUiControl()
+
+export const modelDownloadAction = createUiAction()
+
+export const clearModelCacheAction = createUiAction()
+
+export function useModelUiState(): ModelUiState {
+  return useSyncExternalStore(
+    modelUiControl.subscribe,
+    modelUiControl.getSnapshot,
+    modelUiControl.getSnapshot
+  )
+}
 
 export function useControlState<State, Value>(
   control: ExternalControl<State, Value>

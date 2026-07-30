@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 # SPDX-License-Identifier: Apache-2.0
-"""Export the mixed-FP16 MiniLM Core40 model pack used by the browser app."""
+"""Export the mixed-FP16 MiniLM Core40 files used by the browser app."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-from ardy.browser import BrowserExportConfig, export_browser_model_pack
+from ardy.browser import BrowserExportConfig, export_browser_model_files
 
 
 def parse_args() -> argparse.Namespace:
@@ -15,7 +15,7 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Export the MiniLM condition encoder, text-conditioned ARDY "
             "denoiser, and structured motion decoder as a mixed-FP16 model "
-            "pack for ONNX Runtime Web."
+            "directory for ONNX Runtime Web."
         )
     )
     parser.add_argument(
@@ -31,18 +31,21 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing the separately obtained ARDY-Core-RP-20FPS-Horizon40 checkpoint.",
     )
     parser.add_argument(
-        "--output",
+        "--output-directory",
         type=Path,
-        default=Path("artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz"),
-        help="Destination .tar.gz model-pack file (kept under ignored artifacts/ by default).",
+        default=Path("artifacts/browser/ardy-minilm-core40-browser-v1"),
+        help=(
+            "Destination for model.json.gz and individually compressed assets "
+            "(kept under ignored artifacts/ by default)."
+        ),
     )
     parser.add_argument(
-        "--fp32-reference-output",
+        "--fp32-reference-output-directory",
         type=Path,
         default=None,
         help=(
-            "Optional destination .tar.gz for the matching original-FP32 "
-            "reference pack used by scripts/evaluate_browser_fp16.py."
+            "Optional destination for matching original-FP32 reference files "
+            "used by scripts/evaluate_browser_fp16.py."
         ),
     )
     parser.add_argument(
@@ -81,10 +84,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    archive_path = export_browser_model_pack(
+    output_directory = export_browser_model_files(
         BrowserExportConfig(
-            output_path=args.output,
-            fp32_reference_output_path=args.fp32_reference_output,
+            output_directory=args.output_directory,
+            fp32_reference_output_directory=(
+                args.fp32_reference_output_directory
+            ),
             minilm_artifact=args.minilm_artifact,
             checkpoints_dir=args.checkpoints_dir,
             model=args.model,
@@ -94,9 +99,12 @@ def main() -> None:
             verify=not args.skip_verify,
         )
     )
-    print(f"Browser model pack exported: {archive_path}")
-    if args.fp32_reference_output is not None:
-        print(f"FP32 reference model pack exported: {args.fp32_reference_output}")
+    print(f"Browser model files exported: {output_directory}")
+    if args.fp32_reference_output_directory is not None:
+        print(
+            "FP32 reference model files exported: "
+            f"{args.fp32_reference_output_directory}"
+        )
 
 
 if __name__ == "__main__":

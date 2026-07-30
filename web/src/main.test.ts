@@ -10,7 +10,6 @@ import {
   cameraMovementForCodes,
   formatBytes,
   formatTime,
-  isModelPackArchive,
   isVrmFile,
   livePromptBranchFrame,
   resolveGenerationProgressState,
@@ -105,18 +104,6 @@ describe("continuous prompt actions", () => {
     expect(livePromptBranchFrame(12.9, 80)).toBe(32);
     expect(livePromptBranchFrame(75, 80)).toBe(80);
     expect(livePromptBranchFrame(-5, 80)).toBe(20);
-  });
-});
-
-describe("model-pack archive selection", () => {
-  it("accepts only a non-empty .tar.gz file", () => {
-    expect(
-      isModelPackArchive(
-        new File(["gzip bytes"], "ardy-minilm-core40-browser-v1.tar.gz"),
-      ),
-    ).toBe(true);
-    expect(isModelPackArchive(new File(["x"], "legacy-pack.zip"))).toBe(false);
-    expect(isModelPackArchive(new File([], "empty.tar.gz"))).toBe(false);
   });
 });
 

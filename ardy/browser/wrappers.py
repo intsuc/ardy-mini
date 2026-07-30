@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 # SPDX-License-Identifier: Apache-2.0
-"""Small, explicit ONNX entry points used by the browser model pack.
+"""Small, explicit ONNX entry points used by the browser model files.
 
 The regular ARDY Python runtime owns classifier-free guidance, diffusion,
 autoregressive state, root recentering, decoding, and skeleton conversion.

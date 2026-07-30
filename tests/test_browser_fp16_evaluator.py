@@ -5,11 +5,10 @@
 from __future__ import annotations
 
 import copy
+import gzip
 import hashlib
-import io
 import json
 import math
-import tarfile
 from pathlib import Path
 
 import numpy as np
@@ -17,19 +16,19 @@ import pytest
 
 from ardy.browser.precision import MIXED_FP16_POLICIES, MIXED_FP16_POLICY_VERSION
 from scripts.evaluate_browser_fp16 import (
-    PackRuntime,
+    ModelFilesRuntime,
     PortableRandom,
     PreparedHistory,
     RolloutState,
     _build_public_report,
-    _canonical_pack_path,
+    _canonical_model_path,
     _capture_file_identity,
-    _extract_pack,
     _make_window,
     _prepare_history,
+    _prepare_model_files,
     _recenter_and_requantize,
     _validate_common_manifest,
-    _validate_compatible_packs,
+    _validate_compatible_models,
     _validate_json_finite,
     _validate_public_report,
     _verify_file_identity,
@@ -183,7 +182,7 @@ _CANDIDATE_GRAPHS = {
 }
 
 
-def _pack_runtime(directory: Path, *, candidate: bool) -> PackRuntime:
+def _model_runtime(directory: Path, *, candidate: bool) -> ModelFilesRuntime:
     tokenizer_bytes = b'{"version":"test"}'
     config_bytes = b'{"model_max_length":128}'
     tokenizer_dir = directory / "tokenizer"
@@ -199,9 +198,9 @@ def _pack_runtime(directory: Path, *, candidate: bool) -> PackRuntime:
     for graph_name, relative_path in graph_paths.items():
         (directory / relative_path).write_bytes(graph_bytes[graph_name])
     manifest = {
-        "format": "ardy-browser-model-pack",
-        "schema_version": 2,
-        "model": {"id": "test", "variant": "test"},
+        "format": "ardy-browser-model-files",
+        "schema_version": 1,
+        "model": {"id": "test", "revision": "1" * 64, "variant": "test"},
         "files": {
             "tokenizer/tokenizer.json": {
                 "sha256": _digest(tokenizer_bytes),
@@ -247,7 +246,7 @@ def _pack_runtime(directory: Path, *, candidate: bool) -> PackRuntime:
         }
     else:
         manifest["precision"] = {"format": "fp32"}
-    return PackRuntime(
+    return ModelFilesRuntime(
         directory=directory,
         manifest=manifest,
         text_encoder=None,
@@ -256,11 +255,11 @@ def _pack_runtime(directory: Path, *, candidate: bool) -> PackRuntime:
     )
 
 
-def test_pack_compatibility_allows_only_precision_metadata(tmp_path: Path):
-    reference = _pack_runtime(tmp_path / "reference", candidate=False)
-    candidate = _pack_runtime(tmp_path / "candidate", candidate=True)
+def test_model_compatibility_allows_only_precision_metadata(tmp_path: Path):
+    reference = _model_runtime(tmp_path / "reference", candidate=False)
+    candidate = _model_runtime(tmp_path / "candidate", candidate=True)
 
-    validation = _validate_compatible_packs(reference, candidate)
+    validation = _validate_compatible_models(reference, candidate)
     assert validation["candidate_policy_version"] == MIXED_FP16_POLICY_VERSION
     assert validation["identity_graphs_byte_identical"] == [
         "denoiser",
@@ -270,7 +269,7 @@ def test_pack_compatibility_allows_only_precision_metadata(tmp_path: Path):
     incompatible = copy.deepcopy(candidate)
     incompatible.manifest["recenter"]["root_mean"][0] = 1
     with pytest.raises(ValueError, match=r"non-precision contracts differ.*recenter\.root_mean"):
-        _validate_compatible_packs(reference, incompatible)
+        _validate_compatible_models(reference, incompatible)
 
     incompatible = copy.deepcopy(candidate)
     incompatible.manifest["runtime"]["required_webgpu_features"] = []
@@ -278,7 +277,7 @@ def test_pack_compatibility_allows_only_precision_metadata(tmp_path: Path):
         ValueError,
         match=r"non-precision contracts differ.*runtime\.required_webgpu_features",
     ):
-        _validate_compatible_packs(reference, incompatible)
+        _validate_compatible_models(reference, incompatible)
 
 
 @pytest.mark.parametrize(
@@ -310,26 +309,26 @@ def test_pack_compatibility_allows_only_precision_metadata(tmp_path: Path):
         ),
     ],
 )
-def test_pack_compatibility_rejects_nonproduction_precision_contract(
+def test_model_compatibility_rejects_nonproduction_precision_contract(
     tmp_path: Path,
     mutation,
     message: str,
 ):
-    reference = _pack_runtime(tmp_path / "reference", candidate=False)
-    candidate = _pack_runtime(tmp_path / "candidate", candidate=True)
+    reference = _model_runtime(tmp_path / "reference", candidate=False)
+    candidate = _model_runtime(tmp_path / "candidate", candidate=True)
     mutation(candidate.manifest)
 
     with pytest.raises(ValueError, match=message):
-        _validate_compatible_packs(reference, candidate)
+        _validate_compatible_models(reference, candidate)
 
 
 @pytest.mark.parametrize("graph_name", ["text_encoder", "denoiser"])
-def test_pack_compatibility_rejects_nonidentical_identity_graph(
+def test_model_compatibility_rejects_nonidentical_identity_graph(
     tmp_path: Path,
     graph_name: str,
 ):
-    reference = _pack_runtime(tmp_path / "reference", candidate=False)
-    candidate = _pack_runtime(tmp_path / "candidate", candidate=True)
+    reference = _model_runtime(tmp_path / "reference", candidate=False)
+    candidate = _model_runtime(tmp_path / "candidate", candidate=True)
     tampered = f"quantized {graph_name}".encode()
     graph_path = candidate.manifest["graphs"][graph_name]["model"]
     (candidate.directory / graph_path).write_bytes(tampered)
@@ -337,7 +336,7 @@ def test_pack_compatibility_rejects_nonidentical_identity_graph(
     candidate.manifest["precision"]["graphs"][graph_name]["output_size_bytes"] = len(tampered)
 
     with pytest.raises(ValueError, match=rf"{graph_name} must be byte-identical"):
-        _validate_compatible_packs(reference, candidate)
+        _validate_compatible_models(reference, candidate)
 
 
 def _metric_output(offset: float, contacts: bool) -> dict[str, np.ndarray]:
@@ -384,7 +383,7 @@ def test_worst_case_report_attributes_prompt_seed_and_window():
 
 def _detailed_report_with_private_attribution() -> dict:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "method": {
             "prompt_count": 1,
             "prompt_split": "test",
@@ -413,9 +412,21 @@ def _detailed_report_with_private_attribution() -> dict:
                 },
             },
         },
-        "packs": {
-            "reference": {"file": "reference.tar.gz", "sha256": "4" * 64},
-            "candidate": {"file": "candidate.tar.gz", "sha256": "5" * 64},
+        "models": {
+            "reference": {
+                "id": "test",
+                "revision": "4" * 64,
+                "manifest_sha256": "5" * 64,
+                "transport_size_bytes": 100,
+                "raw_size_bytes": 200,
+            },
+            "candidate": {
+                "id": "test",
+                "revision": "4" * 64,
+                "manifest_sha256": "6" * 64,
+                "transport_size_bytes": 90,
+                "raw_size_bytes": 180,
+            },
         },
         "contract_validation": {"non_precision_contract_equal": True},
         "text_conditions": {"rmse": 0.0},
@@ -451,7 +462,8 @@ def test_public_report_is_allowlisted_aggregate_without_prompt_text_or_paths(
 
     assert printed == public
     assert public["format"] == "ardy-browser-fp16-aggregate"
-    assert public["source_report_schema_version"] == 2
+    assert public["format_version"] == 2
+    assert public["source_report_schema_version"] == 3
     assert "worst_cases" not in public
     assert public["runtime_environment"]["python"]["implementation"] == "CPython"
     assert "private Timeline prompt" in detailed_output.read_text(encoding="utf-8")
@@ -464,12 +476,12 @@ def test_public_report_is_allowlisted_aggregate_without_prompt_text_or_paths(
 
 def test_public_report_rejects_absolute_paths_and_requires_provenance():
     detailed = _detailed_report_with_private_attribution()
-    detailed["packs"]["reference"]["file"] = "C:\\private\\reference.tar.gz"
+    detailed["models"]["reference"]["id"] = "C:\\private\\reference"
     with pytest.raises(ValueError, match="absolute local path"):
         _build_public_report(detailed)
 
     public = _build_public_report(_detailed_report_with_private_attribution())
-    public["packs"]["candidate"]["file"] = "/private/candidate.tar.gz"
+    public["models"]["candidate"]["id"] = "/private/candidate"
     with pytest.raises(ValueError, match="absolute local path"):
         _validate_public_report(public)
 
@@ -490,87 +502,51 @@ def test_public_report_rejects_absolute_paths_and_requires_provenance():
         "graphs\\decoder.onnx",
     ],
 )
-def test_pack_paths_must_be_safe_canonical_posix(value: str):
+def test_model_paths_must_be_safe_canonical_posix(value: str):
     with pytest.raises(ValueError, match="safe canonical POSIX path"):
-        _canonical_pack_path(value, "test path")
+        _canonical_model_path(value, "test path")
 
 
-def _write_test_tar(path: Path, entries: list[tuple[str, bytes]]) -> None:
-    with tarfile.open(path, mode="w:gz", format=tarfile.USTAR_FORMAT) as archive:
-        for name, payload in entries:
-            info = tarfile.TarInfo(name)
-            info.size = len(payload)
-            archive.addfile(info, io.BytesIO(payload))
+def _gzip_bytes(payload: bytes) -> bytes:
+    return gzip.compress(payload, compresslevel=9, mtime=0)
 
 
-def test_pack_extraction_rejects_duplicate_and_traversal_members(tmp_path: Path):
-    duplicate = tmp_path / "duplicate.tar.gz"
-    _write_test_tar(
-        duplicate,
-        [
-            ("manifest.json", b"{}"),
-            ("manifest.json", b"{}"),
-        ],
-    )
-    identity = _capture_file_identity(duplicate)
-    with pytest.raises(ValueError, match="Duplicate"):
-        _extract_pack(
-            duplicate,
-            tmp_path / "duplicate-output",
-            expected_identity=identity,
-        )
-
-    traversal = tmp_path / "traversal.tar.gz"
-    _write_test_tar(
-        traversal,
-        [
-            ("manifest.json", b"{}"),
-            ("../outside.onnx", b"outside"),
-        ],
-    )
-    identity = _capture_file_identity(traversal)
-    with pytest.raises(ValueError, match="safe canonical POSIX path"):
-        _extract_pack(
-            traversal,
-            tmp_path / "traversal-output",
-            expected_identity=identity,
-        )
-    assert not (tmp_path / "outside.onnx").exists()
-
-
-def test_manifest_rejects_external_onnx_data_before_model_loading(tmp_path: Path):
-    directory = tmp_path / "pack"
-    tokenizer_dir = directory / "tokenizer"
-    tokenizer_dir.mkdir(parents=True)
-    payloads = {
-        "text.onnx": b"text",
-        "denoiser.onnx": b"denoiser",
-        "decoder.onnx": b"decoder",
-        "tokenizer/tokenizer.json": b"{}",
-        "tokenizer/tokenizer_config.json": b"{}",
-    }
+def _write_model_files_input(
+    directory: Path,
+    payloads: dict[str, bytes],
+    *,
+    mutate_manifest=None,
+) -> tuple[dict, bytes]:
+    directory.mkdir()
+    files = {}
     for relative_path, payload in payloads.items():
-        path = directory / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(payload)
+        transport_path = f"{relative_path}.gz"
+        compressed = _gzip_bytes(payload)
+        destination = directory / transport_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(compressed)
+        files[relative_path] = {
+            "sha256": _digest(payload),
+            "size_bytes": len(payload),
+            "transport": {
+                "path": transport_path,
+                "compression": "gzip",
+                "sha256": _digest(compressed),
+                "size_bytes": len(compressed),
+            },
+        }
     manifest = {
-        "format": "ardy-browser-model-pack",
-        "schema_version": 2,
-        "files": {
-            relative_path: {
-                "sha256": hashlib.sha256(payload).hexdigest(),
-                "size_bytes": len(payload),
-            }
-            for relative_path, payload in payloads.items()
+        "format": "ardy-browser-model-files",
+        "schema_version": 1,
+        "model": {
+            "id": "test-model",
+            "revision": "7" * 64,
+            "variant": "test",
         },
+        "files": files,
         "tokenizer": {"directory": "tokenizer", "max_length": 128},
         "graphs": {
-            "text_encoder": {
-                "model": "text.onnx",
-                "external_data": [
-                    {"path": "../../private.bin", "file": "private.bin"}
-                ],
-            },
+            "text_encoder": {"model": "text.onnx"},
             "denoiser": {"model": "denoiser.onnx"},
             "decoder": {"model": "decoder.onnx"},
         },
@@ -580,17 +556,159 @@ def test_manifest_rejects_external_onnx_data_before_model_loading(tmp_path: Path
             "text_only": True,
         },
     }
-    (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    if mutate_manifest is not None:
+        mutate_manifest(manifest)
+    encoded = (
+        json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + "\n"
+    ).encode()
+    (directory / "model.json.gz").write_bytes(_gzip_bytes(encoded))
+    return manifest, encoded
+
+
+def _model_payloads() -> dict[str, bytes]:
+    return {
+        "text.onnx": b"text",
+        "denoiser.onnx": b"denoiser",
+        "decoder.onnx": b"decoder",
+        "tokenizer/tokenizer.json": b"{}",
+        "tokenizer/tokenizer_config.json": b'{"model_max_length":128}',
+    }
+
+
+def test_model_files_are_verified_and_decompressed_with_portable_identity(
+    tmp_path: Path,
+):
+    source = tmp_path / "source"
+    payloads = _model_payloads()
+    manifest, encoded_manifest = _write_model_files_input(source, payloads)
+
+    prepared = _prepare_model_files(source, tmp_path / "prepared")
+
+    assert prepared.manifest == manifest
+    assert prepared.identity.to_report() == {
+        "id": "test-model",
+        "revision": "7" * 64,
+        "manifest_sha256": _digest(encoded_manifest),
+        "transport_size_bytes": (
+            (source / "model.json.gz").stat().st_size
+            + sum(
+                record["transport"]["size_bytes"]
+                for record in manifest["files"].values()
+            )
+        ),
+        "raw_size_bytes": len(encoded_manifest) + sum(map(len, payloads.values())),
+    }
+    for relative_path, payload in payloads.items():
+        assert (prepared.directory / relative_path).read_bytes() == payload
+
+
+def test_compressed_manifest_must_be_valid_unique_finite_json(tmp_path: Path):
+    invalid_gzip = tmp_path / "invalid-gzip"
+    invalid_gzip.mkdir()
+    (invalid_gzip / "model.json.gz").write_bytes(b"not gzip")
+    with pytest.raises(ValueError, match="valid gzip"):
+        _prepare_model_files(invalid_gzip, tmp_path / "invalid-gzip-output")
+
+    duplicate_key = tmp_path / "duplicate-key"
+    duplicate_key.mkdir()
+    (duplicate_key / "model.json.gz").write_bytes(
+        _gzip_bytes(b'{"format":"first","format":"second"}')
+    )
+    with pytest.raises(ValueError, match="duplicate key"):
+        _prepare_model_files(duplicate_key, tmp_path / "duplicate-key-output")
+
+    nonfinite = tmp_path / "nonfinite"
+    nonfinite.mkdir()
+    (nonfinite / "model.json.gz").write_bytes(
+        _gzip_bytes(b'{"format":"ardy-browser-model-files","value":NaN}')
+    )
+    with pytest.raises(ValueError, match="must be finite"):
+        _prepare_model_files(nonfinite, tmp_path / "nonfinite-output")
+
+
+def test_model_files_reject_unsafe_duplicate_and_undeclared_transports(
+    tmp_path: Path,
+):
+    unsafe = tmp_path / "unsafe"
+    _write_model_files_input(
+        unsafe,
+        _model_payloads(),
+        mutate_manifest=lambda manifest: manifest["files"]["decoder.onnx"][
+            "transport"
+        ].__setitem__("path", "../decoder.onnx.gz"),
+    )
+    with pytest.raises(ValueError, match="safe canonical POSIX path"):
+        _prepare_model_files(unsafe, tmp_path / "unsafe-output")
+
+    duplicate = tmp_path / "duplicate"
+    _write_model_files_input(
+        duplicate,
+        _model_payloads(),
+        mutate_manifest=lambda manifest: manifest["files"]["decoder.onnx"][
+            "transport"
+        ].__setitem__(
+            "path",
+            manifest["files"]["denoiser.onnx"]["transport"]["path"],
+        )
+    )
+    with pytest.raises(ValueError, match="Duplicate model transport path"):
+        _prepare_model_files(duplicate, tmp_path / "duplicate-output")
+
+    extra = tmp_path / "extra"
+    _write_model_files_input(extra, _model_payloads())
+    (extra / "undeclared.gz").write_bytes(_gzip_bytes(b"undeclared"))
+    with pytest.raises(ValueError, match="do not match manifest transports"):
+        _prepare_model_files(extra, tmp_path / "extra-output")
+
+
+@pytest.mark.parametrize(
+    ("field_path", "value", "message"),
+    [
+        (("transport", "size_bytes"), 1, "Compressed size mismatch"),
+        (("transport", "sha256"), "0" * 64, "Compressed SHA-256 mismatch"),
+        (("size_bytes",), 1, "Decompressed size"),
+        (("sha256",), "0" * 64, "Decompressed SHA-256 mismatch"),
+    ],
+)
+def test_model_files_reject_declared_size_and_hash_mismatches(
+    tmp_path: Path,
+    field_path: tuple[str, ...],
+    value,
+    message: str,
+):
+    def mutate(manifest: dict) -> None:
+        record = manifest["files"]["decoder.onnx"]
+        for key in field_path[:-1]:
+            record = record[key]
+        record[field_path[-1]] = value
+
+    source = tmp_path / "source"
+    _write_model_files_input(source, _model_payloads(), mutate_manifest=mutate)
+    with pytest.raises(ValueError, match=message):
+        _prepare_model_files(source, tmp_path / "output")
+
+
+def test_manifest_rejects_external_onnx_data_before_model_loading(tmp_path: Path):
+    source = tmp_path / "source"
+    _write_model_files_input(
+        source,
+        _model_payloads(),
+        mutate_manifest=lambda manifest: manifest["graphs"]["text_encoder"].__setitem__(
+            "external_data",
+            [{"path": "../../private.bin", "file": "private.bin"}],
+        ),
+    )
+    prepared = _prepare_model_files(source, tmp_path / "prepared")
 
     with pytest.raises(ValueError, match="must not declare external ONNX data"):
         _validate_common_manifest(
-            directory,
-            {"manifest.json", *payloads},
+            prepared.directory,
+            prepared.manifest,
         )
 
 
 def test_file_identity_recheck_detects_mutation(tmp_path: Path):
-    path = tmp_path / "pack.tar.gz"
+    path = tmp_path / "model.json.gz"
     path.write_bytes(b"first")
     identity = _capture_file_identity(path)
     path.write_bytes(b"second")
@@ -614,10 +732,10 @@ def test_reports_reject_nonfinite_numbers_and_never_write_nan(
     assert not output.exists()
 
 
-def test_reference_pack_must_explicitly_declare_fp32(tmp_path: Path):
-    reference = _pack_runtime(tmp_path / "reference", candidate=False)
-    candidate = _pack_runtime(tmp_path / "candidate", candidate=True)
+def test_reference_model_must_explicitly_declare_fp32(tmp_path: Path):
+    reference = _model_runtime(tmp_path / "reference", candidate=False)
+    candidate = _model_runtime(tmp_path / "candidate", candidate=True)
     reference.manifest.pop("precision")
 
     with pytest.raises(ValueError, match="precision.format='fp32'"):
-        _validate_compatible_packs(reference, candidate)
+        _validate_compatible_models(reference, candidate)

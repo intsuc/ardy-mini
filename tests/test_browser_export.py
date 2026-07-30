@@ -5,10 +5,10 @@
 from __future__ import annotations
 
 import copy
+import gzip
 import hashlib
 import json
 import os
-import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
@@ -18,14 +18,18 @@ import torch
 from torch import nn
 
 from ardy.browser.export import (
+    BROWSER_MODEL_FILES_FORMAT,
+    BROWSER_MODEL_FILES_SCHEMA_VERSION,
     BrowserExportConfig,
     _build_fp32_reference_payload,
     _graph_contracts,
     _local_checkpoint_identity,
-    _publish_archive_set,
+    _model_revision,
+    _publish_directory_set,
     _specialize_denoiser_position_tables,
     _validate_config,
-    _write_deterministic_tar_gz,
+    _write_model_files_directory,
+    export_browser_model_files,
 )
 from ardy.browser.wrappers import (
     BrowserMiniLMEncoder,
@@ -299,75 +303,129 @@ def test_browser_position_tables_are_trimmed_without_changing_reachable_values()
     assert body.motion_token_embedding.pe.shape == (5, 2)
 
 
-def test_browser_archive_is_reproducible_ustar_with_root_level_members(tmp_path):
+def test_browser_model_files_are_reproducible_and_only_keep_compressed_assets(
+    tmp_path: Path,
+):
     source = tmp_path / "source"
     tokenizer = source / "tokenizer"
     tokenizer.mkdir(parents=True)
-    manifest = source / "manifest.json"
     model = source / "denoiser.onnx"
     tokenizer_json = tokenizer / "tokenizer.json"
-    manifest.write_text('{"schema_version":2}\n', encoding="utf-8")
     model.write_bytes(b"onnx payload")
     tokenizer_json.write_text("{}\n", encoding="utf-8")
-    members = [tokenizer_json, model, manifest]
-    first = tmp_path / "first.tar.gz"
-    second = tmp_path / "second.tar.gz"
+    payloads = [tokenizer_json, model]
+    manifest = {
+        "format": BROWSER_MODEL_FILES_FORMAT,
+        "schema_version": BROWSER_MODEL_FILES_SCHEMA_VERSION,
+        "model": {"revision": "1" * 64},
+        "files": {
+            path.relative_to(source).as_posix(): {
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "size_bytes": path.stat().st_size,
+            }
+            for path in payloads
+        },
+    }
+    first = tmp_path / "first"
+    second = tmp_path / "second"
 
-    _write_deterministic_tar_gz(source, members, first)
-    _write_deterministic_tar_gz(source, members, second)
+    _write_model_files_directory(
+        source_directory=source,
+        payload_paths=payloads,
+        manifest=manifest,
+        output_directory=first,
+    )
+    _write_model_files_directory(
+        source_directory=source,
+        payload_paths=list(reversed(payloads)),
+        manifest=manifest,
+        output_directory=second,
+    )
 
-    assert first.read_bytes() == second.read_bytes()
-    assert first.stat().st_mode & 0o777 == 0o644
-    with tarfile.open(first, mode="r:gz") as archive:
-        infos = archive.getmembers()
-        assert [info.name for info in infos] == [
-            "manifest.json",
-            "denoiser.onnx",
-            "tokenizer/tokenizer.json",
-        ]
-        assert all(info.isfile() for info in infos)
-        assert all(info.mtime == 0 for info in infos)
-        assert all(info.uid == 0 and info.gid == 0 for info in infos)
-        assert all(info.mode == 0o644 for info in infos)
-        assert archive.extractfile("denoiser.onnx").read() == b"onnx payload"
+    first_paths = sorted(
+        path.relative_to(first).as_posix()
+        for path in first.rglob("*")
+        if path.is_file()
+    )
+    assert first_paths == [
+        "denoiser.onnx.gz",
+        "model.json.gz",
+        "tokenizer/tokenizer.json.gz",
+    ]
+    for relative_path in first_paths:
+        assert (first / relative_path).read_bytes() == (
+            second / relative_path
+        ).read_bytes()
+        assert (first / relative_path).stat().st_mode & 0o777 == 0o644
+
+    finalized = json.loads(
+        gzip.decompress((first / "model.json.gz").read_bytes()).decode("utf-8")
+    )
+    assert finalized["format"] == "ardy-browser-model-files"
+    assert finalized["schema_version"] == 1
+    for relative_path, source_path in (
+        ("denoiser.onnx", model),
+        ("tokenizer/tokenizer.json", tokenizer_json),
+    ):
+        compressed = first / f"{relative_path}.gz"
+        assert compressed.read_bytes()[:2] == b"\x1f\x8b"
+        assert compressed.read_bytes()[4:8] == b"\0\0\0\0"
+        assert gzip.decompress(compressed.read_bytes()) == source_path.read_bytes()
+        record = finalized["files"][relative_path]
+        assert record["sha256"] == hashlib.sha256(
+            source_path.read_bytes()
+        ).hexdigest()
+        assert record["size_bytes"] == source_path.stat().st_size
+        assert record["transport"] == {
+            "path": f"{relative_path}.gz",
+            "compression": "gzip",
+            "sha256": hashlib.sha256(compressed.read_bytes()).hexdigest(),
+            "size_bytes": compressed.stat().st_size,
+        }
+        assert not (first / relative_path).exists()
 
 
 def test_browser_export_validates_optional_fp32_reference_output(tmp_path: Path):
     artifact = tmp_path / "artifact"
     artifact.mkdir()
-    output = tmp_path / "mixed.tar.gz"
+    checkpoints = tmp_path / "checkpoints"
+    checkpoints.mkdir()
+    output = tmp_path / "mixed"
 
-    with pytest.raises(ValueError, match="different paths"):
+    with pytest.raises(ValueError, match="different directories"):
         _validate_config(
             BrowserExportConfig(
-                output_path=output,
-                fp32_reference_output_path=tmp_path / "." / output.name,
+                output_directory=output,
+                fp32_reference_output_directory=tmp_path / "." / output.name,
                 minilm_artifact=artifact,
+                checkpoints_dir=checkpoints,
             )
         )
 
-    with pytest.raises(ValueError, match=r"must end in \.tar\.gz"):
+    reference_file = tmp_path / "reference"
+    reference_file.write_text("not a directory", encoding="utf-8")
+    with pytest.raises(NotADirectoryError, match="FP32 reference output"):
         _validate_config(
             BrowserExportConfig(
-                output_path=output,
-                fp32_reference_output_path=tmp_path / "reference.tgz",
+                output_directory=output,
+                fp32_reference_output_directory=reference_file,
                 minilm_artifact=artifact,
+                checkpoints_dir=checkpoints,
             )
         )
 
-    reference_directory = tmp_path / "reference.tar.gz"
-    reference_directory.mkdir()
-    with pytest.raises(IsADirectoryError, match="FP32 reference output"):
+    with pytest.raises(ValueError, match="must not contain"):
         _validate_config(
             BrowserExportConfig(
-                output_path=output,
-                fp32_reference_output_path=reference_directory,
+                output_directory=output,
+                fp32_reference_output_directory=output / "reference",
                 minilm_artifact=artifact,
+                checkpoints_dir=checkpoints,
             )
         )
 
 
-def _without_pack_specific_metadata(manifest: dict) -> dict:
+def _without_file_specific_metadata(manifest: dict) -> dict:
     contract = copy.deepcopy(manifest)
     for key in ("files", "precision", "verification"):
         contract.pop(key, None)
@@ -401,9 +459,13 @@ def test_fp32_reference_payload_matches_candidate_contract_and_is_reproducible(
         graph_paths[graph_name] = graph_path
 
     candidate_manifest = {
-        "format": "ardy-browser-model-pack",
-        "schema_version": 2,
-        "model": {"id": "test-model", "variant": "test"},
+        "format": "ardy-browser-model-files",
+        "schema_version": 1,
+        "model": {
+            "id": "test-model",
+            "revision": "1" * 64,
+            "variant": "test",
+        },
         "files": {"mixed-only.onnx": {"sha256": "candidate", "size_bytes": 1}},
         "tokenizer": {"directory": "tokenizer", "max_length": 128},
         "graphs": {graph_name: {"model": f"{graph_name}.onnx"} for graph_name in graph_payloads},
@@ -424,16 +486,17 @@ def test_fp32_reference_payload_matches_candidate_contract_and_is_reproducible(
     }
     fp32_verification = {"backend": "onnxruntime-cpu", "status": "passed"}
 
-    members = _build_fp32_reference_payload(
+    reference_manifest, reference_payloads = _build_fp32_reference_payload(
         candidate_manifest=candidate_manifest,
         output_dir=reference_dir,
         graph_paths=graph_paths,
         tokenizer_paths=tokenizer_paths,
         verification=fp32_verification,
     )
-    reference_manifest = json.loads((reference_dir / "manifest.json").read_text(encoding="utf-8"))
 
-    assert _without_pack_specific_metadata(reference_manifest) == (_without_pack_specific_metadata(candidate_manifest))
+    assert _without_file_specific_metadata(reference_manifest) == (
+        _without_file_specific_metadata(candidate_manifest)
+    )
     assert reference_manifest["precision"] == {
         "format": "fp32",
         "public_io_dtype": "float32",
@@ -458,21 +521,36 @@ def test_fp32_reference_payload_matches_candidate_contract_and_is_reproducible(
             == hashlib.sha256(source.read_bytes()).hexdigest()
         )
 
-    first = tmp_path / "reference-first.tar.gz"
-    second = tmp_path / "reference-second.tar.gz"
-    _write_deterministic_tar_gz(reference_dir, members, first)
-    _write_deterministic_tar_gz(reference_dir, members, second)
+    first = tmp_path / "reference-first"
+    second = tmp_path / "reference-second"
+    _write_model_files_directory(
+        source_directory=reference_dir,
+        payload_paths=reference_payloads,
+        manifest=reference_manifest,
+        output_directory=first,
+    )
+    _write_model_files_directory(
+        source_directory=reference_dir,
+        payload_paths=reference_payloads,
+        manifest=reference_manifest,
+        output_directory=second,
+    )
 
-    assert first.read_bytes() == second.read_bytes()
-    with tarfile.open(first, mode="r:gz") as archive:
-        assert [member.name for member in archive.getmembers()] == [
-            "manifest.json",
-            "decoder.onnx",
-            "denoiser.onnx",
-            "text_encoder.onnx",
-            "tokenizer/tokenizer.json",
-            "tokenizer/tokenizer_config.json",
-        ]
+    assert (first / "model.json.gz").read_bytes() == (
+        second / "model.json.gz"
+    ).read_bytes()
+    assert sorted(
+        path.relative_to(first).as_posix()
+        for path in first.rglob("*")
+        if path.is_file()
+    ) == [
+        "decoder.onnx.gz",
+        "denoiser.onnx.gz",
+        "model.json.gz",
+        "text_encoder.onnx.gz",
+        "tokenizer/tokenizer.json.gz",
+        "tokenizer/tokenizer_config.json.gz",
+    ]
 
 
 def test_local_checkpoint_identity_binds_all_source_files_without_local_path(
@@ -509,18 +587,130 @@ def test_local_checkpoint_identity_binds_all_source_files_without_local_path(
     assert changed["fingerprint"] != identity["fingerprint"]
 
 
-def test_archive_set_publication_rolls_back_both_destinations_on_failure(
+def test_model_revision_is_canonical_and_changes_with_either_weight_identity():
+    minilm_fingerprint = "1" * 64
+    checkpoint_fingerprint = "2" * 64
+    checkpoint_identity = {"fingerprint": checkpoint_fingerprint}
+    identity = {
+        "format": "ardy-browser-model-identity",
+        "schema_version": 1,
+        "ardy_model": "ARDY-Core-RP-20FPS-Horizon40",
+        "ardy_checkpoint_fingerprint": checkpoint_fingerprint,
+        "minilm_artifact_fingerprint": minilm_fingerprint,
+    }
+    expected = hashlib.sha256(
+        json.dumps(
+            identity,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    actual = _model_revision(
+        resolved_model=identity["ardy_model"],
+        minilm_artifact_fingerprint=minilm_fingerprint,
+        checkpoint_identity=checkpoint_identity,
+    )
+
+    assert actual == expected
+    assert (
+        _model_revision(
+            resolved_model=identity["ardy_model"],
+            minilm_artifact_fingerprint="3" * 64,
+            checkpoint_identity=checkpoint_identity,
+        )
+        != actual
+    )
+    assert (
+        _model_revision(
+            resolved_model=identity["ardy_model"],
+            minilm_artifact_fingerprint=minilm_fingerprint,
+            checkpoint_identity={"fingerprint": "4" * 64},
+        )
+        != actual
+    )
+
+
+def test_export_browser_model_files_publishes_candidate_and_reference_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    output = tmp_path / "mixed"
+    reference_output = tmp_path / "fp32"
+    output.mkdir()
+    (output / "stale").write_text("old", encoding="utf-8")
+
+    def fake_working_export(_config, working_directory):
+        candidate = working_directory / "denoiser.onnx"
+        candidate.write_bytes(b"mixed")
+        reference_directory = working_directory / ".fp32-reference"
+        reference_directory.mkdir()
+        reference = reference_directory / "denoiser.onnx"
+        reference.write_bytes(b"fp32")
+
+        def manifest_for(path: Path) -> dict:
+            return {
+                "format": BROWSER_MODEL_FILES_FORMAT,
+                "schema_version": BROWSER_MODEL_FILES_SCHEMA_VERSION,
+                "model": {"revision": "a" * 64},
+                "files": {
+                    "denoiser.onnx": {
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                        "size_bytes": path.stat().st_size,
+                    }
+                },
+            }
+
+        return (
+            manifest_for(candidate),
+            [candidate],
+            manifest_for(reference),
+            [reference],
+        )
+
+    monkeypatch.setattr("ardy.browser.export._validate_config", lambda _config: None)
+    monkeypatch.setattr(
+        "ardy.browser.export._export_browser_model_files_working_directory",
+        fake_working_export,
+    )
+
+    result = export_browser_model_files(
+        BrowserExportConfig(
+            output_directory=output,
+            fp32_reference_output_directory=reference_output,
+            minilm_artifact=tmp_path / "unused",
+        )
+    )
+
+    assert result == output
+    assert not (output / "stale").exists()
+    assert gzip.decompress((output / "denoiser.onnx.gz").read_bytes()) == b"mixed"
+    assert gzip.decompress(
+        (reference_output / "denoiser.onnx.gz").read_bytes()
+    ) == b"fp32"
+    assert (output / "model.json.gz").is_file()
+    assert (reference_output / "model.json.gz").is_file()
+    assert not (output / "model.json").exists()
+    assert not (reference_output / "model.json").exists()
+
+
+def test_directory_publication_rolls_back_both_destinations_on_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
     candidate_stage = tmp_path / "candidate.stage"
     reference_stage = tmp_path / "reference.stage"
-    candidate_output = tmp_path / "candidate.tar.gz"
-    reference_output = tmp_path / "reference.tar.gz"
-    candidate_stage.write_bytes(b"new candidate")
-    reference_stage.write_bytes(b"new reference")
-    candidate_output.write_bytes(b"old candidate")
-    reference_output.write_bytes(b"old reference")
+    candidate_output = tmp_path / "candidate"
+    reference_output = tmp_path / "reference"
+    for directory, payload in (
+        (candidate_stage, b"new candidate"),
+        (reference_stage, b"new reference"),
+        (candidate_output, b"old candidate"),
+        (reference_output, b"old reference"),
+    ):
+        directory.mkdir()
+        (directory / "model.json.gz").write_bytes(payload)
 
     real_replace = os.replace
     failed = False
@@ -539,37 +729,41 @@ def test_archive_set_publication_rolls_back_both_destinations_on_failure(
     monkeypatch.setattr("ardy.browser.export.os.replace", fail_second_publish)
 
     with pytest.raises(OSError, match="simulated"):
-        _publish_archive_set(
+        _publish_directory_set(
             [
                 (candidate_stage, candidate_output),
                 (reference_stage, reference_output),
             ]
         )
 
-    assert candidate_output.read_bytes() == b"old candidate"
-    assert reference_output.read_bytes() == b"old reference"
-    assert candidate_stage.read_bytes() == b"new candidate"
-    assert reference_stage.read_bytes() == b"new reference"
+    assert (candidate_output / "model.json.gz").read_bytes() == b"old candidate"
+    assert (reference_output / "model.json.gz").read_bytes() == b"old reference"
+    assert (candidate_stage / "model.json.gz").read_bytes() == b"new candidate"
+    assert (reference_stage / "model.json.gz").read_bytes() == b"new reference"
 
 
-def test_archive_set_publication_replaces_both_destinations(tmp_path: Path):
+def test_directory_publication_replaces_both_destinations(tmp_path: Path):
     candidate_stage = tmp_path / "candidate.stage"
     reference_stage = tmp_path / "reference.stage"
-    candidate_output = tmp_path / "candidate.tar.gz"
-    reference_output = tmp_path / "reference.tar.gz"
-    candidate_stage.write_bytes(b"new candidate")
-    reference_stage.write_bytes(b"new reference")
-    candidate_output.write_bytes(b"old candidate")
-    reference_output.write_bytes(b"old reference")
+    candidate_output = tmp_path / "candidate"
+    reference_output = tmp_path / "reference"
+    for directory, payload in (
+        (candidate_stage, b"new candidate"),
+        (reference_stage, b"new reference"),
+        (candidate_output, b"old candidate"),
+        (reference_output, b"old reference"),
+    ):
+        directory.mkdir()
+        (directory / "model.json.gz").write_bytes(payload)
 
-    _publish_archive_set(
+    _publish_directory_set(
         [
             (candidate_stage, candidate_output),
             (reference_stage, reference_output),
         ]
     )
 
-    assert candidate_output.read_bytes() == b"new candidate"
-    assert reference_output.read_bytes() == b"new reference"
+    assert (candidate_output / "model.json.gz").read_bytes() == b"new candidate"
+    assert (reference_output / "model.json.gz").read_bytes() == b"new reference"
     assert not candidate_stage.exists()
     assert not reference_stage.exists()

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 # SPDX-License-Identifier: Apache-2.0
-"""Compare an FP32 browser pack with a mixed-FP16 pack on fixed rollouts."""
+"""Compare FP32 and mixed-FP16 browser model files on fixed rollouts."""
 
 from __future__ import annotations
 
 import argparse
 import copy
+import gzip
 import hashlib
 import importlib.metadata
 import json
@@ -13,7 +14,6 @@ import math
 import os
 import platform
 import re
-import tarfile
 import tempfile
 import time
 from collections import Counter
@@ -40,7 +40,7 @@ from ardy.minilm_teacher_cache import (
 
 
 @dataclass(frozen=True)
-class PackRuntime:
+class ModelFilesRuntime:
     directory: Path
     manifest: dict[str, Any]
     text_encoder: Any
@@ -50,7 +50,7 @@ class PackRuntime:
 
 @dataclass
 class RolloutState:
-    """Browser-equivalent autoregressive state for one model pack."""
+    """Browser-equivalent autoregressive state for one model."""
 
     global_hybrid: np.ndarray
     initial_translation: np.ndarray
@@ -88,6 +88,35 @@ class InputFileIdentity:
 
 
 @dataclass(frozen=True)
+class ModelFilesIdentity:
+    """Portable identity and measured transfer/storage totals for one model."""
+
+    id: str
+    revision: str
+    manifest_sha256: str
+    transport_size_bytes: int
+    raw_size_bytes: int
+
+    def to_report(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "revision": self.revision,
+            "manifest_sha256": self.manifest_sha256,
+            "transport_size_bytes": self.transport_size_bytes,
+            "raw_size_bytes": self.raw_size_bytes,
+        }
+
+
+@dataclass(frozen=True)
+class PreparedModelFiles:
+    """Verified model manifest and decompressed assets in evaluator-owned storage."""
+
+    directory: Path
+    manifest: dict[str, Any]
+    identity: ModelFilesIdentity
+
+
+@dataclass(frozen=True)
 class ReferenceGraphContract:
     """Lightweight FP32 facts retained after releasing an ONNX protobuf."""
 
@@ -99,8 +128,9 @@ class ReferenceGraphContract:
     node_count: int
 
 
-_MODEL_PACK_FORMAT = "ardy-browser-model-pack"
-_MODEL_PACK_SCHEMA_VERSION = 2
+_MODEL_FILES_FORMAT = "ardy-browser-model-files"
+_MODEL_FILES_SCHEMA_VERSION = 1
+_MODEL_MANIFEST_FILE = "model.json.gz"
 _RUNTIME_CONTRACT_REVISION = 3
 _REQUIRED_WEBGPU_FEATURES = ["shader-f16"]
 _EXPECTED_GRAPH_NAMES = ("text_encoder", "denoiser", "decoder")
@@ -149,10 +179,10 @@ _EXPECTED_GRAPH_BINDINGS = {
 }
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
-_MAX_TAR_ENTRIES = 10_000
-_MAX_TAR_ENTRY_BYTES = 0x7FFF_FFFF
-_MAX_TAR_BYTES = 8 * 1024 * 1024 * 1024
-_MAX_TAR_PATH_BYTES = 4_096
+_MAX_MODEL_FILES = 10_000
+_MAX_MODEL_FILE_BYTES = 0x7FFF_FFFF
+_MAX_MODEL_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
+_MAX_MODEL_PATH_BYTES = 4_096
 _MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 
 
@@ -202,11 +232,11 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run paired, deterministic browser-style DDIM rollouts through an "
-            "FP32 reference pack and a mixed-FP16 candidate pack."
+            "FP32 reference model directory and a mixed-FP16 candidate model directory."
         )
     )
-    parser.add_argument("--reference-pack", type=Path, required=True)
-    parser.add_argument("--candidate-pack", type=Path, required=True)
+    parser.add_argument("--reference-dir", type=Path, required=True)
+    parser.add_argument("--candidate-dir", type=Path, required=True)
     parser.add_argument("--prompts", type=Path, required=True, help="JSONL records containing a `text` field.")
     parser.add_argument(
         "--prompt-metadata",
@@ -284,9 +314,9 @@ def _stat_signature(stat_result: os.stat_result) -> tuple[int, int, int, int, in
 def _capture_file_identity(path: Path) -> InputFileIdentity:
     """Hash one stable regular file and retain enough stat data for a recheck."""
 
-    before = path.stat()
-    if not path.is_file():
+    if path.is_symlink() or not path.is_file():
         raise FileNotFoundError(f"Evaluator input is not a regular file: {path}")
+    before = path.stat()
     digest = _sha256(path)
     after = path.stat()
     before_signature = _stat_signature(before)
@@ -304,6 +334,8 @@ def _capture_file_identity(path: Path) -> InputFileIdentity:
 def _verify_file_identity(path: Path, identity: InputFileIdentity) -> None:
     """Fail when an input changed between its prehash and its consumption."""
 
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"Evaluator input changed after its identity was captured: {path}")
     current = path.stat()
     if _stat_signature(current) != identity.stat_signature or _sha256(path) != identity.sha256:
         raise RuntimeError(f"Evaluator input changed after its identity was captured: {path}")
@@ -312,9 +344,9 @@ def _verify_file_identity(path: Path, identity: InputFileIdentity) -> None:
 def _read_stable_bytes(path: Path) -> tuple[bytes, InputFileIdentity]:
     """Read and identify the exact same file bytes."""
 
-    before = path.stat()
-    if not path.is_file():
+    if path.is_symlink() or not path.is_file():
         raise FileNotFoundError(f"Evaluator input is not a regular file: {path}")
+    before = path.stat()
     encoded = path.read_bytes()
     after = path.stat()
     before_signature = _stat_signature(before)
@@ -329,14 +361,14 @@ def _read_stable_bytes(path: Path) -> tuple[bytes, InputFileIdentity]:
     )
 
 
-def _canonical_pack_path(value: Any, label: str) -> str:
+def _canonical_model_path(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{label} must be a non-empty relative POSIX path.")
     if (
         "\\" in value
         or _WINDOWS_DRIVE_PATTERN.match(value)
         or any(ord(character) < 32 or ord(character) == 127 for character in value)
-        or len(value.encode("utf-8")) > _MAX_TAR_PATH_BYTES
+        or len(value.encode("utf-8")) > _MAX_MODEL_PATH_BYTES
     ):
         raise ValueError(f"{label} is not a safe canonical POSIX path: {value!r}.")
     path = PurePosixPath(value)
@@ -349,57 +381,25 @@ def _canonical_pack_path(value: Any, label: str) -> str:
     return value
 
 
-def _extract_pack(
-    archive_path: Path,
-    output_dir: Path,
-    *,
-    expected_identity: InputFileIdentity,
-) -> set[str]:
-    """Extract the browser-compatible regular-file subset with bounded resources."""
+def _regular_directory_files(directory: Path) -> set[str]:
+    """Return canonical relative files while rejecting links and special entries."""
 
-    seen: set[str] = set()
-    declared_bytes = 0
-    with tarfile.open(archive_path, mode="r:gz") as archive:
-        for member_index, member in enumerate(archive):
-            if member_index >= _MAX_TAR_ENTRIES:
-                raise ValueError(f"Browser pack contains more than {_MAX_TAR_ENTRIES} entries.")
-            if not member.isfile() or member.pax_headers:
-                raise ValueError(f"Browser-pack entries must be plain POSIX regular files: {member.name!r}.")
-            archive_name = _canonical_pack_path(member.name, "browser-pack member")
-            if archive_name in seen:
-                raise ValueError(f"Duplicate browser-pack member: {archive_name!r}.")
-            if member_index == 0 and archive_name != "manifest.json":
-                raise ValueError("manifest.json must be the first browser-pack member.")
-            if member.size < 0 or member.size > _MAX_TAR_ENTRY_BYTES:
-                raise ValueError(
-                    f"Browser-pack member {archive_name!r} exceeds the per-file size limit."
-                )
-            if archive_name == "manifest.json" and member.size > _MAX_MANIFEST_BYTES:
-                raise ValueError("Browser-pack manifest exceeds the size limit.")
-            declared_bytes += member.size
-            if declared_bytes > _MAX_TAR_BYTES:
-                raise ValueError(f"Browser pack expands beyond {_MAX_TAR_BYTES} bytes.")
-
-            destination = output_dir / Path(*PurePosixPath(archive_name).parts)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            source = archive.extractfile(member)
-            if source is None:
-                raise ValueError(f"Unable to read browser-pack member: {member.name!r}")
-            written = 0
-            with destination.open("xb") as output:
-                while chunk := source.read(8 * 1024 * 1024):
-                    output.write(chunk)
-                    written += len(chunk)
-            if written != member.size:
-                raise ValueError(
-                    f"Browser-pack member {archive_name!r} was truncated "
-                    f"({written} of {member.size} bytes)."
-                )
-            seen.add(archive_name)
-    _verify_file_identity(archive_path, expected_identity)
-    if "manifest.json" not in seen:
-        raise ValueError("Browser pack is missing manifest.json.")
-    return seen
+    if directory.is_symlink() or not directory.is_dir():
+        raise NotADirectoryError(f"Model files input must be a directory: {directory}")
+    files: set[str] = set()
+    for path in directory.rglob("*"):
+        relative = path.relative_to(directory).as_posix()
+        if path.is_symlink():
+            raise ValueError(f"Model files directory must not contain symbolic links: {relative}.")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ValueError(f"Model files directory contains a non-regular entry: {relative}.")
+        canonical = _canonical_model_path(relative, "model files entry")
+        if canonical in files:
+            raise ValueError(f"Duplicate model files entry: {canonical!r}.")
+        files.add(canonical)
+    return files
 
 
 def _session(path: Path):
@@ -418,11 +418,11 @@ def _session(path: Path):
     )
 
 
-def _create_runtime(directory: Path, manifest: dict[str, Any]) -> PackRuntime:
-    """Create ORT sessions only after both packs have passed static validation."""
+def _create_runtime(directory: Path, manifest: dict[str, Any]) -> ModelFilesRuntime:
+    """Create ORT sessions only after both models have passed static validation."""
 
     graphs = manifest["graphs"]
-    return PackRuntime(
+    return ModelFilesRuntime(
         directory=directory,
         manifest=manifest,
         text_encoder=_session(directory / graphs["text_encoder"]["model"]),
@@ -449,6 +449,284 @@ def _sha256_value(value: Any, label: str) -> str:
     if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
         raise ValueError(f"{label} must be a lowercase SHA-256 digest.")
     return value
+
+
+def _bounded_gzip_bytes(
+    path: Path,
+    *,
+    limit: int,
+    label: str,
+    expected_identity: InputFileIdentity,
+) -> bytes:
+    """Read one stable gzip stream without allowing unbounded expansion."""
+
+    decoded = bytearray()
+    try:
+        with gzip.open(path, mode="rb") as input_file:
+            while chunk := input_file.read(min(1024 * 1024, limit + 1 - len(decoded))):
+                decoded.extend(chunk)
+                if len(decoded) > limit:
+                    raise ValueError(f"{label} expands beyond {limit} bytes.")
+    except (gzip.BadGzipFile, EOFError, OSError) as error:
+        raise ValueError(f"{label} is not a valid gzip stream.") from error
+    _verify_file_identity(path, expected_identity)
+    return bytes(decoded)
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"{_MODEL_MANIFEST_FILE} contains duplicate key {key!r}.")
+        result[key] = value
+    return result
+
+
+def _read_model_manifest(
+    source_directory: Path,
+) -> tuple[dict[str, Any], InputFileIdentity, str, int]:
+    manifest_path = source_directory / _MODEL_MANIFEST_FILE
+    manifest_transport_identity = _capture_file_identity(manifest_path)
+    if manifest_transport_identity.size_bytes > _MAX_MANIFEST_BYTES:
+        raise ValueError(
+            f"{_MODEL_MANIFEST_FILE} exceeds the compressed manifest size limit."
+        )
+    encoded = _bounded_gzip_bytes(
+        manifest_path,
+        limit=_MAX_MANIFEST_BYTES,
+        label=_MODEL_MANIFEST_FILE,
+        expected_identity=manifest_transport_identity,
+    )
+    try:
+        manifest = json.loads(
+            encoded.decode("utf-8"),
+            object_pairs_hook=_unique_json_object,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{_MODEL_MANIFEST_FILE} does not contain valid UTF-8 JSON.") from error
+    checked_manifest = _object(manifest, "manifest")
+    _validate_json_finite(checked_manifest, "manifest")
+    return (
+        checked_manifest,
+        manifest_transport_identity,
+        hashlib.sha256(encoded).hexdigest(),
+        len(encoded),
+    )
+
+
+def _validate_model_file_descriptions(
+    manifest: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], set[str], int, int]:
+    if manifest.get("format") != _MODEL_FILES_FORMAT:
+        raise ValueError(f"manifest.format must be {_MODEL_FILES_FORMAT!r}.")
+    if manifest.get("schema_version") != _MODEL_FILES_SCHEMA_VERSION:
+        raise ValueError(
+            f"manifest.schema_version must be {_MODEL_FILES_SCHEMA_VERSION}."
+        )
+    model = _object(manifest.get("model"), "manifest.model")
+    model_id = model.get("id")
+    if not isinstance(model_id, str) or not model_id:
+        raise ValueError("manifest.model.id must be a non-empty string.")
+    _sha256_value(model.get("revision"), "manifest.model.revision")
+
+    raw_files = _object(manifest.get("files"), "manifest.files")
+    if not raw_files or len(raw_files) > _MAX_MODEL_FILES:
+        raise ValueError(
+            f"manifest.files must declare between 1 and {_MAX_MODEL_FILES} files."
+        )
+
+    records: dict[str, dict[str, Any]] = {}
+    transport_paths: set[str] = set()
+    transport_total = 0
+    raw_total = 0
+    for raw_path, raw_record in raw_files.items():
+        relative_path = _canonical_model_path(raw_path, "manifest.files key")
+        if relative_path == _MODEL_MANIFEST_FILE:
+            raise ValueError(f"manifest.files must not declare {_MODEL_MANIFEST_FILE}.")
+        record = _object(raw_record, f"manifest.files.{relative_path}")
+        raw_size = _nonnegative_integer(
+            record.get("size_bytes"),
+            f"manifest.files.{relative_path}.size_bytes",
+        )
+        if raw_size > _MAX_MODEL_FILE_BYTES:
+            raise ValueError(
+                f"manifest.files.{relative_path}.size_bytes exceeds the per-file limit."
+            )
+        _sha256_value(
+            record.get("sha256"),
+            f"manifest.files.{relative_path}.sha256",
+        )
+        if "media_type" in record and (
+            not isinstance(record["media_type"], str) or not record["media_type"]
+        ):
+            raise ValueError(
+                f"manifest.files.{relative_path}.media_type must be a non-empty string."
+            )
+
+        transport = _object(
+            record.get("transport"),
+            f"manifest.files.{relative_path}.transport",
+        )
+        transport_path = _canonical_model_path(
+            transport.get("path"),
+            f"manifest.files.{relative_path}.transport.path",
+        )
+        if transport_path == _MODEL_MANIFEST_FILE:
+            raise ValueError(
+                f"manifest.files.{relative_path}.transport.path must not be "
+                f"{_MODEL_MANIFEST_FILE}."
+            )
+        if transport_path in transport_paths:
+            raise ValueError(f"Duplicate model transport path: {transport_path!r}.")
+        transport_paths.add(transport_path)
+        if transport.get("compression") != "gzip":
+            raise ValueError(
+                f"manifest.files.{relative_path}.transport.compression must be 'gzip'."
+            )
+        transport_size = _nonnegative_integer(
+            transport.get("size_bytes"),
+            f"manifest.files.{relative_path}.transport.size_bytes",
+            positive=True,
+        )
+        if transport_size > _MAX_MODEL_FILE_BYTES:
+            raise ValueError(
+                f"manifest.files.{relative_path}.transport.size_bytes exceeds "
+                "the per-file limit."
+            )
+        _sha256_value(
+            transport.get("sha256"),
+            f"manifest.files.{relative_path}.transport.sha256",
+        )
+        transport_total += transport_size
+        raw_total += raw_size
+        if (
+            transport_total > _MAX_MODEL_TOTAL_BYTES
+            or raw_total > _MAX_MODEL_TOTAL_BYTES
+        ):
+            raise ValueError(
+                f"Model files exceed the {_MAX_MODEL_TOTAL_BYTES}-byte total limit."
+            )
+        records[relative_path] = record
+    return records, transport_paths, transport_total, raw_total
+
+
+def _decompress_model_file(
+    source: Path,
+    destination: Path,
+    *,
+    record: dict[str, Any],
+    relative_path: str,
+) -> None:
+    transport = record["transport"]
+    identity = _capture_file_identity(source)
+    if identity.size_bytes != transport["size_bytes"]:
+        raise ValueError(f"Compressed size mismatch for {relative_path}.")
+    if identity.sha256 != transport["sha256"]:
+        raise ValueError(f"Compressed SHA-256 mismatch for {relative_path}.")
+
+    expected_raw_size = record["size_bytes"]
+    digest = hashlib.sha256()
+    written = 0
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with gzip.open(source, mode="rb") as input_file, destination.open("xb") as output:
+            while chunk := input_file.read(8 * 1024 * 1024):
+                written += len(chunk)
+                if written > expected_raw_size:
+                    raise ValueError(
+                        f"Decompressed size exceeds the manifest value for {relative_path}."
+                    )
+                digest.update(chunk)
+                output.write(chunk)
+    except (gzip.BadGzipFile, EOFError, OSError) as error:
+        destination.unlink(missing_ok=True)
+        raise ValueError(
+            f"Compressed model file is not valid gzip data: {relative_path}."
+        ) from error
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    _verify_file_identity(source, identity)
+    if written != expected_raw_size:
+        raise ValueError(f"Decompressed size mismatch for {relative_path}.")
+    if digest.hexdigest() != record["sha256"]:
+        raise ValueError(f"Decompressed SHA-256 mismatch for {relative_path}.")
+
+
+def _prepare_model_files(
+    source_directory: Path,
+    output_directory: Path,
+) -> PreparedModelFiles:
+    """Validate compressed inputs and materialize verified raw assets."""
+
+    if source_directory.is_symlink() or not source_directory.is_dir():
+        raise NotADirectoryError(
+            f"Model files input must be a directory: {source_directory}"
+        )
+    source_resolved = source_directory.resolve()
+    output_resolved = output_directory.resolve()
+    if (
+        source_resolved == output_resolved
+        or source_resolved in output_resolved.parents
+        or output_resolved in source_resolved.parents
+    ):
+        raise ValueError("Model input and evaluator output directories must not overlap.")
+    if output_directory.exists():
+        if output_directory.is_symlink() or not output_directory.is_dir():
+            raise NotADirectoryError(
+                f"Evaluator model output must be a directory: {output_directory}"
+            )
+        if any(output_directory.iterdir()):
+            raise FileExistsError(
+                f"Evaluator model output must be empty: {output_directory}"
+            )
+    else:
+        output_directory.mkdir(parents=True)
+
+    (
+        manifest,
+        manifest_transport_identity,
+        manifest_sha256,
+        manifest_raw_size,
+    ) = _read_model_manifest(source_directory)
+    records, transport_paths, transport_total, raw_total = (
+        _validate_model_file_descriptions(manifest)
+    )
+    actual_files = _regular_directory_files(source_directory)
+    expected_files = {_MODEL_MANIFEST_FILE, *transport_paths}
+    if actual_files != expected_files:
+        missing = sorted(expected_files - actual_files)
+        extra = sorted(actual_files - expected_files)
+        raise ValueError(
+            "Model directory entries do not match manifest transports "
+            f"(missing={missing}, extra={extra})."
+        )
+
+    for relative_path, record in sorted(records.items()):
+        transport_path = record["transport"]["path"]
+        source = source_directory / Path(*PurePosixPath(transport_path).parts)
+        destination = output_directory / Path(*PurePosixPath(relative_path).parts)
+        _decompress_model_file(
+            source,
+            destination,
+            record=record,
+            relative_path=relative_path,
+        )
+
+    model = manifest["model"]
+    return PreparedModelFiles(
+        directory=output_directory,
+        manifest=manifest,
+        identity=ModelFilesIdentity(
+            id=model["id"],
+            revision=model["revision"],
+            manifest_sha256=manifest_sha256,
+            transport_size_bytes=(
+                manifest_transport_identity.size_bytes + transport_total
+            ),
+            raw_size_bytes=manifest_raw_size + raw_total,
+        ),
+    )
 
 
 def _fraction(value: Any, label: str, numerator: int, denominator: int) -> float:
@@ -544,19 +822,19 @@ def _validate_initializer_summary(
 def _validate_manifest_files(
     directory: Path,
     manifest: dict[str, Any],
-    extracted_paths: set[str],
 ) -> dict[str, Path]:
     files = _object(manifest.get("files"), "manifest.files")
-    if "manifest.json" in files:
-        raise ValueError("manifest.files must not declare manifest.json.")
+    if _MODEL_MANIFEST_FILE in files:
+        raise ValueError(f"manifest.files must not declare {_MODEL_MANIFEST_FILE}.")
     resolved: dict[str, Path] = {}
     for raw_path, raw_record in files.items():
-        relative_path = _canonical_pack_path(raw_path, "manifest.files key")
+        relative_path = _canonical_model_path(raw_path, "manifest.files key")
         record = _object(raw_record, f"manifest.files.{relative_path}")
-        expected_keys = {"sha256", "size_bytes"}
+        expected_keys = {"sha256", "size_bytes", "transport"}
         if not expected_keys.issubset(record):
             raise ValueError(
-                f"manifest.files.{relative_path} must declare sha256 and size_bytes."
+                f"manifest.files.{relative_path} must declare sha256, size_bytes, "
+                "and transport."
             )
         expected_size = _nonnegative_integer(
             record["size_bytes"],
@@ -568,42 +846,39 @@ def _validate_manifest_files(
         )
         path = directory / Path(*PurePosixPath(relative_path).parts)
         if not path.is_file() or path.is_symlink():
-            raise FileNotFoundError(f"Declared browser-pack file is missing: {relative_path}.")
+            raise FileNotFoundError(f"Declared model file is missing: {relative_path}.")
         if path.stat().st_size != expected_size:
-            raise ValueError(f"Browser-pack size mismatch for {relative_path}.")
+            raise ValueError(f"Model file size mismatch for {relative_path}.")
         if _sha256(path) != expected_hash:
-            raise ValueError(f"Browser-pack SHA-256 mismatch for {relative_path}.")
+            raise ValueError(f"Model file SHA-256 mismatch for {relative_path}.")
         resolved[relative_path] = path
-    expected_archive_paths = {"manifest.json", *resolved}
-    if extracted_paths != expected_archive_paths:
-        missing = sorted(expected_archive_paths - extracted_paths)
-        extra = sorted(extracted_paths - expected_archive_paths)
+    actual_paths = _regular_directory_files(directory)
+    expected_paths = set(resolved)
+    if actual_paths != expected_paths:
+        missing = sorted(expected_paths - actual_paths)
+        extra = sorted(actual_paths - expected_paths)
         raise ValueError(
-            f"Browser-pack members do not match manifest.files (missing={missing}, extra={extra})."
+            "Decompressed model files do not match manifest.files "
+            f"(missing={missing}, extra={extra})."
         )
     return resolved
 
 
 def _validate_common_manifest(
     directory: Path,
-    extracted_paths: set[str],
+    manifest: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Path], dict[str, Path]]:
-    manifest_path = directory / "manifest.json"
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError("Browser-pack manifest is invalid JSON.") from error
     manifest = _object(manifest, "manifest")
-    if manifest.get("format") != _MODEL_PACK_FORMAT:
-        raise ValueError(f"manifest.format must be {_MODEL_PACK_FORMAT!r}.")
-    if manifest.get("schema_version") != _MODEL_PACK_SCHEMA_VERSION:
+    if manifest.get("format") != _MODEL_FILES_FORMAT:
+        raise ValueError(f"manifest.format must be {_MODEL_FILES_FORMAT!r}.")
+    if manifest.get("schema_version") != _MODEL_FILES_SCHEMA_VERSION:
         raise ValueError(
-            f"manifest.schema_version must be {_MODEL_PACK_SCHEMA_VERSION}."
+            f"manifest.schema_version must be {_MODEL_FILES_SCHEMA_VERSION}."
         )
-    files = _validate_manifest_files(directory, manifest, extracted_paths)
+    files = _validate_manifest_files(directory, manifest)
 
     tokenizer = _object(manifest.get("tokenizer"), "manifest.tokenizer")
-    tokenizer_directory = _canonical_pack_path(
+    tokenizer_directory = _canonical_model_path(
         tokenizer.get("directory"),
         "manifest.tokenizer.directory",
     )
@@ -617,7 +892,7 @@ def _validate_common_manifest(
     }
     if not required_tokenizer_paths.issubset(files):
         raise ValueError(
-            "Browser pack is missing one or more required tokenizer payloads."
+            "Browser model is missing one or more required tokenizer payloads."
         )
 
     graphs = _object(manifest.get("graphs"), "manifest.graphs")
@@ -633,7 +908,7 @@ def _validate_common_manifest(
             raise ValueError(
                 f"manifest.graphs.{graph_name} must not declare external ONNX data."
             )
-        model_path = _canonical_pack_path(
+        model_path = _canonical_model_path(
             graph.get("model"),
             f"manifest.graphs.{graph_name}.model",
         )
@@ -655,7 +930,7 @@ def _validate_common_manifest(
                     "match the fixed browser evaluator contract."
                 )
     if set(files) != required_tokenizer_paths | graph_asset_names:
-        raise ValueError("manifest.files contains unreferenced browser-pack assets.")
+        raise ValueError("manifest.files contains unreferenced browser model assets.")
 
     runtime = _object(manifest.get("runtime"), "manifest.runtime")
     if runtime.get("contract_revision") != _RUNTIME_CONTRACT_REVISION:
@@ -745,7 +1020,7 @@ def _validate_fp32_precision(
 ) -> dict[str, ReferenceGraphContract]:
     precision = _object(manifest.get("precision"), "reference.precision")
     if precision.get("format") != "fp32":
-        raise ValueError("Reference pack must declare precision.format='fp32'.")
+        raise ValueError("Reference model must declare precision.format='fp32'.")
     if precision.get("public_io_dtype") != "float32":
         raise ValueError("Reference precision.public_io_dtype must be 'float32'.")
     if precision.get("required_webgpu_features") != []:
@@ -799,7 +1074,7 @@ def _validate_mixed_precision(
 ) -> None:
     precision = _object(manifest.get("precision"), "candidate.precision")
     if precision.get("format") != "mixed-fp16":
-        raise ValueError("Candidate pack must declare precision.format='mixed-fp16'.")
+        raise ValueError("Candidate model must declare precision.format='mixed-fp16'.")
     if precision.get("policy_version") != MIXED_FP16_POLICY_VERSION:
         raise ValueError(
             f"Candidate precision.policy_version must be {MIXED_FP16_POLICY_VERSION}."
@@ -927,21 +1202,19 @@ def _validate_mixed_precision(
     )
 
 
-def _validate_pack_pair_before_sessions(
-    reference_dir: Path,
-    reference_members: set[str],
-    candidate_dir: Path,
-    candidate_members: set[str],
+def _validate_model_pair_before_sessions(
+    reference: PreparedModelFiles,
+    candidate: PreparedModelFiles,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Validate payloads and precision semantics before ONNX Runtime sees bytes."""
 
     reference_manifest, _, reference_graph_paths = _validate_common_manifest(
-        reference_dir,
-        reference_members,
+        reference.directory,
+        reference.manifest,
     )
     candidate_manifest, _, candidate_graph_paths = _validate_common_manifest(
-        candidate_dir,
-        candidate_members,
+        candidate.directory,
+        candidate.manifest,
     )
     reference_contracts = _validate_fp32_precision(
         reference_manifest,
@@ -953,21 +1226,21 @@ def _validate_pack_pair_before_sessions(
         reference_contracts,
         reference_graph_paths,
     )
-    reference_placeholder = PackRuntime(
-        directory=reference_dir,
+    reference_placeholder = ModelFilesRuntime(
+        directory=reference.directory,
         manifest=reference_manifest,
         text_encoder=None,
         denoiser=None,
         decoder=None,
     )
-    candidate_placeholder = PackRuntime(
-        directory=candidate_dir,
+    candidate_placeholder = ModelFilesRuntime(
+        directory=candidate.directory,
         manifest=candidate_manifest,
         text_encoder=None,
         denoiser=None,
         decoder=None,
     )
-    precision_validation = _validate_compatible_packs(
+    precision_validation = _validate_compatible_models(
         reference_placeholder,
         candidate_placeholder,
     )
@@ -975,7 +1248,7 @@ def _validate_pack_pair_before_sessions(
 
 
 def _without_precision_metadata(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Return the semantic model contract shared by FP32 and mixed packs."""
+    """Return the semantic model contract shared by FP32 and mixed models."""
     contract = copy.deepcopy(manifest)
     for key in ("files", "precision", "verification"):
         contract.pop(key, None)
@@ -1010,7 +1283,7 @@ def _first_difference(reference: Any, candidate: Any, path: str = "manifest") ->
     return None
 
 
-def _tokenizer_payloads(runtime: PackRuntime) -> dict[str, str]:
+def _tokenizer_payloads(runtime: ModelFilesRuntime) -> dict[str, str]:
     directory = str(runtime.manifest["tokenizer"]["directory"])
     payloads: dict[str, str] = {}
     for relative_path in sorted(runtime.manifest["files"]):
@@ -1019,14 +1292,17 @@ def _tokenizer_payloads(runtime: PackRuntime) -> dict[str, str]:
     return payloads
 
 
-def _validate_compatible_packs(reference: PackRuntime, candidate: PackRuntime) -> dict[str, Any]:
+def _validate_compatible_models(
+    reference: ModelFilesRuntime,
+    candidate: ModelFilesRuntime,
+) -> dict[str, Any]:
     """Reject comparisons that change anything except ONNX precision."""
     reference_precision = reference.manifest.get("precision")
     if (
         not isinstance(reference_precision, dict)
         or reference_precision.get("format") != "fp32"
     ):
-        raise ValueError("Reference pack must declare precision.format='fp32'.")
+        raise ValueError("Reference model must declare precision.format='fp32'.")
     difference = _first_difference(
         _without_precision_metadata(reference.manifest),
         _without_precision_metadata(candidate.manifest),
@@ -1041,12 +1317,18 @@ def _validate_compatible_packs(reference: PackRuntime, candidate: PackRuntime) -
 
     precision = candidate.manifest.get("precision")
     if not isinstance(precision, dict) or precision.get("format") != "mixed-fp16":
-        raise ValueError("Candidate pack must declare precision.format='mixed-fp16'.")
+        raise ValueError("Candidate model must declare precision.format='mixed-fp16'.")
     if precision.get("policy_version") != MIXED_FP16_POLICY_VERSION:
-        raise ValueError(f"Candidate pack must declare precision.policy_version={MIXED_FP16_POLICY_VERSION}.")
+        raise ValueError(
+            "Candidate model must declare "
+            f"precision.policy_version={MIXED_FP16_POLICY_VERSION}."
+        )
     summaries = precision.get("graphs")
     if not isinstance(summaries, dict) or set(summaries) != set(MIXED_FP16_POLICIES):
-        raise ValueError("Candidate pack precision.graphs must contain exactly the three production graphs.")
+        raise ValueError(
+            "Candidate model precision.graphs must contain exactly the three "
+            "production graphs."
+        )
 
     reference_hashes: dict[str, str] = {}
     candidate_hashes: dict[str, str] = {}
@@ -1223,7 +1505,7 @@ def _prompt_manifest_identity(
     return identity
 
 
-def _encode(runtime: PackRuntime, tokenizer, prompt: str) -> np.ndarray:
+def _encode(runtime: ModelFilesRuntime, tokenizer, prompt: str) -> np.ndarray:
     encoded = tokenizer(
         prompt,
         truncation=True,
@@ -1357,7 +1639,7 @@ def _make_window(
 
 
 def _denoise(
-    runtime: PackRuntime,
+    runtime: ModelFilesRuntime,
     sample: np.ndarray,
     text_conditions: np.ndarray,
     cfg_weight: float,
@@ -1455,7 +1737,7 @@ def _recenter_and_requantize(
 
 
 def _decode(
-    runtime: PackRuntime,
+    runtime: ModelFilesRuntime,
     sample: np.ndarray,
     global_translation: np.ndarray,
     valid_tokens: int,
@@ -1528,7 +1810,7 @@ def _concat_window_outputs(windows: list[dict[str, np.ndarray]]) -> dict[str, np
 
 
 def _rollout(
-    runtime: PackRuntime,
+    runtime: ModelFilesRuntime,
     text_conditions: np.ndarray,
     noises: list[np.ndarray],
     cfg_weight: float,
@@ -1725,7 +2007,7 @@ _PUBLIC_AGGREGATE_FIELDS = (
     "method",
     "runtime_environment",
     "prompt_manifest",
-    "packs",
+    "models",
     "contract_validation",
     "text_conditions",
     "motion_fidelity",
@@ -1798,7 +2080,7 @@ def _build_public_report(report: dict[str, Any]) -> dict[str, Any]:
         )
     public_report = {
         "format": "ardy-browser-fp16-aggregate",
-        "format_version": 1,
+        "format_version": 2,
         "source_report_schema_version": report["schema_version"],
         **{
             field: copy.deepcopy(report[field])
@@ -1918,12 +2200,19 @@ def main() -> None:
         manifest_identity=prompt_file_identity,
         metadata_bytes=prompt_metadata_bytes,
     )
-    if args.reference_pack.resolve() == args.candidate_pack.resolve():
-        raise ValueError("--reference-pack and --candidate-pack must be different files.")
+    reference_input = args.reference_dir.resolve()
+    candidate_input = args.candidate_dir.resolve()
+    if reference_input == candidate_input:
+        raise ValueError("--reference-dir and --candidate-dir must be different directories.")
+    if (
+        reference_input in candidate_input.parents
+        or candidate_input in reference_input.parents
+    ):
+        raise ValueError(
+            "--reference-dir and --candidate-dir must not contain one another."
+        )
     protected_inputs = {
         args.prompts.resolve(),
-        args.reference_pack.resolve(),
-        args.candidate_pack.resolve(),
         *(
             (prompt_metadata_path.resolve(),)
             if prompt_metadata_path is not None
@@ -1934,16 +2223,14 @@ def main() -> None:
         ("--output", args.output),
         ("--public-output", args.public_output),
     ):
-        if output_path is not None and output_path.resolve() in protected_inputs:
+        if output_path is None:
+            continue
+        resolved_output = output_path.resolve()
+        if resolved_output in protected_inputs or any(
+            model_dir == resolved_output or model_dir in resolved_output.parents
+            for model_dir in (reference_input, candidate_input)
+        ):
             raise ValueError(f"{option} must not overwrite an evaluator input.")
-    for option, path in (
-        ("--reference-pack", args.reference_pack),
-        ("--candidate-pack", args.candidate_pack),
-    ):
-        if not path.name.lower().endswith(".tar.gz"):
-            raise ValueError(f"{option} must point to a .tar.gz browser pack.")
-    reference_pack_identity = _capture_file_identity(args.reference_pack)
-    candidate_pack_identity = _capture_file_identity(args.candidate_pack)
 
     try:
         from transformers import AutoTokenizer
@@ -1954,27 +2241,21 @@ def main() -> None:
         temporary_dir = Path(temporary)
         reference_dir = temporary_dir / "reference"
         candidate_dir = temporary_dir / "candidate"
-        reference_dir.mkdir()
-        candidate_dir.mkdir()
-        reference_members = _extract_pack(
-            args.reference_pack,
+        reference_files = _prepare_model_files(
+            args.reference_dir,
             reference_dir,
-            expected_identity=reference_pack_identity,
         )
-        candidate_members = _extract_pack(
-            args.candidate_pack,
+        candidate_files = _prepare_model_files(
+            args.candidate_dir,
             candidate_dir,
-            expected_identity=candidate_pack_identity,
         )
         (
             reference_manifest,
             candidate_manifest,
             precision_validation,
-        ) = _validate_pack_pair_before_sessions(
-            reference_dir,
-            reference_members,
-            candidate_dir,
-            candidate_members,
+        ) = _validate_model_pair_before_sessions(
+            reference_files,
+            candidate_files,
         )
         reference = _create_runtime(reference_dir, reference_manifest)
         candidate = _create_runtime(candidate_dir, candidate_manifest)
@@ -2112,7 +2393,7 @@ def main() -> None:
             for record in continuity_records
         ]
         report = {
-            "schema_version": 2,
+            "schema_version": 3,
             "method": {
                 "reference": "FP32 ONNX Runtime CPU with graph optimizations disabled",
                 "candidate": "mixed-FP16 ONNX Runtime CPU with graph optimizations disabled",
@@ -2138,25 +2419,26 @@ def main() -> None:
             },
             "runtime_environment": _runtime_environment(),
             "prompt_manifest": prompt_manifest,
-            "packs": {
-                "reference": {
-                    "file": reference_pack_identity.filename,
-                    "size_bytes": reference_pack_identity.size_bytes,
-                    "sha256": reference_pack_identity.sha256,
-                },
-                "candidate": {
-                    "file": candidate_pack_identity.filename,
-                    "size_bytes": candidate_pack_identity.size_bytes,
-                    "sha256": candidate_pack_identity.sha256,
-                },
-                "saved_bytes": (
-                    reference_pack_identity.size_bytes
-                    - candidate_pack_identity.size_bytes
+            "models": {
+                "reference": reference_files.identity.to_report(),
+                "candidate": candidate_files.identity.to_report(),
+                "transport_saved_bytes": (
+                    reference_files.identity.transport_size_bytes
+                    - candidate_files.identity.transport_size_bytes
                 ),
-                "saved_fraction": (
+                "transport_saved_fraction": (
                     1
-                    - candidate_pack_identity.size_bytes
-                    / reference_pack_identity.size_bytes
+                    - candidate_files.identity.transport_size_bytes
+                    / reference_files.identity.transport_size_bytes
+                ),
+                "raw_saved_bytes": (
+                    reference_files.identity.raw_size_bytes
+                    - candidate_files.identity.raw_size_bytes
+                ),
+                "raw_saved_fraction": (
+                    1
+                    - candidate_files.identity.raw_size_bytes
+                    / reference_files.identity.raw_size_bytes
                 ),
             },
             "contract_validation": {

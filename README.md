@@ -152,13 +152,14 @@ The Core40 MiniLM path runs end to end in the browser. A dedicated Web Worker
 uses ONNX Runtime Web's WebGPU execution provider exclusively; there is no CPU
 or WebAssembly execution-provider fallback. The app checks for a secure
 context and a WebGPU adapter exposing native `shader-f16` before opening the
-model pack.
+model download dialog.
 WordPiece tokenization, text conditioning, DDIM diffusion, autoregressive
 recentering/requantization, structured motion decoding, and three.js playback
 all remain on the user's device. The app is deliberately presented as a simple
-two-pane technical demo: input and generation controls are on the left, while
-the 3D preview, view settings, and playback timeline are on the right. At
-narrower widths the two panes stack vertically.
+technical demo: model-cache and motion controls are in a collapsible side
+panel, while the prompt composer, 3D preview, view settings, and playback
+timeline share the main workspace. On mobile the side controls open in a
+bottom drawer.
 
 The UI uses React and shadcn/ui preset `buFzUhO` (Lyra, neutral, Noto Sans,
 Tabler icons, and Tailwind CSS v4). Stock shadcn styling is retained for
@@ -174,7 +175,7 @@ The browser runtime provides:
   replan buffer, a 10-frame automatic-extension threshold, and a zero initial
   root transform;
 - predicted contacts, joint-orientation axes, and root trajectory;
-- dynamic skeleton metadata supplied by the model pack rather than a fixed
+- dynamic skeleton metadata supplied by the model manifest rather than a fixed
   viewer topology;
 - local VRM 0.x/1.x avatar loading through
   [`@pixiv/three-vrm`](https://github.com/pixiv/three-vrm), with Core27 motion
@@ -185,50 +186,50 @@ constraints, waypoints, target-velocity controls, initial-transform editor,
 CFG/history/future tuning controls, or optional motion-correction controls.
 Versioned session codecs remain covered as internal compatibility utilities,
 but the browser UI has no session or motion file import/export actions.
-The browser pack contains only the text encoder, unconstrained denoiser, and
-structured decoder graphs. Constraint-aware generation remains a Python/Viser
-feature.
+The browser model repository contains only the text encoder, unconstrained
+denoiser, and structured decoder graphs. Constraint-aware generation remains a
+Python/Viser feature.
 
-Export the local three-graph gzip pack and start the app:
+Export the three graphs as individually compressed development files and start
+the app:
 
 ```bash
 uv sync --extra browser
 
-uv run --extra browser python scripts/export_browser.py \
+uv run --extra browser python scripts/export_browser_models.py \
   --checkpoints-dir checkpoints \
   --minilm-artifact artifacts/minilm-ardy-core40 \
-  --output artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz
+  --output-directory artifacts/browser/ardy-minilm-core40-browser-v1
 
 cd web
 npm ci
 npm run dev
 ```
 
-Choose `artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz` with the demo's
-**Choose model pack** button. The browser accepts this single `.tar.gz` format
-only; it streams the archive through gzip/ustar validation before creating
-three ONNX sessions. The verified mixed-FP16 export in this environment is
-684,776,137 bytes (653.05 MiB). That is 33,301,667 bytes (4.64%) smaller than
-the corresponding 718,077,804-byte FP32 gzip export. Continuation-rollout
-validation on NVIDIA SEED Timeline Annotations test prompts keeps both the text
-encoder and autoregressive denoiser byte-identical to FP32 and converts only
-the structured decoder selectively. The precision boundaries and paired
-motion-fidelity results are documented in the
-[browser mixed-FP16 report](docs/browser_fp16.md). The static web build
-contains no model weights, and inference does not send prompts, model-pack
-files, VRM files, generation state, or motion to a server.
+During development, Vite exposes that ignored directory one file at a time.
+After WebGPU validation, the app asks before downloading the files and stores
+the verified compressed responses in Cache Storage. The verified mixed-FP16
+files contain 740,125,267 raw bytes and total 684,220,414 bytes (652.52 MiB)
+over the network. Brotli and Zstandard reduced the gzip result by only a
+further 0.10–0.15%, while lacking interoperable browser stream decompression,
+so the distribution uses deterministic per-file gzip. The static production
+build contains no model weights. Its model-source boundary is ready to be
+pointed at an immutable Model Hub revision; that production route is not
+configured yet. Inference does not upload prompts, model files, VRM files,
+generation state, or motion.
 
-VRM animation requires a current structured-output pack. Its
-`manifest.json` must use schema version `2`, report
-`runtime.contract_revision: 3`, and include decoder outputs for
+VRM animation requires the current structured-output model files. The
+decompressed `model.json.gz` uses the `ardy-browser-model-files` contract,
+reports `runtime.contract_revision: 3`, and includes decoder outputs for
 `localRotations` and `globalRotations`. Older directory and positions-only
-packs are rejected; regenerate them with the command above.
+exports are rejected; regenerate them with the command above.
 
 This MiniLM artifact is specific to
 `ARDY-Core-RP-20FPS-Horizon40` and typo-free English motion prompts. Branch
-points are rounded down to complete four-frame tokens. The pack includes
-Core27 skeleton metadata but no bundled character mesh. Load a local humanoid
-`.vrm` file under **View settings** when a skinned character preview is needed.
+points are rounded down to complete four-frame tokens. The model metadata
+includes Core27 skeleton metadata but no bundled character mesh. Load a local
+humanoid `.vrm` file under **View settings** when a skinned character preview
+is needed.
 The browser demo does not port the native Viser rotation-space IK, kinematic
 constraint editor, reference-motion tools, or general scene-mesh import tools.
 See the

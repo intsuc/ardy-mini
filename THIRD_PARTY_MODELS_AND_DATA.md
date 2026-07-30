@@ -99,11 +99,11 @@ and TypeScript and Playwright under Apache-2.0. The exact versions are pinned in
 Tokenizers.js, and three.js notices into `web/dist/notices/`; Vite also emits
 the bundled dependency notices in `web/dist/third-party-licenses.md`.
 
-The browser exporter creates a model pack from separately obtained ARDY and
-MiniLM artifacts. That generated pack remains outside Git and does not acquire
-the source repository's Apache-2.0 license. Anyone distributing a pack must
-review the ARDY checkpoint, MiniLM artifact, training-data, and teacher-model
-terms and supply the required model notices independently.
+The browser exporter creates individually compressed model files from separately
+obtained ARDY and MiniLM artifacts. Those generated files remain outside Git and
+do not acquire the source repository's Apache-2.0 license. Anyone distributing
+them must review the ARDY checkpoint, MiniLM artifact, training-data, and
+teacher-model terms and supply the required model notices independently.
 
 ## Unitree assets
 

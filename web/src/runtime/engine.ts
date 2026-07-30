@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { applyDdimStepInPlace, ddimStepForIndex } from "./ddim";
-import type { BrowserModelPackManifest } from "./manifest";
-import type { ModelPack } from "./model-pack";
+import type { BrowserModelManifest } from "./manifest";
+import type { ModelAssets } from "./model-assets";
 import type { RuntimeProgressStage } from "./protocol";
 import {
   PortableRandom,
@@ -242,7 +242,7 @@ function finiteTransform(
 }
 
 function resolveFrameCount(
-  manifest: BrowserModelPackManifest,
+  manifest: BrowserModelManifest,
   options: RuntimeGenerateOptions,
 ): number {
   const hasFrames = options.durationFrames !== undefined;
@@ -335,7 +335,7 @@ function buildGlobalHybridTokens(
   generatedFrameOffset: number,
   generationTokenOffset: number,
   tokenCount: number,
-  dimensions: BrowserModelPackManifest["dimensions"],
+  dimensions: BrowserModelManifest["dimensions"],
 ): Float32Array {
   const result = new Float32Array(tokenCount * dimensions.hybrid_dim);
   for (let token = 0; token < tokenCount; token += 1) {
@@ -375,7 +375,7 @@ function buildGlobalHybridTokens(
 }
 
 export class BrowserArdyGenerationSession {
-  readonly manifest: BrowserModelPackManifest;
+  readonly manifest: BrowserModelManifest;
   readonly #tokenizer: LocalTokenizer;
   readonly #sessions: RuntimeSessions;
   #random: PortableRandom;
@@ -385,7 +385,7 @@ export class BrowserArdyGenerationSession {
   #initialHeading: number;
 
   constructor(
-    manifest: BrowserModelPackManifest,
+    manifest: BrowserModelManifest,
     tokenizer: LocalTokenizer,
     sessions: RuntimeSessions,
     options: RuntimeSessionOptions,
@@ -466,7 +466,7 @@ export class BrowserArdyGenerationSession {
       state.frameCount < 0 ||
       tokenCount !== expectedTokenCount
     ) {
-      throw new RangeError("Continuation state does not match this model pack");
+      throw new RangeError("Continuation state does not match this model");
     }
     for (const value of state.hybridTokens) {
       if (!Number.isFinite(value)) {
@@ -683,6 +683,9 @@ export class BrowserArdyGenerationSession {
     const predictionName = graphs.denoiser.outputs.predX0;
 
     let elapsed = 0;
+    // DDIM is a recurrence: every inference consumes the x produced by the
+    // preceding step and a newly selected timestep. These runs cannot be
+    // parallelized without changing the sampler.
     for (
       let inferenceIndex = 0;
       inferenceIndex < diffusion.timesteps.length;
@@ -1094,13 +1097,13 @@ export class BrowserArdyGenerationSession {
 }
 
 export class BrowserArdyRuntime {
-  readonly manifest: BrowserModelPackManifest;
+  readonly manifest: BrowserModelManifest;
   readonly #tokenizer: LocalTokenizer;
   readonly #sessions: RuntimeSessions;
   #disposed = false;
 
   private constructor(
-    manifest: BrowserModelPackManifest,
+    manifest: BrowserModelManifest,
     tokenizer: LocalTokenizer,
     sessions: RuntimeSessions,
   ) {
@@ -1110,7 +1113,7 @@ export class BrowserArdyRuntime {
   }
 
   static async create(
-    pack: ModelPack,
+    assets: ModelAssets,
     options: RuntimeLoadOptions = {},
   ): Promise<BrowserArdyRuntime> {
     throwIfCancelled(options.signal);
@@ -1119,7 +1122,7 @@ export class BrowserArdyRuntime {
       completed: 0,
       total: 1,
     });
-    const tokenizer = await LocalTokenizer.create(pack);
+    const tokenizer = await LocalTokenizer.create(assets);
     throwIfCancelled(options.signal);
     options.onProgress?.({
       stage: "loading-tokenizer",
@@ -1128,7 +1131,7 @@ export class BrowserArdyRuntime {
     });
     try {
       const sessions = await createRuntimeSessions(
-        pack,
+        assets,
         (completed, total, message) => {
           throwIfCancelled(options.signal);
           options.onProgress?.({
@@ -1143,7 +1146,7 @@ export class BrowserArdyRuntime {
         await disposeRuntimeSessions(sessions);
         throw new RuntimeCancelledError("Model loading cancelled");
       }
-      return new BrowserArdyRuntime(pack.manifest, tokenizer, sessions);
+      return new BrowserArdyRuntime(assets.manifest, tokenizer, sessions);
     } catch (error) {
       await tokenizer.dispose();
       throw error;

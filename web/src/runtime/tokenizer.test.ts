@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { ModelPack } from "./model-pack";
+import type { ModelAssets } from "./model-assets";
 import { LocalTokenizer } from "./tokenizer";
 
 const tokenRecord = (id: number, content: string) => ({
@@ -71,7 +71,7 @@ function miniLmTokenizerJson(): object {
   };
 }
 
-function pack(maxLength = 128): ModelPack {
+function assets(maxLength = 128): ModelAssets {
   const encoder = new TextEncoder();
   const entries = new Map<string, Uint8Array>([
     [
@@ -105,12 +105,12 @@ function pack(maxLength = 128): ModelPack {
     release: (path: string) => {
       entries.delete(path);
     },
-  } as unknown as ModelPack;
+  } as unknown as ModelAssets;
 }
 
 describe("LocalTokenizer", () => {
   it("matches the all-MiniLM-L6-v2 golden IDs and masks", async () => {
-    const tokenizer = await LocalTokenizer.create(pack());
+    const tokenizer = await LocalTokenizer.create(assets());
     const output = await tokenizer.encode("A person walks forward.");
     expect([...output.inputIds]).toEqual([
       101n,
@@ -126,7 +126,7 @@ describe("LocalTokenizer", () => {
   });
 
   it("right-truncates content while retaining MiniLM's final SEP token", async () => {
-    const tokenizer = await LocalTokenizer.create(pack(5));
+    const tokenizer = await LocalTokenizer.create(assets(5));
     const output = await tokenizer.encode("A person walks forward.");
     expect([...output.inputIds]).toEqual([101n, 1037n, 2711n, 7365n, 102n]);
   });

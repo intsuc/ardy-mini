@@ -3,232 +3,101 @@
 The browser app runs ARDY Mini locally from prompt to playback: WordPiece
 tokenization, the specialized MiniLM condition encoder, deterministic DDIM
 sampling, autoregressive recentering/requantization, structured motion
-decoding, and three.js visualization. After the static page and a local model
-pack have loaded, no Python process or inference API is involved.
+decoding, and three.js visualization. Inference runs in a dedicated Web Worker
+and does not require a Python process or inference API.
 
-The interface is a deliberately simple technical demo rather than a marketing
-page or a feature-for-feature copy of the Python/Viser application. It has two
-working areas: the **Input** pane contains model, prompt, clip, and generation
-controls; the **Output** pane contains view settings, the 3D preview, and the
-playback timeline. The panes stack vertically at narrow viewport widths.
-
-The shell uses React and shadcn/ui preset `buFzUhO`: Lyra components, the
-neutral theme, Noto Sans, and Tabler icons on Tailwind CSS v4. Stock shadcn
-component styles own regular controls and surfaces. Custom CSS is limited to
-the two-pane workspace, canvas, native range/switch controls, and responsive
-behavior specific to this technical demo.
-
-The supported model artifact is intentionally narrow:
+The supported model configuration is intentionally narrow:
 
 - `ARDY-Core-RP-20FPS-Horizon40`;
 - the MiniLM student trained specifically for that checkpoint;
 - well-formed, typo-free English motion prompts;
-- 20 FPS and a 40-frame (2-second) generation horizon;
-- the current structured-output browser contract (`runtime.contract_revision`
-  `3`, model-pack schema `2`) with decoder-local and decoder-global rotation
-  tracks.
+- 20 FPS and a 40-frame generation horizon;
+- WebGPU with native `shader-f16`;
+- the current structured-output contract with local and global rotation tracks.
 
-The form accepts any non-empty prompt of at most 280 characters, but that
-validation does not expand the trained model's supported language. Prompts
-outside well-formed English are accepted as input with no quality guarantee.
+The form accepts any non-empty prompt of at most 280 characters. Text outside
+well-formed English is accepted without a quality guarantee.
 
-One request may generate 40–200 frames. A browser generation session can grow
-beyond that by appending additional 40-frame chunks.
+## Model files and browser cache
 
-## What is available in the browser
+The model is distributed as a small `model.json.gz` manifest and five
+individually gzip-compressed files: three ONNX graphs and two tokenizer files.
+The decompressed manifest
+records the immutable model revision, graph contracts, tensor dimensions,
+diffusion and quantization constants, normalization statistics, skeleton
+metadata, and both compressed and uncompressed sizes and SHA-256 digests.
 
-### Streaming and replanning
+The app follows this startup sequence:
 
-The worker decodes and emits each generated chunk instead of waiting for the
-entire requested clip. Core40 produces at most 40 new frames per window.
+1. Check the secure context, obtain a WebGPU adapter, and require `shader-f16`.
+2. If the device is unsupported, show a non-dismissible explanation and make no
+   model request.
+3. Inspect the revision-specific Cache Storage entries.
+4. Load a complete verified cache automatically, or ask before downloading the
+   missing model files.
+5. Download, decompress, and verify each file separately. Create each ONNX
+   session and release its source bytes before reading the next large graph.
 
-| Operation | Effect |
-|---|---|
-| Replace / **Restart** | Reset the random stream, fixed zero root transform, history, and generated motion, then generate a new session. |
-| Append / continuous generation | Continue from the current session end while retaining up to 40 recent history frames. |
-| Branch / **Restart from now** | Discard motion after the playhead and continue from that point. |
-| **Apply live** prompt | Preserve motion through a fixed 20-frame replan buffer, discard the later future, and continue statefully with the updated prompt. |
+The download dialog is a storage and network confirmation, not a model-license
+acceptance flow. Model terms are not currently shown or accepted in the app.
+The **Model** section reports cache status and lets the user retry a download or
+remove cached files. Removing the cache does not interrupt a model that is
+already loaded in the current tab; the files are needed again after reload.
 
-ARDY hybrid tokens represent four motion frames. A branch therefore rounds
-down to the nearest complete four-frame token. For example, branching at frame
-19 continues from frame 16. The browser has no motion encoder with which to
-re-encode an incomplete token.
+Compressed `Response` objects are stored in Cache Storage. A completion marker
+is written only after every declared file passes compressed and uncompressed
+size and SHA-256 verification. An interrupted or corrupt entry is not treated
+as a complete cache and can be fetched again independently.
 
-### Fixed generation policy
+## Export development model files
 
-The browser UI intentionally has no advanced **Motion parameters** panel.
-Generation commands use these fixed internal values:
-
-| Setting | Internal value |
-|---|---:|
-| Text CFG | `3.5` |
-| History | up to `40` frames, clamped to the manifest capacity |
-| Live-prompt replan buffer | `20` frames |
-| Automatic-extension threshold | `10` frames |
-| Initial root translation / heading | `[0, 0, 0]` / `0` radians |
-
-Duration (2–10 seconds), seed, continuous generation, and its target buffer
-remain normal user controls. The WebGPU-only browser model and worker
-contracts do not contain a backend selector, a constraint graph, or
-constraint-generation inputs.
-
-The browser application does not expose or apply root/full-body/end-effector
-constraints, waypoints, dense trajectories, target velocity/heading, an
-initial-transform editor, or browser postprocess parameters. These remain
-Python/Viser features.
-
-### Structured output and viewer
-
-The current decoder returns all of the following for every emitted chunk:
-
-- normalized `[T, 330]` ARDY motion features;
-- world-space joint positions `[T, J, 3]`;
-- local and global joint rotation matrices `[T, J, 3, 3]`;
-- root positions and global root headings;
-- four predicted foot-contact channels.
-
-The viewer consumes dynamic skeleton names, parents, root index, and contact
-metadata instead of assuming one fixed topology. The current compatible pack
-describes Core27. Display controls expose the skeleton, root trajectory,
-predicted contacts, and joint orientation axes.
-
-Under **View settings**, **Load VRM** accepts a local VRM 0.x or 1.x humanoid
-file. [`@pixiv/three-vrm`](https://github.com/pixiv/three-vrm) loads the avatar
-only after the user selects it, and the viewer supports show/hide, replacement,
-and removal without reloading the motion. Core27 hips translation is scaled to
-the avatar, and Core27 joint rotations are retargeted onto the normalized VRM
-humanoid. Missing optional VRM bones are skipped.
-
-A VRM is the supported skinned-avatar format; the app has no general
-scene-mesh or reference-motion importer.
-
-### VRM rotation-track requirement
-
-VRM bone animation requires either `globalRotations` or `localRotations` in the
-motion. The current exported pack supplies both. The manifest should contain:
-
-```json
-{
-  "schema_version": 2,
-  "runtime": { "contract_revision": 3 },
-  "graphs": {
-    "decoder": {
-      "outputs": {
-        "localRotations": "local_rotations",
-        "globalRotations": "global_rotations"
-      }
-    }
-  }
-}
-```
-
-The loader accepts only the current gzip archive/schema contract. Older
-directory packs and positions-only packs are rejected; regenerate them with
-the current exporter.
-
-## Architecture
-
-Inference runs in a dedicated Web Worker so ONNX execution does not block the
-main UI. ONNX Runtime Web creates all three sessions with only the `webgpu`
-execution provider. The selected mixed-FP16 policy requires a WebGPU adapter
-that exposes native `shader-f16`. If WebGPU, `shader-f16`, or session creation
-is unavailable, the error is reported without creating replacement
-CPU/WebAssembly sessions.
-
-| Graph | Main inputs | Outputs |
-|---|---|---|
-| `text_encoder.onnx` | WordPiece IDs, attention mask, token types | direct 2,048-D root/body condition (two 1,024-D branches) |
-| `denoiser.onnx` | text CFG, up to 40 history frames, 40 generation frames, text condition, timestep | clean 148-D hybrid tokens for unconstrained windows |
-| `decoder.onnx` | hybrid tokens, valid-token mask, accumulated root translation | normalized motion, joints, local/global rotations, roots/headings, contacts |
-
-The JavaScript runtime supplies a reproducible portable Gaussian random stream
-and implements ARDY's ten-step, eta-zero DDIM update. Between windows, it
-retains global hybrid tokens, recenters the latest history, and requantizes
-the latent body features with the manifest's FSQ constants.
-
-The worker protocol supports replace, append, branch, chunk progress,
-continuation restore, rich motion arrays, and capability reporting. It has no
-constraint-graph inputs. Typed-array snapshots are transferred to the main
-thread so streaming cannot detach state that the worker still needs.
-
-## Export a local model pack
-
-Model weights are deliberately absent from the Git repository and static web
-build. First obtain the compatible Core40 checkpoint under `checkpoints/` and
-train or otherwise produce the compatible MiniLM artifact described in
-[the encoder guide](minilm_encoder.md).
+Model weights are absent from the Git repository and static web build. First
+obtain the compatible Core40 checkpoint under `checkpoints/` and produce the
+MiniLM artifact described in [the encoder guide](minilm_encoder.md).
 
 From the repository root:
 
 ```bash
 uv sync --extra browser
 
-uv run --extra browser python scripts/export_browser.py \
+uv run --extra browser python scripts/export_browser_models.py \
   --checkpoints-dir checkpoints \
   --minilm-artifact artifacts/minilm-ardy-core40 \
-  --output artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz
+  --output-directory artifacts/browser/ardy-minilm-core40-browser-v1
 ```
 
 Add
-`--fp32-reference-output artifacts/browser/ardy-minilm-core40-browser-v1-fp32-reference.tar.gz`
-when producing the paired reference used by
-[`evaluate_browser_fp16.py`](../scripts/evaluate_browser_fp16.py). Both archives
-are fully prepared before either destination is replaced, and an ordinary
-publication failure restores the preceding pair.
+`--fp32-reference-output-directory artifacts/browser/ardy-minilm-core40-browser-v1-fp32-reference`
+when producing a paired FP32 directory for the mixed-precision evaluator.
 
-The exporter first checks all three FP32 ONNX exports and, unless
-`--skip-verify` is passed, compares each graph with its PyTorch source through
-ONNX Runtime CPU. It then applies the graph-specific mixed-FP16 policy, checks
-the three converted graphs, and compares mixed-FP16 outputs with the verified
-FP32 ONNX exports through ONNX Runtime CPU with graph optimizations disabled.
-`--skip-verify` skips both numerical comparison stages; it does not skip ONNX
-checking or mixed-FP16 conversion.
-`manifest.json` records graph contracts, tensor dimensions, diffusion and
-quantization constants, normalization statistics, motion layout, skeleton
-metadata, capabilities, file sizes, SHA-256 digests, model compatibility, and
-license notices. Local exports also bind the three checkpoint source files by
-filename, size, SHA-256, and a combined fingerprint without recording the local
-checkpoint path. Before ONNX export, it specializes the denoiser's
-non-persistent sinusoidal lookup tables to the ten reachable diffusion
-timesteps and the fixed 20-token browser AR window. It then writes a
-deterministic POSIX ustar archive through gzip; no unpacked model-pack output is
-kept.
+The exporter checks the three FP32 ONNX graphs and, unless `--skip-verify` is
+passed, compares them with the PyTorch sources through ONNX Runtime CPU. It then
+applies the graph-specific mixed-FP16 policy, validates the converted graphs,
+and compares their outputs with the verified FP32 ONNX exports. Before ONNX
+export it specializes the denoiser position tables to the ten reachable
+diffusion timesteps and fixed 20-token browser window.
 
-Confirm that the result is the current structured-output contract:
+Only deterministic `.gz` files, including `model.json.gz`, are published. The
+output directory contains no uncompressed duplicate models. Publication is
+staged so an ordinary failure does not leave a partially replaced destination.
+
+Inspect the contract with:
 
 ```bash
-tar -xOzf artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz manifest.json |
-jq '{
+gzip -dc artifacts/browser/ardy-minilm-core40-browser-v1/model.json.gz |
+  jq '{
+  format,
   schema_version,
+  model: {id: .model.id, revision: .model.revision},
   contract_revision: .runtime.contract_revision,
   precision_policy: .precision.policy_version,
   required_webgpu_features: .runtime.required_webgpu_features,
   local_rotations: .graphs.decoder.outputs.localRotations,
   global_rotations: .graphs.decoder.outputs.globalRotations
-}'
+  }'
 ```
 
-The expected schema, runtime-contract, and precision-policy revisions are `2`,
-`3`, and `3`; the required feature list is `["shader-f16"]`, and both rotation
-output names must be present. The archive contains exactly one manifest, three
-ONNX graphs, and two tokenizer files.
-
-The verified mixed-FP16 export produced in this environment is 684,776,137
-bytes (653.05 MiB, 0.6377 GiB) as `.tar.gz`, with SHA-256
-`8641b8fbb94c245866300dcdbb3ad75a634d5427566fc4a8bd2fc8b9fe533a68`.
-The corresponding FP32 gzip pack is 718,077,804 bytes, with SHA-256
-`a9f5b37a0552e45dd7880fb347d4c3aa1206bc735b87cd2250a61178236074c3`.
-The selected policy saves 33,301,667 bytes (4.64%) on the gzip pack.
-Continuation-rollout validation on the pinned NVIDIA SEED Timeline
-Annotations test prompts keeps the text encoder and autoregressive denoiser
-byte-identical to FP32; only the decoder uses mixed FP16. Small
-exporter/version differences can change exact archive byte counts. See the
-[mixed-FP16 ablation report](browser_fp16.md) for the retained FP32 regions,
-fidelity measurements, and reproduction command.
-
-## Run the app
-
-Install the pinned browser dependencies and start Vite:
+## Run the development app
 
 ```bash
 cd web
@@ -236,77 +105,77 @@ npm ci
 npm run dev
 ```
 
-Open the printed localhost URL, choose **Choose model pack**, and select the
-`artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz` file. The app
-stream-decompresses gzip, validates the POSIX ustar structure and every
-manifest-declared file, then creates the three inference sessions. When origin
-storage is available, it can retain the original gzip archive in
-origin-private storage for later visits.
-
-The desktop UI has an **Input** pane and an **Output** pane:
-
-1. Load the model pack in **Input**, enter a prompt or select one of the
-   examples, choose clip duration and seed, and generate.
-2. Use the Output pane's **View settings** disclosure for the skeleton,
-   contacts, orientation axes, trajectory, and a local VRM avatar.
-3. Select **Load VRM** and choose a `.vrm` file. The avatar stays local to the
-   current page and can be hidden, replaced, or removed.
-4. Use the timeline and playback controls to inspect the generated motion.
-
-There is no right-side Control/Motion-parameters inspector. Kinematic
-constraints and detailed planning controls belong to the separate
-Python/Viser demo.
-
-The **Model** card reports WebGPU requirements before model selection. WebGPU
-with native `shader-f16` is required; the app checks the secure context,
-`navigator.gpu`, adapter availability, and that adapter feature before reading
-or decompressing the model archive. Use HTTPS or localhost on a browser and
-device with WebGPU FP16 shader support.
-
-The preview supports drag/swipe orbit, wheel/pinch zoom, and keyboard
-operation. The camera follows the generated root position while preserving the
-chosen orbit and distance. With the preview focused, W/A/S/D translates the
-camera, Space toggles playback, Left/Right seeks, Shift+Arrow orbits,
-Plus/Minus zooms, and Home resets the camera around the current pose. Generate
-uses Command+Enter on Apple platforms and Control+Enter elsewhere.
-
-`prefers-reduced-motion: reduce` disables automatic motion playback and
-looping; a new result opens paused at frame zero and remains manually
-playable. Viewer rendering also stops when neither playback nor camera
-damping requires another frame, and pauses its clock while the page is hidden.
-
-For a production build:
+The development server exposes
+`artifacts/browser/ardy-minilm-core40-browser-v1/` at the app's fixed model URL
+without copying the files into `web/public` or the production build. Override
+the source directory when needed:
 
 ```bash
-cd web
-npm test
-npm run build
-npm run preview
+ARDY_BROWSER_MODEL_DIR=/absolute/path/to/model-files npm run dev
 ```
 
-`web/dist/` contains the app, the pinned ONNX Runtime browser assets, source
-and runtime notices, and generated third-party license information. It does
-not contain the model pack.
+Open the printed localhost URL. On an empty cache, choose **Download model** in
+the dialog. Subsequent visits to the same origin and model revision load from
+the verified cache.
 
-## Session codec compatibility
+The eventual hosted build is expected to set its production model base URL to
+an immutable Hugging Face Model Hub revision. Development and production share
+the same `model.json.gz`, per-file gzip, verification, and cache path; only the
+base URL changes. Set `VITE_MODEL_BASE_URL` at build time; production has no
+fallback to the development route. The repository does not yet configure or
+publish a Hub repository.
 
-The repository retains versioned JSON and binary session codecs for validation
-and library-level compatibility tests. The current browser interface does not
-expose session import/export, motion export, or reference-motion import entry
-points.
+## Generation and playback
 
-## Privacy and hosting
+The primary workflow is to enter a motion description in the preview composer,
+start playback, and update the prompt while motion continues. Core40 emits up to
+40 new frames per generation window.
 
-Prompts, seeds, model-pack files, selected VRM avatars, generation state, and
-generated motion remain in the browser. Model and avatar selection read local
-files; inference does not upload them. VRM object URLs are revoked after
-loading. The app has no inference service dependency.
+| Operation | Effect |
+|---|---|
+| Start or restart | Reset random state, history, and generated motion, then begin a new session. |
+| Continuous extension | Generate ahead of playback while retaining up to 40 recent history frames. |
+| Restart from now | Discard motion after the playhead and continue from that point. |
+| Update motion | Preserve motion through a 20-frame replan buffer and continue with the new prompt. |
 
-The selected `.tar.gz` model pack may be retained as one file in
-origin-private storage when the browser permits it. A selected VRM avatar is
-page-local; select it again after reloading the page.
-If the app finds the former unpacked directory-pack cache, it removes that
-unsupported cache before asking for the current archive.
+ARDY hybrid tokens represent four motion frames, so branch positions round down
+to a complete token. Generation uses fixed internal values: text CFG `3.5`, up
+to 40 history frames, a 20-frame prompt-update buffer, a 10-frame extension
+threshold, and a zero initial root transform.
+
+The viewer exposes the skeleton, predicted contacts, orientation axes, root
+trajectory, camera follow, and a local VRM avatar. Drag or swipe to orbit,
+wheel or pinch to zoom, and use W/A/S/D to translate the camera. Keyboard
+playback, seek, orbit, zoom, and reset actions are available while the preview
+has focus.
+
+Under **View settings**, **Load VRM** accepts a local VRM 0.x or 1.x humanoid
+file. Dropping a `.vrm` anywhere on the page also loads or replaces it.
+[`@pixiv/three-vrm`](https://github.com/pixiv/three-vrm) remains lazy-loaded.
+The avatar file is page-local and must be selected again after reload.
+
+The browser UI intentionally omits advanced motion parameters, kinematic
+constraints, waypoints, target velocity and heading, initial-transform editing,
+reference motion, and general scene-mesh import. Those remain Python/Viser
+features.
+
+## Architecture
+
+| Graph | Main inputs | Outputs |
+|---|---|---|
+| `text_encoder.onnx` | WordPiece IDs, attention mask, token types | direct 2,048-D root/body condition |
+| `denoiser.onnx` | text CFG, history, generation masks, text condition, timestep | clean 148-D hybrid tokens |
+| `decoder.onnx` | hybrid tokens, valid-token mask, accumulated root translation | motion, joints, rotations, roots, headings, contacts |
+
+ONNX Runtime Web creates sessions with only the `webgpu` execution provider.
+There is no CPU or WebAssembly execution-provider fallback. Its internal
+WebAssembly host assets still perform runtime management and are not a
+selectable inference backend.
+
+The worker implements ARDY's ten-step eta-zero DDIM update, retains global
+hybrid tokens between windows, recenters recent history, and requantizes latent
+body features with the manifest's FSQ constants. Typed-array snapshots are
+transferred to the main thread so streaming cannot detach worker state.
 
 Vite development and preview send:
 
@@ -315,17 +184,35 @@ Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Embedder-Policy: require-corp
 ```
 
-These headers enable cross-origin isolation for ONNX Runtime's multithreaded
-host runtime. ONNX Runtime Web's WebGPU execution provider still uses an
-internal WebAssembly core for session management; that implementation detail
-is not a selectable inference backend or fallback. A production static host
-should send the same headers and serve the app, ONNX Runtime `.mjs`/`.wasm`
-host assets, and any hosted model assets from compatible origins. WebGPU
-itself requires a secure context.
+A production host must send equivalent headers and make the static runtime and
+model origin compatible with cross-origin isolation and CORS.
+
+## Compression decision
+
+A file-by-file migration benchmark used the same mixed-FP16 graph and
+tokenizer payloads with a preliminary manifest (740,127,749 raw bytes):
+
+| Encoding | Bytes | Reduction from raw |
+|---|---:|---:|
+| gzip level 9 | 684,212,635 | 7.55% |
+| Brotli quality 6 | 683,147,982 | 7.70% |
+| Zstandard level 9 | 683,453,162 | 7.66% |
+
+The final deterministic export contains 740,125,267 raw bytes and produces
+684,220,414 bytes including `model.json.gz`; its small difference from the
+command-line gzip benchmark is compressor- and manifest-specific. Recompressing
+the final files with GNU `gzip -9 -n` saved just 8,143 bytes (0.0012%), which
+does not justify adding an external exporter dependency. Lowering zlib's
+`memLevel` from 9 to 8 added 555,059 bytes, so the exporter retains
+`memLevel=9`. In the paired benchmark, Brotli saved only 1,064,653 bytes
+(0.16%) over gzip and Zstandard saved 759,473 bytes (0.11%). Native
+`DecompressionStream("gzip")` is interoperable across the supported browser
+families, while explicit Brotli and Zstandard stream decompression is not.
+HTTP content encoding is also unsuitable for direct hosted model files whose
+response headers the app does not control. The exporter therefore uses
+deterministic per-file gzip and stores those compressed responses directly.
 
 ## Validation
-
-Run exporter and browser tests with:
 
 ```bash
 uv run --extra browser --with pytest python -m pytest -q \
@@ -334,101 +221,31 @@ uv run --extra browser --with pytest python -m pytest -q \
 cd web
 npm test
 npm run build
-npx playwright install chromium
-npm run test:e2e
+npx react-doctor@latest --no-telemetry
 ```
 
-Export verification has two numerical stages. The current pack records these
-maximum FP32 PyTorch-versus-FP32 ONNX Runtime CPU errors:
-
-| Output | Maximum absolute error |
-|---|---:|
-| MiniLM text conditions | `1.14e-5` |
-| Unconstrained denoiser tokens | `1.60e-5` |
-| Normalized motion | `2.43e-5` |
-| Posed joints | `1.70e-6 m` |
-| Local rotations | `7.93e-6` |
-| Global rotations | `7.99e-6` |
-| Root positions / headings / contacts | `0` |
-
-The second stage compares the FP32 ONNX exports with mixed-FP16 ONNX through
-CPU ONNX Runtime with graph optimizations disabled:
-
-| Output | Mixed-FP16 RMSE |
-|---|---:|
-| MiniLM text conditions | `0` |
-| Unconstrained denoiser tokens | `0` |
-| Normalized motion | `2.77e-3` |
-| Posed joints | `2.35e-4 m` |
-| Local rotations | `8.15e-4` |
-| Global rotations | `7.90e-4` |
-| Root positions / headings | `0` |
-
-Foot-contact agreement is `100%` in that export check. The larger paired
-64-prompt × 3-seed rollout evaluation, which measures accumulated
-mixed-precision motion error, is in the
-[mixed-FP16 ablation report](browser_fp16.md).
-
-Browser runtime and memory measurements are device-, browser-, and
-driver-specific. The current pack has three graphs; measurements
-from the former four-graph directory pack or positions-only packs do not
-describe this contract.
-
-Run the opt-in real-pack Playwright test on WebGPU with:
+For the opt-in real-model browser test, point the development server at the
+exported directory:
 
 ```bash
 cd web
-
-ARDY_BROWSER_MODEL_PACK=../artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz \
-npm run test:e2e -- e2e/real-model.spec.ts
+ARDY_BROWSER_MODEL_DIR=../artifacts/browser/ardy-minilm-core40-browser-v1 \
+  npm run test:e2e -- e2e/real-model.spec.ts
 ```
 
-Set `ARDY_BROWSER_REDUCED_MOTION=1` to exercise paused initial playback.
+## Privacy, distribution, and trust
 
-## Current limitations
-
-- The trained MiniLM condition heads are checkpoint-specific. This pack is not
-  interchangeable with Core8, G1, SOMA, or another 2,048-D model.
-- Prompt support is limited to well-formed, typo-free English motion
-  descriptions. The form accepts other text but does not promise useful output.
-- Branching crops to the preceding complete four-frame token; a partial token
-  cannot be continued exactly.
-- Each generation call is limited to 40–200 frames. Longer sessions are built
-  through append/streaming operations.
-- The app has no detailed motion-parameter editor, kinematic-constraint
-  authoring, waypoint/target-velocity planning, JavaScript motion-correction
-  pass, or native Viser rotation-space IK.
-- VRM retargeting is designed for the current Core27 skeleton names and a VRM
-  humanoid rig. Missing optional VRM bones are skipped; expressions and
-  non-humanoid animation are not driven.
-- VRM animation requires local or global rotation tracks. Positions-only
-  motion moves the hips but leaves the avatar in its rest/T pose; there is no
-  position-derived rotation fallback.
-- The pack supplies Core27 skeleton metadata and no bundled character mesh.
-  VRM is the only supported local character format; the browser has no general
-  scene-mesh importer.
-- A loaded VRM is page-local and must be selected again after a reload.
-- WebGPU with native `shader-f16` is required. There is no CPU or WebAssembly
-  execution-provider fallback when WebGPU initialization, feature validation,
-  or session creation fails.
-
-## Distribution and trust
+Prompts, seeds, selected VRM avatars, generation state, and generated motion
+remain in the browser. Model files are downloaded only after confirmation,
+cached on the current origin, and never uploaded by the app.
 
 Repository-authored source and static-shell code are Apache-2.0 subject to the
-retained notices and attributions; bundled dependencies retain their own
-licenses. The source license does not grant rights to redistribute the ARDY
-checkpoint, the locally trained MiniLM weights, training data, teacher
-artifacts, or a model pack containing them.
+retained notices and attributions. That source license does not grant rights to
+redistribute the ARDY checkpoint, trained MiniLM weights, training data,
+teacher artifacts, or generated model files. Keep local exports under ignored
+`artifacts/` unless every applicable model and data term has been reviewed.
+See [THIRD_PARTY_MODELS_AND_DATA.md](../THIRD_PARTY_MODELS_AND_DATA.md).
 
-Keep local exports under the ignored `artifacts/` directory unless you have
-separately reviewed and satisfied every applicable model and data term. See
-[THIRD_PARTY_MODELS_AND_DATA.md](../THIRD_PARTY_MODELS_AND_DATA.md) before
-sharing a pack.
-
-No VRM asset is bundled with the repository or static build. Loading one
-locally does not grant redistribution or usage rights for that avatar; follow
-the permissions and attribution metadata embedded by its author.
-
-The manifest's SHA-256 hashes detect corruption and file substitution relative
-to that manifest; they are not a digital signature. Import packs only from a
-source you trust.
+The SHA-256 digests detect corruption and substitution relative to the
+decompressed manifest; they are not a digital signature. Download model files
+only from a source you trust.

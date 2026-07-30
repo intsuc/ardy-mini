@@ -204,13 +204,13 @@ describe("WebGPU FP16 capability checks", () => {
       denoiser: { model: "denoiser.onnx" },
       decoder: { model: "decoder.onnx" },
     };
-    const pack = {
+    const assets = {
       manifest: { graphs },
       read: vi.fn(async () => new Uint8Array([0])),
       release: vi.fn(),
     } as unknown as Parameters<typeof createRuntimeSessions>[0];
 
-    await createRuntimeSessions(pack);
+    await createRuntimeSessions(assets);
 
     expect(createInferenceSession).toHaveBeenCalledTimes(3);
   });
@@ -242,7 +242,7 @@ describe("runtime session asset lifetime", () => {
       "decoder.onnx": 2,
       "denoiser.onnx": 3,
     };
-    const pack = {
+    const assets = {
       manifest: { graphs },
       read: vi.fn(async (path: string) => {
         events.push(`read:${path}`);
@@ -255,7 +255,7 @@ describe("runtime session asset lifetime", () => {
     const progress: string[] = [];
 
     const sessions = await createRuntimeSessions(
-      pack,
+      assets,
       (completed, total, message) =>
         progress.push(`${completed}/${total}:${message}`),
     );
@@ -308,13 +308,13 @@ describe("runtime session asset lifetime", () => {
       },
     };
     const releaseAsset = vi.fn();
-    const pack = {
+    const assets = {
       manifest: { graphs },
       read: vi.fn(async () => new Uint8Array([0])),
       release: releaseAsset,
     } as unknown as Parameters<typeof createRuntimeSessions>[0];
 
-    await expect(createRuntimeSessions(pack)).rejects.toThrow(
+    await expect(createRuntimeSessions(assets)).rejects.toThrow(
       /denoiser initialization failed/,
     );
 
