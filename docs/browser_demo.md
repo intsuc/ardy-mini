@@ -169,6 +169,13 @@ uv run --extra browser python scripts/export_browser.py \
   --output artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz
 ```
 
+Add
+`--fp32-reference-output artifacts/browser/ardy-minilm-core40-browser-v1-fp32-reference.tar.gz`
+when producing the paired reference used by
+[`evaluate_browser_fp16.py`](../scripts/evaluate_browser_fp16.py). Both archives
+are fully prepared before either destination is replaced, and an ordinary
+publication failure restores the preceding pair.
+
 The exporter first checks all three FP32 ONNX exports and, unless
 `--skip-verify` is passed, compares each graph with its PyTorch source through
 ONNX Runtime CPU. It then applies the graph-specific mixed-FP16 policy, checks
@@ -179,7 +186,9 @@ checking or mixed-FP16 conversion.
 `manifest.json` records graph contracts, tensor dimensions, diffusion and
 quantization constants, normalization statistics, motion layout, skeleton
 metadata, capabilities, file sizes, SHA-256 digests, model compatibility, and
-license notices. Before ONNX export, it specializes the denoiser's
+license notices. Local exports also bind the three checkpoint source files by
+filename, size, SHA-256, and a combined fingerprint without recording the local
+checkpoint path. Before ONNX export, it specializes the denoiser's
 non-persistent sinusoidal lookup tables to the ten reachable diffusion
 timesteps and the fixed 20-token browser AR window. It then writes a
 deterministic POSIX ustar archive through gzip; no unpacked model-pack output is
@@ -204,31 +213,16 @@ The expected schema, runtime-contract, and precision-policy revisions are `2`,
 output names must be present. The archive contains exactly one manifest, three
 ONNX graphs, and two tokenizer files.
 
-The verified mixed-FP16 export produced in this environment is 684,835,577
-bytes (653.11 MiB, 0.6378 GiB) as `.tar.gz`. Its member payload is
-740,127,046 bytes. The archive SHA-256 is
-`145995ff6216076d2ee06d7a62a741c6d9a02434278d645a0446cd357aa95868`,
-and its manifest identifies MiniLM artifact
-`b2e4af890d4a733049a377b96355eb1f3a5716378f9304010906823cf6af7fcb`.
-The member sizes are:
-
-| Asset | Bytes |
-|---|---:|
-| FP32 MiniLM condition encoder | 112,430,592 |
-| FP32 specialized unconstrained ARDY denoiser | 590,701,706 |
-| Mixed-FP16 structured motion decoder | 36,181,508 |
-| Tokenizer files | 712,243 |
-| Manifest | 100,997 |
-
-The corresponding three-graph FP32 export contains 774,774,496 ONNX bytes and
-produces a 718,137,762-byte gzip pack with SHA-256
-`4962bc2c3b7135e8181de1229fc816924ebcd60e3d5ff1d9f5cc02b8505e8663`.
-The selected precision policy reduces the ONNX payload to 739,313,806 bytes,
-saving 35,460,690 bytes (4.58%), and reduces the gzip pack by 33,302,185 bytes
-(4.64%). Continuation-rollout ablation keeps the text encoder and
-autoregressive denoiser byte-identical to FP32; only the decoder uses mixed
-FP16, reducing that graph by 49.50%. Small exporter/version differences can
-change the exact archive and manifest byte counts. See the
+The verified mixed-FP16 export produced in this environment is 684,776,137
+bytes (653.05 MiB, 0.6377 GiB) as `.tar.gz`, with SHA-256
+`8641b8fbb94c245866300dcdbb3ad75a634d5427566fc4a8bd2fc8b9fe533a68`.
+The corresponding FP32 gzip pack is 718,077,804 bytes, with SHA-256
+`a9f5b37a0552e45dd7880fb347d4c3aa1206bc735b87cd2250a61178236074c3`.
+The selected policy saves 33,301,667 bytes (4.64%) on the gzip pack.
+Continuation-rollout validation on the pinned NVIDIA SEED Timeline
+Annotations test prompts keeps the text encoder and autoregressive denoiser
+byte-identical to FP32; only the decoder uses mixed FP16. Small
+exporter/version differences can change exact archive byte counts. See the
 [mixed-FP16 ablation report](browser_fp16.md) for the retained FP32 regions,
 fidelity measurements, and reproduction command.
 

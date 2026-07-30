@@ -19,8 +19,8 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import time
-from collections import Counter
 from itertools import combinations
 from pathlib import Path
 from typing import Any
@@ -29,6 +29,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from ardy.minilm_teacher_cache import (
+    TeacherCache,
+    load_teacher_cache,
+    validate_artifact_teacher_cache_fingerprint,
+)
 from ardy.model import MiniLMArdyEncoder, load_model
 from ardy.model.registry import resolve_model_name
 from ardy.motion_rep.tools import length_to_mask
@@ -37,6 +42,22 @@ from ardy.tools import seed_everything, to_numpy
 TEACHER_DIM = 4096
 TARGET_DIM = 2048
 VALID_SPLITS = {"train", "val", "test"}
+DEFAULT_PROMPT_MANIFEST = Path(
+    "artifacts/data/prompts-core40-timeline.jsonl"
+)
+DEFAULT_SOURCES = ["overview_description", "events.description"]
+DEFAULT_NUM_PROMPTS = 64
+DEFAULT_SEEDS = [0, 1, 2]
+DEFAULT_DIFFUSION_STEPS = 10
+DEFAULT_STUDENT_DTYPE = "float32"
+PROMPT_SELECTION_ALGORITHM = "evenly_spaced_numpy_linspace_v1"
+DETERMINISTIC_CUBLAS_WORKSPACE_CONFIG = ":4096:8"
+REPEATABILITY_OUTPUT_KEYS = (
+    "root_positions",
+    "posed_joints",
+    "global_root_heading",
+    "foot_contacts",
+)
 SUMMARY_CONTEXT_KEYS = {
     "prompt_index",
     "seed",
@@ -50,36 +71,67 @@ SUMMARY_CONTEXT_KEYS = {
 }
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument(
         "--prompt-manifest",
         type=Path,
-        default=None,
-        help=("Optional prepared prompt JSONL used to validate cache lineage and enable source filtering"),
+        default=DEFAULT_PROMPT_MANIFEST,
+        help="Prepared prompt JSONL used to validate cache lineage",
     )
     parser.add_argument(
         "--sources",
         nargs="+",
-        default=None,
+        default=DEFAULT_SOURCES,
         help=(
-            "Prompt-manifest source values to evaluate, for example content_natural_desc_1 ... content_natural_desc_4"
+            "Prompt-manifest source values to evaluate: overview_description and/or events.description"
         ),
     )
     parser.add_argument("--student-path", default="artifacts/minilm-ardy-core40")
     parser.add_argument("--checkpoints-dir", default="checkpoints")
     parser.add_argument("--model", default="core")
-    parser.add_argument("--num-prompts", type=int, default=12)
-    parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
+    parser.add_argument(
+        "--num-prompts",
+        type=int,
+        default=DEFAULT_NUM_PROMPTS,
+    )
+    parser.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=DEFAULT_SEEDS,
+    )
     parser.add_argument("--duration", type=float, default=4.0)
-    parser.add_argument("--diffusion-steps", type=int, default=None)
+    parser.add_argument(
+        "--diffusion-steps",
+        type=int,
+        default=DEFAULT_DIFFUSION_STEPS,
+    )
     parser.add_argument("--cfg-weight", type=float, nargs=2, default=[2.0, 2.0])
     parser.add_argument("--output", default="artifacts/evaluation/motion_metrics.json")
     parser.add_argument("--sample-dir", default="outputs/minilm-motion-comparison")
     parser.add_argument("--save-samples", type=int, default=3)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    return parser.parse_args()
+    parser.add_argument(
+        "--student-dtype",
+        choices=("float32", "float16", "bfloat16"),
+        default=DEFAULT_STUDENT_DTYPE,
+    )
+    parser.add_argument(
+        "--repeatability-check",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "generate the first teacher case twice and require bitwise-equal "
+            "motion outputs"
+        ),
+    )
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="auto, cpu, cuda, or e.g. cuda:0",
+    )
+    return parser.parse_args(argv)
 
 
 def sha256_file(path: str | Path) -> str:
@@ -90,80 +142,115 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def selected_prompt_sha256(texts: list[str]) -> str:
+    """Hash the ordered selected prompt bodies without publishing them."""
+
+    encoded = json.dumps(
+        texts,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def configure_determinism() -> dict[str, Any]:
+    """Configure and describe the exact motion-evaluation determinism policy."""
+
+    configured_workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    if configured_workspace is None:
+        os.environ[
+            "CUBLAS_WORKSPACE_CONFIG"
+        ] = DETERMINISTIC_CUBLAS_WORKSPACE_CONFIG
+    elif configured_workspace != DETERMINISTIC_CUBLAS_WORKSPACE_CONFIG:
+        raise RuntimeError(
+            "CUBLAS_WORKSPACE_CONFIG must be "
+            f"{DETERMINISTIC_CUBLAS_WORKSPACE_CONFIG!r}, got "
+            f"{configured_workspace!r}"
+        )
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.set_float32_matmul_precision("highest")
+    return {
+        "torch_deterministic_algorithms": (
+            torch.are_deterministic_algorithms_enabled()
+        ),
+        "torch_deterministic_warn_only": (
+            torch.is_deterministic_algorithms_warn_only_enabled()
+        ),
+        "cublas_workspace_config": os.environ["CUBLAS_WORKSPACE_CONFIG"],
+        "cudnn_deterministic": torch.backends.cudnn.deterministic,
+        "cudnn_benchmark": torch.backends.cudnn.benchmark,
+        "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+        "float32_matmul_precision": torch.get_float32_matmul_precision(),
+    }
+
+
+def _resolve_device(requested: str) -> str:
+    if requested == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if requested.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(
+            f"--device={requested!r} requested, but CUDA is unavailable"
+        )
+    return requested
+
+
+def assert_exact_repeatability(
+    first: dict[str, np.ndarray],
+    second: dict[str, np.ndarray],
+) -> list[str]:
+    """Require exact equality for motion arrays used by public metrics."""
+
+    compared: list[str] = []
+    for key in REPEATABILITY_OUTPUT_KEYS:
+        if key not in first or key not in second:
+            raise ValueError(
+                f"repeatability output is missing required key {key!r}"
+            )
+        left = np.asarray(first[key])
+        right = np.asarray(second[key])
+        if left.shape != right.shape or left.dtype != right.dtype:
+            raise RuntimeError(
+                f"repeatability check failed for {key}: "
+                f"{left.shape}/{left.dtype} != {right.shape}/{right.dtype}"
+            )
+        if np.issubdtype(left.dtype, np.floating) and (
+            not np.isfinite(left).all() or not np.isfinite(right).all()
+        ):
+            raise RuntimeError(
+                f"repeatability output {key} contains NaN or infinity"
+            )
+        if not np.array_equal(left, right):
+            raise RuntimeError(
+                f"repeatability check failed for {key}: arrays differ"
+            )
+        compared.append(key)
+    return compared
+
+
 def student_teacher_checkpoint_sha256(artifact_config: dict[str, Any]) -> str:
-    """Read checkpoint provenance from v2 nested or legacy v1 artifact metadata."""
-    metadata = artifact_config.get("metadata", artifact_config)
+    """Read the checkpoint hash from the artifact's canonical cache lineage."""
+
+    metadata = artifact_config.get("metadata")
     if not isinstance(metadata, dict):
         raise TypeError("Student artifact metadata must be an object")
-    teacher_metadata = metadata.get("teacher_metadata")
-    if not isinstance(teacher_metadata, dict):
-        raise TypeError("Student artifact is missing teacher checkpoint metadata")
-    checkpoint_hash = teacher_metadata.get("checkpoint_sha256")
+    teacher_lineage = metadata.get("teacher_cache_lineage")
+    if not isinstance(teacher_lineage, dict):
+        raise TypeError("Student artifact is missing teacher-cache lineage")
+    checkpoint_hash = teacher_lineage.get("checkpoint_sha256")
     if (
         not isinstance(checkpoint_hash, str)
         or len(checkpoint_hash) != 64
         or any(character not in "0123456789abcdef" for character in checkpoint_hash)
     ):
-        raise ValueError("Student artifact teacher_metadata.checkpoint_sha256 is invalid")
+        raise ValueError(
+            "Student artifact teacher_cache_lineage.checkpoint_sha256 is invalid"
+        )
     return checkpoint_hash
-
-
-def _load_torch_mapping(path: Path) -> dict[str, Any]:
-    try:
-        value = torch.load(path, map_location="cpu", weights_only=True)
-    except TypeError:
-        value = torch.load(path, map_location="cpu")
-    if not isinstance(value, dict):
-        raise TypeError(f"{path} does not contain a dictionary")
-    return value
-
-
-def _read_complete_manifest(cache_dir: Path) -> tuple[dict[str, Any], list[str]]:
-    metadata_path = cache_dir / "metadata.json"
-    if not metadata_path.is_file():
-        raise FileNotFoundError(f"Teacher-cache manifest not found: {metadata_path}")
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    if not isinstance(metadata, dict):
-        raise TypeError(f"{metadata_path} must contain a JSON object")
-
-    count = metadata.get("count")
-    completed_count = metadata.get("completed_count")
-    if metadata.get("status") != "complete" or not isinstance(count, int) or count < 1 or completed_count != count:
-        raise ValueError(
-            f"Teacher cache is incomplete: status={metadata.get('status')!r}, "
-            f"completed_count={completed_count!r}, count={count!r}"
-        )
-    if metadata.get("teacher_dim") != TEACHER_DIM or metadata.get("target_dim") != TARGET_DIM:
-        raise ValueError(
-            "Teacher-cache dimensions do not match this evaluator: "
-            f"teacher_dim={metadata.get('teacher_dim')!r}, target_dim={metadata.get('target_dim')!r}"
-        )
-
-    shard_names = metadata.get("shards")
-    if (
-        not isinstance(shard_names, list)
-        or not shard_names
-        or not all(isinstance(name, str) and Path(name).name == name for name in shard_names)
-        or len(set(shard_names)) != len(shard_names)
-    ):
-        raise ValueError(f"{metadata_path}: 'shards' must be a non-empty list of unique filenames")
-
-    shard_hashes = metadata.get("shard_sha256")
-    if not isinstance(shard_hashes, dict) or set(shard_hashes) != set(shard_names):
-        raise ValueError(f"{metadata_path}: 'shard_sha256' must cover exactly the declared shards")
-    if not all(
-        isinstance(name, str) and isinstance(expected_hash, str) and len(expected_hash) == 64
-        for name, expected_hash in shard_hashes.items()
-    ):
-        raise ValueError(f"{metadata_path}: invalid shard SHA-256 manifest")
-
-    files_on_disk = {path.name for path in cache_dir.glob("teacher-*.pt")}
-    if files_on_disk != set(shard_names):
-        raise ValueError(
-            f"{metadata_path}: declared shards differ from files on disk; "
-            f"declared={sorted(shard_names)}, found={sorted(files_on_disk)}"
-        )
-    return metadata, shard_names
 
 
 def _read_prompt_manifest(
@@ -219,7 +306,7 @@ def _read_prompt_manifest(
 
 
 def load_test_embeddings(
-    cache_dir: str | Path,
+    cache_dir: str | Path | TeacherCache,
     *,
     prompt_manifest: str | Path | None = None,
     sources: list[str] | None = None,
@@ -228,8 +315,18 @@ def load_test_embeddings(
     dict[str, Any],
     dict[str, Any],
 ]:
-    cache_path = Path(cache_dir)
-    metadata, shard_names = _read_complete_manifest(cache_path)
+    cache = (
+        cache_dir
+        if isinstance(cache_dir, TeacherCache)
+        else load_teacher_cache(
+            cache_dir,
+            expected_teacher_dim=TEACHER_DIM,
+            expected_target_dim=TARGET_DIM,
+            keep_teacher_embeddings=True,
+            keep_targets=False,
+        )
+    )
+    metadata = cache.metadata
     manifest_records: list[dict[str, str]] | None = None
     manifest_sha256: str | None = None
     if sources is not None and prompt_manifest is None:
@@ -250,53 +347,18 @@ def load_test_embeddings(
 
     records: list[tuple[str, torch.Tensor]] = []
     observed_count = 0
-    observed_splits: Counter[str] = Counter()
-    observed_manifest_sources: set[str] = set()
-    for shard_name in shard_names:
-        shard_path = cache_path / shard_name
-        if not shard_path.is_file():
-            raise FileNotFoundError(f"Declared teacher shard not found: {shard_path}")
-        actual_hash = sha256_file(shard_path)
-        expected_hash = metadata["shard_sha256"][shard_name]
-        if actual_hash != expected_hash:
-            raise ValueError(f"{shard_path}: SHA-256 mismatch; expected {expected_hash}, got {actual_hash}")
-
-        shard = _load_torch_mapping(shard_path)
-        required_keys = {"texts", "splits", "teacher_embeddings", "targets"}
-        missing_keys = required_keys - set(shard)
-        if missing_keys:
-            raise KeyError(f"{shard_path}: missing keys {sorted(missing_keys)}")
-        texts = shard["texts"]
-        splits = shard["splits"]
-        embeddings = shard["teacher_embeddings"]
-        targets = shard["targets"]
-        if not isinstance(texts, list) or not isinstance(splits, list):
-            raise TypeError(f"{shard_path}: texts and splits must be lists")
-        count = len(texts)
-        if (
-            len(splits) != count
-            or not isinstance(embeddings, torch.Tensor)
-            or embeddings.shape != (count, TEACHER_DIM)
-            or not isinstance(targets, torch.Tensor)
-            or targets.shape != (count, TARGET_DIM)
+    observed_manifest_sources = (
+        set()
+        if manifest_records is None
+        else {record["source"] for record in manifest_records}
+    )
+    for shard in cache.shards:
+        embeddings = shard.teacher_embeddings
+        if embeddings is None:
+            raise RuntimeError("strict teacher-cache loader did not retain embeddings")
+        for local_index, (text, split, embedding) in enumerate(
+            zip(shard.texts, shard.splits, embeddings, strict=True)
         ):
-            raise ValueError(
-                f"{shard_path}: inconsistent lengths or shapes; expected "
-                f"texts/splits={count}, embeddings=[{count},{TEACHER_DIM}], "
-                f"targets=[{count},{TARGET_DIM}]"
-            )
-        if embeddings.dtype != torch.float32 or targets.dtype != torch.float32:
-            raise ValueError(f"{shard_path}: embeddings and targets must both be float32")
-        if not torch.isfinite(embeddings).all() or not torch.isfinite(targets).all():
-            raise ValueError(f"{shard_path}: non-finite teacher values")
-        invalid_splits = set(splits) - VALID_SPLITS
-        if invalid_splits:
-            raise ValueError(f"{shard_path}: invalid splits {sorted(invalid_splits)}")
-
-        observed_splits.update(splits)
-        for local_index, (text, split, embedding) in enumerate(zip(texts, splits, embeddings, strict=True)):
-            if not isinstance(text, str):
-                raise TypeError(f"{shard_path}: prompt texts must be strings")
             source = None
             if manifest_records is not None:
                 manifest_record = manifest_records[observed_count + local_index]
@@ -308,24 +370,15 @@ def load_test_embeddings(
                         f"cache={(text, split)!r}"
                     )
                 source = manifest_record["source"]
-                observed_manifest_sources.add(source)
             if split == "test" and (requested_source_set is None or source in requested_source_set):
                 # Clone the row so retaining a test example does not retain the
                 # complete shard storage.
                 records.append((text, embedding.clone()))
-        observed_count += count
+        observed_count += len(shard.texts)
 
     if observed_count != metadata["count"]:
         raise ValueError(
             f"Teacher-cache manifest declares {metadata['count']} examples, but shards contain {observed_count}"
-        )
-    declared_splits = metadata.get("split_counts")
-    if not isinstance(declared_splits, dict) or {
-        split: int(declared_splits.get(split, 0)) for split in sorted(VALID_SPLITS)
-    } != {split: observed_splits.get(split, 0) for split in sorted(VALID_SPLITS)}:
-        raise ValueError(
-            f"Teacher-cache split counts do not match shards: "
-            f"declared={declared_splits!r}, observed={dict(observed_splits)!r}"
         )
     if requested_source_set is not None:
         unknown_sources = requested_source_set - observed_manifest_sources
@@ -370,6 +423,15 @@ def validate_basic_args(args: argparse.Namespace) -> None:
         raise ValueError("--save-samples must be non-negative")
     if len(args.cfg_weight) != 2 or not all(math.isfinite(weight) for weight in args.cfg_weight):
         raise ValueError("--cfg-weight must contain two finite values")
+    diffusion_steps = getattr(args, "diffusion_steps", None)
+    if diffusion_steps is not None and diffusion_steps < 1:
+        raise ValueError("--diffusion-steps must be positive")
+    if getattr(args, "student_dtype", DEFAULT_STUDENT_DTYPE) not in {
+        "float32",
+        "float16",
+        "bfloat16",
+    }:
+        raise ValueError("--student-dtype is invalid")
     prompt_manifest = getattr(args, "prompt_manifest", None)
     sources = getattr(args, "sources", None)
     if sources is not None:
@@ -402,7 +464,7 @@ def generate(
     max_window = (int(10 * model.motion_rep.fps) // model.num_frames_per_token) * model.num_frames_per_token
     history_frames = ((max_window - model.gen_horizon_len) // model.num_frames_per_token) * model.num_frames_per_token
 
-    seed_everything(seed)
+    seed_everything(seed, deterministic=True)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     started = time.perf_counter()
@@ -559,6 +621,26 @@ def json_safe(value: Any) -> Any:
     return value
 
 
+def _write_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def save_sample(path: Path, output: dict, text: str, seed: int, encoder: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     selected = {
@@ -583,11 +665,19 @@ def save_sample(path: Path, output: dict, text: str, seed: int, encoder: str) ->
 
 
 def main(args: argparse.Namespace) -> dict:
+    determinism = configure_determinism()
     validate_basic_args(args)
     seed_pairs = validate_seeds(args.seeds)
-    device = torch.device(args.device)
-    all_test_records, teacher_metadata, prompt_selection = load_test_embeddings(
+    device = torch.device(_resolve_device(args.device))
+    teacher_cache = load_teacher_cache(
         args.cache_dir,
+        expected_teacher_dim=TEACHER_DIM,
+        expected_target_dim=TARGET_DIM,
+        keep_teacher_embeddings=True,
+        keep_targets=False,
+    )
+    all_test_records, teacher_metadata, prompt_selection = load_test_embeddings(
+        teacher_cache,
         prompt_manifest=args.prompt_manifest,
         sources=args.sources,
     )
@@ -596,18 +686,22 @@ def main(args: argparse.Namespace) -> dict:
         args.model,
         checkpoints_dir=args.checkpoints_dir,
     )
+    student = MiniLMArdyEncoder(
+        args.student_path,
+        dtype=getattr(args, "student_dtype", DEFAULT_STUDENT_DTYPE),
+        device=str(device),
+    )
+    student.assert_compatible(resolved_model)
+    teacher_cache_fingerprint = validate_artifact_teacher_cache_fingerprint(
+        student.artifact_config,
+        teacher_cache,
+    )
     model = load_model(
         resolved_model,
         device=str(device),
         text_encoder=False,
         checkpoints_dir=args.checkpoints_dir,
     )
-    student = MiniLMArdyEncoder(
-        args.student_path,
-        dtype="bfloat16" if device.type == "cuda" else "float32",
-        device=str(device),
-    )
-    student.assert_compatible(resolved_model)
 
     model_dir = Path(args.checkpoints_dir) / resolved_model
     checkpoint_path = model_dir / "denoiser.safetensors"
@@ -637,22 +731,75 @@ def main(args: argparse.Namespace) -> dict:
 
     cases = []
     teacher_outputs: dict[tuple[int, int], dict] = {}
+    precomputed_teacher: dict[tuple[int, int], tuple[dict, float]] = {}
     sample_dir = Path(args.sample_dir)
+    selected_texts = [text for text, _embedding in test_records]
+    selected_digest = selected_prompt_sha256(selected_texts)
+    repeatability_enabled = getattr(args, "repeatability_check", True)
+    if repeatability_enabled:
+        first_text, first_embedding = test_records[0]
+        first_seed = args.seeds[0]
+        first_feature = first_embedding.reshape(1, 1, TEACHER_DIM)
+        first_output, first_seconds = generate(
+            model,
+            first_text,
+            first_feature,
+            first_seed,
+            args.duration,
+            diffusion_steps,
+            tuple(args.cfg_weight),
+        )
+        repeated_output, _repeated_seconds = generate(
+            model,
+            first_text,
+            first_feature,
+            first_seed,
+            args.duration,
+            diffusion_steps,
+            tuple(args.cfg_weight),
+        )
+        compared_keys = assert_exact_repeatability(
+            first_output,
+            repeated_output,
+        )
+        precomputed_teacher[(0, first_seed)] = (
+            first_output,
+            first_seconds,
+        )
+        repeatability = {
+            "enabled": True,
+            "exact_equal": True,
+            "prompt_index": 0,
+            "seed": first_seed,
+            "compared_keys": compared_keys,
+        }
+    else:
+        repeatability = {
+            "enabled": False,
+            "exact_equal": None,
+            "prompt_index": None,
+            "seed": None,
+            "compared_keys": [],
+        }
 
     for prompt_index, (text, teacher_embedding) in enumerate(test_records):
         with torch.inference_mode():
             student_feature, _ = student([text])
         teacher_feature = teacher_embedding.reshape(1, 1, 4096)
         for seed in args.seeds:
-            teacher_output, teacher_seconds = generate(
-                model,
-                text,
-                teacher_feature,
-                seed,
-                args.duration,
-                diffusion_steps,
-                tuple(args.cfg_weight),
-            )
+            precomputed = precomputed_teacher.get((prompt_index, seed))
+            if precomputed is None:
+                teacher_output, teacher_seconds = generate(
+                    model,
+                    text,
+                    teacher_feature,
+                    seed,
+                    args.duration,
+                    diffusion_steps,
+                    tuple(args.cfg_weight),
+                )
+            else:
+                teacher_output, teacher_seconds = precomputed
             student_output, student_seconds = generate(
                 model,
                 text,
@@ -723,18 +870,25 @@ def main(args: argparse.Namespace) -> dict:
         )
 
     report = {
+        "schema_version": 1,
         "scope": {
+            "split": "test",
             "requested_model": args.model,
             "resolved_model": resolved_model,
             "checkpoint_dir": str(model_dir.resolve()),
             "checkpoint_sha256": checkpoint_sha256,
             "student": str(Path(args.student_path).resolve()),
             "student_artifact_fingerprint": student.artifact_config.get("artifact_fingerprint"),
-            "teacher_cache": str(Path(args.cache_dir).resolve()),
-            "teacher_cache_manifest_sha256": sha256_file(Path(args.cache_dir) / "metadata.json"),
+            "teacher_cache": str(teacher_cache.metadata_path.parent),
+            "teacher_cache_manifest_sha256": sha256_file(
+                teacher_cache.metadata_path
+            ),
+            "teacher_cache_fingerprint": teacher_cache_fingerprint,
             "prompt_manifest": prompt_selection["prompt_manifest"],
             "prompt_manifest_sha256": prompt_selection["prompt_manifest_sha256"],
             "source_filter": prompt_selection["source_filter"],
+            "prompt_selection_algorithm": PROMPT_SELECTION_ALGORITHM,
+            "selected_prompt_sha256": selected_digest,
             "eligible_test_prompts": prompt_selection["eligible_test_prompts"],
             "held_out_test_prompts_available": int(teacher_metadata["split_counts"]["test"]),
             "prompts": len(test_records),
@@ -745,6 +899,15 @@ def main(args: argparse.Namespace) -> dict:
             "num_frames": num_frames,
             "diffusion_steps": diffusion_steps,
             "cfg_weight": args.cfg_weight,
+            "student_dtype": getattr(
+                args,
+                "student_dtype",
+                DEFAULT_STUDENT_DTYPE,
+            ),
+            "device_requested": args.device,
+            "device_resolved": str(device),
+            "determinism": determinism,
+            "repeatability_check": repeatability,
             "postprocess_applied": False,
             "motion_output_stage": (
                 "Raw model.motion_rep.inverse output. post_process_motion is intentionally "
@@ -768,11 +931,7 @@ def main(args: argparse.Namespace) -> dict:
     }
     report = json_safe(report)
     output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    _write_json(output_path, report)
     print(
         json.dumps(
             {key: value for key, value in report.items() if key not in {"cases", "teacher_diversity_cases"}},

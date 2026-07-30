@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
+import json
 import math
+import tarfile
 from pathlib import Path
 
 import numpy as np
@@ -18,11 +21,21 @@ from scripts.evaluate_browser_fp16 import (
     PortableRandom,
     PreparedHistory,
     RolloutState,
+    _build_public_report,
+    _canonical_pack_path,
+    _capture_file_identity,
+    _extract_pack,
     _make_window,
     _prepare_history,
     _recenter_and_requantize,
+    _validate_common_manifest,
     _validate_compatible_packs,
+    _validate_json_finite,
+    _validate_public_report,
+    _verify_file_identity,
     _worst_cases,
+    _write_json_report,
+    _write_reports,
 )
 
 
@@ -209,7 +222,7 @@ def _pack_runtime(directory: Path, *, candidate: bool) -> PackRuntime:
         "runtime": {
             "contract_revision": 3,
             "text_only": True,
-            **({"required_webgpu_features": ["shader-f16"]} if candidate else {}),
+            "required_webgpu_features": ["shader-f16"],
         },
     }
     if candidate:
@@ -232,6 +245,8 @@ def _pack_runtime(directory: Path, *, candidate: bool) -> PackRuntime:
                 for graph_name, policy in MIXED_FP16_POLICIES.items()
             },
         }
+    else:
+        manifest["precision"] = {"format": "fp32"}
     return PackRuntime(
         directory=directory,
         manifest=manifest,
@@ -255,6 +270,14 @@ def test_pack_compatibility_allows_only_precision_metadata(tmp_path: Path):
     incompatible = copy.deepcopy(candidate)
     incompatible.manifest["recenter"]["root_mean"][0] = 1
     with pytest.raises(ValueError, match=r"non-precision contracts differ.*recenter\.root_mean"):
+        _validate_compatible_packs(reference, incompatible)
+
+    incompatible = copy.deepcopy(candidate)
+    incompatible.manifest["runtime"]["required_webgpu_features"] = []
+    with pytest.raises(
+        ValueError,
+        match=r"non-precision contracts differ.*runtime\.required_webgpu_features",
+    ):
         _validate_compatible_packs(reference, incompatible)
 
 
@@ -357,3 +380,244 @@ def test_worst_case_report_attributes_prompt_seed_and_window():
     assert worst["mpjpe_m"]["seed"] == 2
     assert worst["mpjpe_m"]["window_index"] == 3
     assert worst["contact_agreement"]["prompt"] == "large"
+
+
+def _detailed_report_with_private_attribution() -> dict:
+    return {
+        "schema_version": 2,
+        "method": {
+            "prompt_count": 1,
+            "prompt_split": "test",
+            "prompt_sha256": "1" * 64,
+            "seeds": [7],
+        },
+        "runtime_environment": {
+            "python": {"implementation": "CPython", "version": "3.12.0"},
+            "packages": {"onnxruntime": "test"},
+        },
+        "prompt_manifest": {
+            "filename": "prompts.jsonl",
+            "size_bytes": 123,
+            "sha256": "2" * 64,
+            "provenance_sidecar": {
+                "filename": "prompts.metadata.json",
+                "size_bytes": 456,
+                "sha256": "3" * 64,
+                "content": {
+                    "dataset": {
+                        "url": (
+                            "https://huggingface.co/datasets/"
+                            "nvidia/SEED-Timeline-Annotations"
+                        )
+                    }
+                },
+            },
+        },
+        "packs": {
+            "reference": {"file": "reference.tar.gz", "sha256": "4" * 64},
+            "candidate": {"file": "candidate.tar.gz", "sha256": "5" * 64},
+        },
+        "contract_validation": {"non_precision_contract_equal": True},
+        "text_conditions": {"rmse": 0.0},
+        "motion_fidelity": {"mpjpe_m": {"mean": 0.0}},
+        "motion_fidelity_by_window": [],
+        "continuation_coverage": {"history_frames_observed": [0, 40]},
+        "cpu_timing": {"reference_total_seconds": 1.0},
+        "worst_cases": {
+            "per_window": {
+                "mpjpe_m": {
+                    "prompt": "private Timeline prompt",
+                    "prompt_index": 0,
+                    "debug_path": "/home/example/private-output.npy",
+                }
+            }
+        },
+    }
+
+
+def test_public_report_is_allowlisted_aggregate_without_prompt_text_or_paths(
+    tmp_path: Path,
+):
+    detailed = _detailed_report_with_private_attribution()
+    detailed_output = tmp_path / "private.json"
+    public_output = tmp_path / "public.json"
+
+    printed = _write_reports(
+        detailed,
+        detailed_output=detailed_output,
+        public_output=public_output,
+    )
+    public = json.loads(public_output.read_text(encoding="utf-8"))
+
+    assert printed == public
+    assert public["format"] == "ardy-browser-fp16-aggregate"
+    assert public["source_report_schema_version"] == 2
+    assert "worst_cases" not in public
+    assert public["runtime_environment"]["python"]["implementation"] == "CPython"
+    assert "private Timeline prompt" in detailed_output.read_text(encoding="utf-8")
+    public_json = public_output.read_text(encoding="utf-8")
+    assert "private Timeline prompt" not in public_json
+    assert "/home/example" not in public_json
+    assert public["method"]["prompt_sha256"] == "1" * 64
+    assert public["prompt_manifest"]["sha256"] == "2" * 64
+
+
+def test_public_report_rejects_absolute_paths_and_requires_provenance():
+    detailed = _detailed_report_with_private_attribution()
+    detailed["packs"]["reference"]["file"] = "C:\\private\\reference.tar.gz"
+    with pytest.raises(ValueError, match="absolute local path"):
+        _build_public_report(detailed)
+
+    public = _build_public_report(_detailed_report_with_private_attribution())
+    public["packs"]["candidate"]["file"] = "/private/candidate.tar.gz"
+    with pytest.raises(ValueError, match="absolute local path"):
+        _validate_public_report(public)
+
+    missing_provenance = _detailed_report_with_private_attribution()
+    missing_provenance["prompt_manifest"].pop("provenance_sidecar")
+    with pytest.raises(TypeError, match="requires a validated"):
+        _build_public_report(missing_provenance)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "../decoder.onnx",
+        "/decoder.onnx",
+        "graphs//decoder.onnx",
+        "graphs/./decoder.onnx",
+        "C:\\private\\decoder.onnx",
+        "graphs\\decoder.onnx",
+    ],
+)
+def test_pack_paths_must_be_safe_canonical_posix(value: str):
+    with pytest.raises(ValueError, match="safe canonical POSIX path"):
+        _canonical_pack_path(value, "test path")
+
+
+def _write_test_tar(path: Path, entries: list[tuple[str, bytes]]) -> None:
+    with tarfile.open(path, mode="w:gz", format=tarfile.USTAR_FORMAT) as archive:
+        for name, payload in entries:
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+
+
+def test_pack_extraction_rejects_duplicate_and_traversal_members(tmp_path: Path):
+    duplicate = tmp_path / "duplicate.tar.gz"
+    _write_test_tar(
+        duplicate,
+        [
+            ("manifest.json", b"{}"),
+            ("manifest.json", b"{}"),
+        ],
+    )
+    identity = _capture_file_identity(duplicate)
+    with pytest.raises(ValueError, match="Duplicate"):
+        _extract_pack(
+            duplicate,
+            tmp_path / "duplicate-output",
+            expected_identity=identity,
+        )
+
+    traversal = tmp_path / "traversal.tar.gz"
+    _write_test_tar(
+        traversal,
+        [
+            ("manifest.json", b"{}"),
+            ("../outside.onnx", b"outside"),
+        ],
+    )
+    identity = _capture_file_identity(traversal)
+    with pytest.raises(ValueError, match="safe canonical POSIX path"):
+        _extract_pack(
+            traversal,
+            tmp_path / "traversal-output",
+            expected_identity=identity,
+        )
+    assert not (tmp_path / "outside.onnx").exists()
+
+
+def test_manifest_rejects_external_onnx_data_before_model_loading(tmp_path: Path):
+    directory = tmp_path / "pack"
+    tokenizer_dir = directory / "tokenizer"
+    tokenizer_dir.mkdir(parents=True)
+    payloads = {
+        "text.onnx": b"text",
+        "denoiser.onnx": b"denoiser",
+        "decoder.onnx": b"decoder",
+        "tokenizer/tokenizer.json": b"{}",
+        "tokenizer/tokenizer_config.json": b"{}",
+    }
+    for relative_path, payload in payloads.items():
+        path = directory / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    manifest = {
+        "format": "ardy-browser-model-pack",
+        "schema_version": 2,
+        "files": {
+            relative_path: {
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size_bytes": len(payload),
+            }
+            for relative_path, payload in payloads.items()
+        },
+        "tokenizer": {"directory": "tokenizer", "max_length": 128},
+        "graphs": {
+            "text_encoder": {
+                "model": "text.onnx",
+                "external_data": [
+                    {"path": "../../private.bin", "file": "private.bin"}
+                ],
+            },
+            "denoiser": {"model": "denoiser.onnx"},
+            "decoder": {"model": "decoder.onnx"},
+        },
+        "runtime": {
+            "contract_revision": 3,
+            "required_webgpu_features": ["shader-f16"],
+            "text_only": True,
+        },
+    }
+    (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must not declare external ONNX data"):
+        _validate_common_manifest(
+            directory,
+            {"manifest.json", *payloads},
+        )
+
+
+def test_file_identity_recheck_detects_mutation(tmp_path: Path):
+    path = tmp_path / "pack.tar.gz"
+    path.write_bytes(b"first")
+    identity = _capture_file_identity(path)
+    path.write_bytes(b"second")
+
+    with pytest.raises(RuntimeError, match="changed after"):
+        _verify_file_identity(path, identity)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_reports_reject_nonfinite_numbers_and_never_write_nan(
+    tmp_path: Path,
+    value: float,
+):
+    report = {"metric": value}
+    with pytest.raises(ValueError, match="must be finite"):
+        _validate_json_finite(report)
+
+    output = tmp_path / "report.json"
+    with pytest.raises(ValueError, match="must be finite"):
+        _write_json_report(output, report)
+    assert not output.exists()
+
+
+def test_reference_pack_must_explicitly_declare_fp32(tmp_path: Path):
+    reference = _pack_runtime(tmp_path / "reference", candidate=False)
+    candidate = _pack_runtime(tmp_path / "candidate", candidate=True)
+    reference.manifest.pop("precision")
+
+    with pytest.raises(ValueError, match="precision.format='fp32'"):
+        _validate_compatible_packs(reference, candidate)

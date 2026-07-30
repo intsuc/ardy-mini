@@ -5,12 +5,18 @@ Apache-2.0 applies to this repository's source code; it does not grant rights
 to separately obtained models, checkpoints, datasets, or locally generated
 artifacts.
 
+## Distribution boundary
+
 This source repository does not distribute ARDY checkpoints, LLM2Vec adapters,
 Meta Llama 3 weights, pretrained or fine-tuned MiniLM weights, teacher
-embeddings or caches, prompt manifests, BONES-SEED data or metadata,
-prompt-level evaluation reports, or generated motion samples. Users must
-obtain each external resource from its official provider and accept its
-separate terms.
+embeddings or caches, prompt manifests, NVIDIA SEED Timeline Annotations,
+BONES-SEED runtime data or metadata, prompt-level evaluation reports, or
+generated motion samples. Users must obtain each external resource from its
+official provider and accept its separate terms.
+
+The local `artifacts/`, `datasets/`, `checkpoints/`, and `outputs/` directories
+are ignored by Git to keep external inputs and generated outputs outside the
+source distribution.
 
 ## Upstream ARDY
 
@@ -20,8 +26,8 @@ separate terms.
 - Modifications: summarized in [NOTICE](NOTICE) and marked in each changed
   upstream file.
 
-Released ARDY checkpoints are obtained separately. The Core40 checkpoint used
-by the documented experiment is governed by its
+Released ARDY checkpoints are obtained separately. The Core40 checkpoint
+required by the documented MiniLM workflow is governed by its
 [checkpoint license](https://huggingface.co/nvidia/ARDY-Core-RP-20FPS-Horizon40/blob/main/LICENSE)
 and the applicable
 [NVIDIA Open Model terms](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/).
@@ -54,18 +60,31 @@ model card and license package.
 
 ## BONES-SEED
 
-Training data includes [Motion Data by Bones Studio](https://bones.studio/).
-Use of the underlying dataset is subject to the
+The optional Python/Viser kinematic-constraint demo can read separately
+obtained BONES-SEED motion files and metadata at runtime. BONES-SEED is gated
+and restricted. Users must independently qualify for the license or obtain an
+appropriate separate license under the
 [BONES Motion Capture Dataset License Agreement](https://bones.studio/info/seed-license).
 
-BONES-SEED is gated and restricted. Users must independently qualify for the
-license or obtain an appropriate separate license. Dataset records, metadata,
-descriptions, prompt text, and record identifiers are not distributed here.
-The public experiment report contains aggregate results only.
+## NVIDIA SEED Timeline Annotations
 
-The local `artifacts/`, `datasets/`, `checkpoints/`, and `outputs/` directories
-are ignored by Git to keep restricted inputs and generated outputs outside the
-source distribution.
+The MiniLM training and evaluation corpus consists exclusively of English
+motion descriptions from NVIDIA Corporation's
+[Timeline Annotations for BONES-SEED Humanoid Motion Dataset](https://huggingface.co/datasets/nvidia/SEED-Timeline-Annotations)
+(`nvidia/SEED-Timeline-Annotations`). The dataset is licensed under
+[Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/).
+The training and evaluation recipe pins dataset revision
+`b2cf916d8ef7a1e49fc4f0ce9e00c1981d3b9d8f`. At that revision,
+`timelines.jsonl` has SHA-256
+`379d6a5b86cea06b7201d485d19ee53512cc58449352b3cf113a95d1d27603d8`.
+
+Changes from the source annotations: corpus preparation selects English
+overview and event descriptions, normalizes text, drops descriptions longer
+than 512 characters, deduplicates prompts, and assigns motion groups to
+disjoint train, validation, and test splits. Corpus preparation rejects
+malformed source records. This repository includes only aggregate measurements
+derived from that corpus; the source annotations and detailed derived prompt
+manifests remain outside the source distribution.
 
 ## Browser runtime dependencies
 

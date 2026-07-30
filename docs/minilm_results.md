@@ -1,218 +1,368 @@
-# MiniLM distillation results
+# MiniLM Core40 results
 
-This report records aggregate results from the completed local Core40
-experiment. They are measured results, not projected or paper-reported
-numbers. The student weights, teacher cache, prompt manifest, dataset records,
-generated motions, and prompt-level JSON reports are intentionally excluded
-from the public source repository.
+This page summarizes the aggregate in
+[`reports/minilm_core40_summary.json`](../reports/minilm_core40_summary.json).
+That JSON is the authoritative numeric source. It contains aggregate metrics
+and reproducibility identities, but no model weights, dataset records, prompt
+text, record identifiers, or local absolute paths.
 
-Training data includes [Motion Data by Bones Studio](https://bones.studio/).
-Use of the underlying dataset is subject to the
-[BONES Motion Capture Dataset License Agreement](https://bones.studio/info/seed-license).
-See the [third-party model and data notices](../THIRD_PARTY_MODELS_AND_DATA.md)
-before reproducing the experiment or redistributing a locally produced model.
+Review the
+[third-party model and data notices](../THIRD_PARTY_MODELS_AND_DATA.md) before
+reproducing the experiment or distributing a trained artifact.
 
-## Scope and environment
+## Experiment identity
 
-- ARDY source: upstream `main` at
-  `693f74d13b3d04a0a22ce127ee79c929dd89756b`
-- ARDY checkpoint: `ARDY-Core-RP-20FPS-Horizon40`
-- checkpoint SHA-256:
+- ARDY model: `ARDY-Core-RP-20FPS-Horizon40`
+- ARDY checkpoint SHA-256:
   `1019d0bf269cf8d1b3e3e9b4a384a58c112672959b071279ddb65814d77660cd`
-- student base: `sentence-transformers/all-MiniLM-L6-v2`
-- machine: NVIDIA GB10, aarch64 Linux, unified memory
-- runtime: Python 3.11.15, PyTorch 2.13.0+cu130, Transformers 5.8.1
-- inference precision: bfloat16 encoders; the released ARDY model remains
-  float32
+- student base: `sentence-transformers/all-MiniLM-L6-v2`, revision
+  `1110a243fdf4706b3f48f1d95db1a4f5529b4d41`
+- selected artifact: 100-epoch candidate
+- selected artifact fingerprint:
+  `605639d3e0189f10dd3487c2bcf613825699475573eb34f57ac71113902c2f83`
+- selected artifact payload: 113,637,018 bytes
+- training and benchmark GPU: NVIDIA GB10
+- training seed: `20260726`
 
-The locally retained artifact is 113,713,137 bytes on disk and has fingerprint
-`b2e4af890d4a733049a377b96355eb1f3a5716378f9304010906823cf6af7fcb`.
-It is intentionally restricted to the checkpoint above and is not
-distributed by this repository.
+The teacher consists of the following revision-pinned models:
 
-## Data and training
+- `meta-llama/Meta-Llama-3-8B-Instruct` at
+  `8afb486c1db24fe5011ec46dfbe5b5dccdb575c2`
+- `McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp` at
+  `31474e395ada192e8ed1586db6be79fb3b70c9c0`
+- `McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised` at
+  `baa8ebf04a1c2500e61288e7dad65e8ae42601a7`
 
-The prompt corpus was extracted from the seven description fields in
-BONES-SEED metadata, normalized, globally deduplicated, and split by content
-family. The original validation and test records were then frozen
-byte-for-byte while every eligible BONES-SEED training prompt was retained.
+Teacher embeddings, bias-free root/body projection targets, and projection
+weights were cached in float32. The teacher model used BF16.
 
-| Item | Result |
-|---|---:|
-| Unique source prompts | 50,246 |
-| Baseline train / validation / test | 13,151 / 1,641 / 1,592 |
-| Expanded train / validation / test | 40,433 / 1,641 / 1,592 |
-| Added unique training prompts | 27,282 |
-| Expanded content-family groups | 3,807 |
-| Baseline / expanded teacher-cache time | 1,448.49 / 3,755.58 s |
+## Dataset and split
 
-Teacher caching used the production LLM2Vec wrapper at its required internal
-batch size of one. Student training used batch size 128, rich
-`mean_cls_max_std` pooling, a 1,536-dimensional shared adapter, and separate
-1,024-dimensional root/body heads. All runs used one training seed.
+Training and evaluation prompts come from
+[`nvidia/SEED-Timeline-Annotations`](https://huggingface.co/datasets/nvidia/SEED-Timeline-Annotations),
+revision `b2cf916d8ef7a1e49fc4f0ce9e00c1981d3b9d8f`. The pinned
+`timelines.jsonl` is 80,373,523 bytes with SHA-256
+`379d6a5b86cea06b7201d485d19ee53512cc58449352b3cf113a95d1d27603d8`
+and is identified as NVIDIA data under CC BY 4.0.
 
-| Run | Train prompts | Epochs | Updates | Example exposures | Time | Best val cosine |
-|---|---:|---:|---:|---:|---:|---:|
-| Baseline | 13,151 | 50 | 5,150 | 657,550 | 215.05 s | 0.95290 |
-| Expanded, compute-matched | 40,433 | 16 | 5,056 | 646,928 | 202.97 s | 0.96055 |
-| Expanded, adopted | 40,433 | 50 | 15,800 | 2,021,650 | 626.07 s | 0.96612 |
+Prompts are extracted from `overview_description` and
+`events.description`. Preparation applies Unicode NFKC normalization,
+whitespace normalization, global case- and punctuation-insensitive
+deduplication, and recording-family grouping before deterministic splitting.
+Two descriptions over the 512-character limit are excluded.
 
-The 16-epoch control differs from the baseline by only 1.83% in optimizer
-updates and 1.62% in example exposures. Its improvement therefore provides a
-controlled estimate of the value of prompt diversity. The adopted run
-continues to 50 epochs; its best validation score occurs at epoch 49. Its
-additional gain shows that 16 epochs was not the optimum, but combines the
-larger corpus with additional optimization and should not be interpreted as a
-second compute-matched comparison.
+| Item | Count |
+| --- | ---: |
+| Timeline rows | 142,220 |
+| Unique prompts | 64,287 |
+| Recording groups | 3,702 |
+| `overview_description` prompts | 17,749 |
+| `events.description` prompts | 46,538 |
+| Train prompts | 51,482 |
+| Validation prompts | 6,710 |
+| Test prompts | 6,095 |
 
-Most of the expansion adds wording diversity within existing motion families:
-the training corpus grows by 207.45%, while represented training families
-increase from 3,034 to 3,073.
+The prepared prompt manifest SHA-256 is
+`c80b0656dd04c28da1d665b4b9a9422f975be5c72b0fe9011b976a3672bb1eac`.
 
-### Corpus expansion approaches
+## Training and validation selection
 
-The adopted expansion uses only previously unused BONES-SEED descriptions.
-This was the cleanest controlled test and introduced no new data-license
-domain. No external motion-caption dataset and no synthetic text was used in
-the adopted weights.
+Both candidates start from the same initialization and use the same
+deterministic 100-epoch learning-rate schedule. The public-summary builder
+verified that the complete 50-epoch history is identical to the first 50
+epochs of the 100-epoch history after excluding timing-only fields.
 
-The following sources were considered but not imported:
+Within each run, BF16 validation selects the saved epoch. The two saved
+artifacts are then evaluated over all 6,710 validation prompts in FP32. The
+final rule selects the higher mean of root and body cosine; an exact tie would
+select 50 epochs. Test results are not used for either selection.
 
-| Source | Potential text | Decision for this run |
-|---|---:|---|
-| [HumanML3D](https://github.com/EricGuo5513/HumanML3D#statistics-of-humanml3d) | 44,970 descriptions | Obtain explicit caption/trained-artifact permission before combining its upstream dataset chain. |
-| [KIT Motion-Language](https://motion-annotation.humanoids.kit.edu/dataset/) | 6,353 annotations | Obtain explicit raw-text redistribution and commercial-use terms first. |
-| [BABEL](https://babel.is.tue.mpg.de/license.html) | Dense action labels | Excluded because its published terms are research/non-commercial and restrict distribution. |
-| [Motion-X](https://github.com/IDEA-Research/Motion-X#1-request-authorization) | Motion annotations | Excluded because its released terms are non-commercial. |
+| Candidate | Updates | Training time | BF16 saved epoch | BF16 score | FP32 saved-artifact score |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 50 epochs | 20,150 | 1,018.048 s | 49 | 0.970748425 | 0.970752333 |
+| 100 epochs | 40,300 | 2,015.787 s | 95 | 0.971973747 | 0.971975346 |
 
-These are conservative project-distribution decisions, not legal advice or a
-claim about dataset quality.
-
-A future license-contained augmentation can use project-authored semantic
-programs such as action × direction × speed × style × posture × limb, plus
-simultaneous/sequential transitions. It should generate only from training
-parents, group all surface forms by their canonical program, reject
-contradictions and exact/semantic collisions with frozen evaluation prompts,
-and record template version, seed, and parent provenance. Vocabulary may be
-seeded from resources with explicit terms such as
-[WordNet](https://wordnet.princeton.edu/license-and-commercial-use) or
-[Wikidata](https://www.wikidata.org/wiki/Wikidata:Licensing), subject to their
-notices. This avoids copying another motion dataset's captions; it does not
-remove the BONES, teacher-model, or checkpoint terms already applicable to
-trained artifacts.
+The 100-epoch saved artifact is selected. FP32 selection compares the two
+saved artifacts; it does not re-evaluate discarded per-epoch states.
 
 ## Held-out condition fidelity
 
-All three runs below use the same 1,592 prompt texts, original float32 teacher
-targets, order, and evaluator. Under nearly matched optimization compute, the
-expanded run lowers overall RMSE by 8.46%. The adopted run lowers it by 15.14%
-from baseline.
+The selected artifact is evaluated in FP32 over all 6,095 test prompts.
+Targets are the cached 2,048-dimensional root/body conditions. NRMSE is RMSE
+divided by target RMS over the same elements.
 
-| Run | Overall cosine | Cosine p5 | RMSE | NRMSE | MAE |
-|---|---:|---:|---:|---:|---:|
-| Baseline | 0.95933 | 0.87277 | 1.89465 | 0.27968 | 1.35670 |
-| Expanded, 16 epochs | 0.96579 | 0.89964 | 1.73431 | 0.25601 | 1.24738 |
-| Expanded, 50 epochs | 0.97066 | 0.90470 | 1.60773 | 0.23732 | 1.13203 |
+| Output | Cosine mean | Cosine p5 | RMSE | NRMSE | MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Root, 1,024 dimensions | 0.978608545 | 0.937584653 | 1.526259338 | 0.206945778 | 1.098811064 |
+| Body, 1,024 dimensions | 0.970331443 | 0.915840109 | 1.420681899 | 0.243763376 | 1.021008061 |
+| Overall, 2,048 dimensions | 0.975569941 | 0.930388688 | 1.474415923 | 0.221823257 | 1.059909562 |
 
-Final branch-level results are:
+These test values are reported only after validation selection and do not
+affect the selected candidate.
 
-| Branch | Cosine mean | Cosine p5 | RMSE | NRMSE | MAE |
-|---|---:|---:|---:|---:|---:|
-| Root | 0.97431 | 0.91548 | 1.65038 | 0.22296 | 1.16578 |
-| Body | 0.96492 | 0.89122 | 1.56391 | 0.25713 | 1.09829 |
+## Held-out motion fidelity
 
-The detailed prompt-level report is retained locally under the Git-ignored
-`artifacts/` directory. The prompt-free aggregate values are also recorded in
-[`reports/minilm_core40_summary.json`](../reports/minilm_core40_summary.json).
+The motion evaluation selects 64 prompts evenly from the 6,095 eligible test
+prompts, using both source fields in manifest order. It uses seeds 0, 1, and
+2, producing 192 matched teacher/student cases. Every case uses:
 
-## Memory and latency
+- 4 seconds at 20 FPS, or 80 frames;
+- 10 diffusion steps;
+- CFG weights `[2, 2]`;
+- the same Core40 checkpoint and seed on both sides;
+- the MiniLM student in float32;
+- raw `motion_rep.inverse` output without post-processing.
 
-The primary comparison measures the same operation in fresh processes:
+Deterministic PyTorch, cuDNN, and cuBLAS settings are enabled, TF32 is
+disabled, and the first teacher case passes an exact repeatability check. The
+ordered selected-prompt digest is
+`22111a86318ab5ea930016e9b4ac569a31ec35b73de67eb3068ca8f6dab10ab8`.
+
+| Metric | MiniLM vs teacher, same seed | Teacher, different seeds | Ratio |
+| --- | ---: | ---: | ---: |
+| Root ADE | 0.047755542 m | 0.164984873 m | 0.289454063 |
+| Root FDE | 0.081806103 m | 0.241389780 m | 0.338896297 |
+| Global MPJPE | 0.064752256 m | 0.213393457 m | 0.303440681 |
+| Root-aligned MPJPE | 0.031403019 m | 0.097685677 m | 0.321470050 |
+| Joint velocity error | 0.100059084 m/s | 0.318162510 m/s | 0.314490492 |
+| Heading MAE | 3.157179426° | 10.053720313° | — |
+| Motion cosine | 0.996353014 | 0.979775245 | — |
+| Foot-contact agreement | 0.968977865 | 0.857519531 | — |
+| Foot-contact macro F1 | 0.968527125 | 0.848779143 | — |
+| Foot-contact macro IoU | 0.949608218 | 0.799196681 | — |
+
+Ratios are same-seed MiniLM/teacher kinematic errors divided by the original
+teacher's different-seed diversity. Lower kinematic errors and ratios indicate
+closer replacement fidelity.
+
+## Fresh-process latency and memory
+
+Teacher and student measurements run in separate fresh processes on the same
+NVIDIA GB10 system with Python 3.11.15, PyTorch 2.13.0+cu130, Transformers
+5.8.1, external batch size one, one first encode, one warmup, and 100
+synchronized warm encodes. Encoder model loading requests BF16; the Core40
+model in the full-stack benchmark remains float32. All four reports use the
+same prompt, represented publicly only by SHA-256
+`cdc2de1a9c1ec70bcd9433d7a1b9f0911c310c24c7727ab9d21834ead96838e6`.
+
+The full condition stack measures:
 
 ```text
-one prompt -> encoder -> Core40 root/body checkpoint projections -> [1, 1, 2048]
+prompt -> encoder -> Core40 root/body condition path -> [1, 1, 2048]
 ```
 
-Both sides use external batch size one, 100 synchronized CUDA warm runs, the
-same prompt, the same Core40 model, and include the checkpoint projection
-biases. This full-stack measurement also retains the legacy 4,096-dimensional
-projection parameters in the student process for checkpoint compatibility.
-The expanded students have the same graph, 28,227,968 parameters, and tensor
-shapes as the baseline student. A fresh baseline/expanded A/B recorded
-identical 56,455,936 parameter bytes and 90,812,928-byte CUDA allocation
-peaks; repeated latency ranges overlapped. Training for longer therefore
-changes fidelity and weight values, not deployment memory or compute.
+| Full condition stack | Teacher | MiniLM | Comparison |
+| --- | ---: | ---: | ---: |
+| Load time | 60.556224 s | 1.901364 s | 31.848825x faster |
+| First encode p50 | 826.838522 ms | 439.608479 ms | 1.880852x faster |
+| Warm encode p50 | 99.579304 ms | 1.150588 ms | 86.546453x faster |
+| Warm encode mean | 100.024164 ms | 1.230384 ms | 81.295056x faster |
+| CUDA allocated peak | 16,130,574,336 B | 1,005,858,304 B | 93.764275% lower |
+| Process RSS peak | 17,059,147,776 B | 2,593,554,432 B | 84.796694% lower |
+| Parameter bytes | 15,942,634,720 B | 821,469,152 B | 94.847344% lower |
 
-| Full condition stack | Original LLM2Vec | MiniLM student | Change |
-|---|---:|---:|---:|
-| Warm latency p50 | 98.970 ms | 1.185 ms | 83.53x faster |
-| Warm latency mean | 99.719 ms | 1.269 ms | 78.60x faster |
-| Load time | 55.857 s | 1.832 s | 30.49x faster |
-| First encode | 798.682 ms | 380.459 ms | 2.10x faster |
-| CUDA allocated peak | 15.023 GiB | 0.937 GiB | 93.76% lower |
-| Process RSS peak | 15.264 GiB | 2.415 GiB | 84.18% lower |
-| Combined parameter bytes | 14.848 GiB | 0.765 GiB | 94.85% lower |
+Encoder-only measurements isolate the replaced component:
 
-Encoder-only measurements isolate the component being replaced:
+| Encoder only | Teacher | MiniLM | Comparison |
+| --- | ---: | ---: | ---: |
+| Load time | 59.904526 s | 1.469676 s | 40.760376x faster |
+| First encode p50 | 806.519981 ms | 456.965784 ms | 1.764946x faster |
+| Warm encode p50 | 99.631198 ms | 1.236596 ms | 80.568921x faster |
+| Warm encode mean | 100.118089 ms | 1.351346 ms | 74.087693x faster |
+| CUDA allocated peak | 15,216,503,808 B | 90,812,928 B | 99.403195% lower |
+| Process RSS peak | 16,866,308,096 B | 1,706,418,176 B | 89.882681% lower |
+| Parameter bytes | 15,177,621,504 B | 56,455,936 B | 99.628032% lower |
 
-| Encoder only | Original LLM2Vec | MiniLM student | Change |
-|---|---:|---:|---:|
-| Warm latency p50 | 98.938 ms | 1.240 ms | 79.76x faster |
-| CUDA allocated peak | 14.172 GiB | 0.085 GiB | 99.40% lower |
-| Process RSS peak | 15.709 GiB | 1.590 GiB | 89.88% lower |
-| Parameter bytes | 14.135 GiB | 0.053 GiB | 99.63% lower |
+CUDA figures are PyTorch allocator values and exclude driver/context memory.
+RSS includes transient loading. These can describe overlapping physical
+memory on a unified-memory system and must not be added. Parameter bytes
+describe loaded tensors, not the serialized artifact size. Diffusion, motion
+decoding, post-processing, and rendering are outside the timed operation.
 
-CUDA values are PyTorch allocator measurements and exclude the driver/context.
-RSS includes transient model loading. On this unified-memory machine both
-should be read together. Parameter bytes describe the loaded dtypes, not the
-artifact's serialized disk size. The timed operation ends after root/body
-condition projection; diffusion, motion decoding, post-processing, and
-rendering are deliberately excluded, so the latency ratio is not an
-end-to-end motion-generation speedup. Detailed source reports are retained
-locally under the Git-ignored `artifacts/` directory.
+Teacher loading includes local resolution of pinned Hugging Face snapshots;
+student loading includes local artifact validation. Load results can vary
+with the operating-system page cache.
 
-## Generated-motion fidelity
+## Reproduce the reports
 
-The motion comparison uses 64 held-out prompts selected only from the four
-natural-description fields, as a proxy for the supported well-formed English
-domain. Each prompt is generated with seeds 0, 1, and 2, giving 192 matched
-teacher/student generations. Every case uses 80 frames at 20 FPS, 10
-diffusion steps, CFG weights `[2, 2]`, identical noise, and the same Core40
-denoiser. Metrics use the raw `motion_rep.inverse` output without
-post-processing.
+Run from the repository root. The complete pipeline requires the Core40
+checkpoint and access to the revision-pinned teacher models.
 
-| Metric | Baseline | Expanded 16e | Adopted 50e | Teacher diversity |
-|---|---:|---:|---:|---:|
-| Global MPJPE | 0.13517 m | 0.12329 m | 0.11748 m | 0.33660 m |
-| Root ADE | 0.10871 m | 0.09997 m | 0.09242 m | 0.28836 m |
-| Root FDE | 0.18495 m | 0.17643 m | 0.17470 m | 0.43799 m |
-| Root-aligned MPJPE | 0.05227 m | 0.04582 m | 0.04724 m | 0.11248 m |
-| Joint velocity error | 0.18385 m/s | 0.17115 m/s | 0.15615 m/s | 0.47346 m/s |
-| Heading MAE | 7.47676° | 6.52046° | 6.41535° | 13.73390° |
-| Motion cosine | 0.98778 | 0.98881 | 0.98830 | 0.94529 |
-| Foot-contact agreement | 0.94910 | 0.94521 | 0.95122 | 0.83376 |
-| Foot-contact macro F1 | 0.94714 | 0.94250 | 0.94773 | 0.82967 |
-| Foot-contact macro IoU | 0.91590 | 0.91089 | 0.91972 | 0.76633 |
+Prepare prompts and cache teacher conditions:
 
-The mean of the five kinematic errors normalized by original-encoder
-different-seed diversity falls from `0.41077` to `0.37692` in the
-compute-matched run and to `0.36364` in the adopted run. This is an 11.47%
-reduction from baseline. Compared with 16 epochs, 50 epochs improves global
-MPJPE by 4.71%, root ADE by 7.55%, velocity error by 8.76%, and all three
-contact metrics. Root-aligned MPJPE regresses by 0.00142 m and motion cosine
-by 0.00051 relative to 16 epochs, but both remain better than baseline.
+```bash
+uv sync --python 3.11 --no-install-project
+uv run hf auth login
 
-Detailed case reports are retained locally under the Git-ignored `artifacts/`
-directory and are not distributed because they contain licensed prompt text.
+uv run python scripts/minilm/prepare_prompts.py \
+  --output artifacts/data/prompts-core40-timeline.jsonl \
+  --split-ratios 0.8 0.1 0.1 \
+  --seed 20260726
+
+uv run python scripts/minilm/cache_teacher.py \
+  --input artifacts/data/prompts-core40-timeline.jsonl \
+  --output-dir artifacts/teacher-core40-timeline \
+  --checkpoint checkpoints/ARDY-Core-RP-20FPS-Horizon40/denoiser.safetensors \
+  --shard-size 256 \
+  --device cuda
+```
+
+Train both prefix-matched candidates:
+
+```bash
+for epochs in 50 100; do
+  uv run python scripts/minilm/train.py \
+    --cache-dir artifacts/teacher-core40-timeline \
+    --output-dir "artifacts/minilm-ardy-core40-timeline-${epochs}e" \
+    --ardy-model ARDY-Core-RP-20FPS-Horizon40 \
+    --pooling-mode mean_cls_max_std \
+    --adapter-dim 1536 \
+    --epochs "${epochs}" \
+    --lr-schedule-epochs 100 \
+    --head-warmup-epochs 0 \
+    --batch-size 128 \
+    --head-lr 3e-3 \
+    --backbone-lr 1e-4 \
+    --weight-decay 0.01 \
+    --warmup-ratio 0.05 \
+    --cosine-weight 0.5 \
+    --relational-weight 0.05 \
+    --train-max-length 128 \
+    --runtime-max-length 128 \
+    --num-workers 0 \
+    --seed 20260726 \
+    --device cuda
+done
+```
+
+Evaluate both complete validation splits in FP32:
+
+```bash
+uv run python scripts/minilm/evaluate_conditions.py \
+  --teacher-cache artifacts/teacher-core40-timeline \
+  --student-path artifacts/minilm-ardy-core40-timeline-50e \
+  --expected-ardy-model ARDY-Core-RP-20FPS-Horizon40 \
+  --split val \
+  --batch-size 64 \
+  --device cuda \
+  --dtype float32 \
+  --output artifacts/evaluation/conditions-timeline-val-fp32-50e.json
+
+uv run python scripts/minilm/evaluate_conditions.py \
+  --teacher-cache artifacts/teacher-core40-timeline \
+  --student-path artifacts/minilm-ardy-core40-timeline-100e \
+  --expected-ardy-model ARDY-Core-RP-20FPS-Horizon40 \
+  --split val \
+  --batch-size 64 \
+  --device cuda \
+  --dtype float32 \
+  --output artifacts/evaluation/conditions-timeline-val-fp32-100e.json
+```
+
+After validation selects 100 epochs, install a clean canonical copy and run
+the test evaluations:
+
+```bash
+test ! -e artifacts/minilm-ardy-core40
+cp -a artifacts/minilm-ardy-core40-timeline-100e \
+  artifacts/minilm-ardy-core40
+
+uv run python scripts/minilm/evaluate_conditions.py \
+  --teacher-cache artifacts/teacher-core40-timeline \
+  --student-path artifacts/minilm-ardy-core40 \
+  --expected-ardy-model ARDY-Core-RP-20FPS-Horizon40 \
+  --split test \
+  --batch-size 64 \
+  --device cuda \
+  --dtype float32 \
+  --output artifacts/evaluation/conditions-timeline-test.json
+
+uv run python scripts/minilm/evaluate_motion.py \
+  --cache-dir artifacts/teacher-core40-timeline \
+  --student-path artifacts/minilm-ardy-core40 \
+  --checkpoints-dir checkpoints \
+  --model core \
+  --prompt-manifest artifacts/data/prompts-core40-timeline.jsonl \
+  --sources overview_description events.description \
+  --num-prompts 64 \
+  --seeds 0 1 2 \
+  --duration 4 \
+  --diffusion-steps 10 \
+  --cfg-weight 2 2 \
+  --student-dtype float32 \
+  --repeatability-check \
+  --device cuda \
+  --output artifacts/evaluation/motion-metrics-timeline-test.json \
+  --sample-dir outputs/minilm-motion-comparison-timeline
+```
+
+Run each benchmark only after the previous process exits:
+
+```bash
+uv run python scripts/minilm/benchmark_encoders.py teacher \
+  --device cuda \
+  --dtype bfloat16 \
+  --warm-runs 100 \
+  --output artifacts/evaluation/encoder-teacher.json
+
+uv run python scripts/minilm/benchmark_encoders.py student \
+  --student-path artifacts/minilm-ardy-core40 \
+  --expected-ardy-model ARDY-Core-RP-20FPS-Horizon40 \
+  --device cuda \
+  --dtype bfloat16 \
+  --warm-runs 100 \
+  --output artifacts/evaluation/encoder-student.json
+
+uv run python scripts/minilm/benchmark_encoders.py full-teacher \
+  --model core \
+  --checkpoints-dir checkpoints \
+  --device cuda \
+  --dtype bfloat16 \
+  --warm-runs 100 \
+  --output artifacts/evaluation/full-teacher.json
+
+uv run python scripts/minilm/benchmark_encoders.py full-student \
+  --student-path artifacts/minilm-ardy-core40 \
+  --expected-ardy-model ARDY-Core-RP-20FPS-Horizon40 \
+  --model core \
+  --checkpoints-dir checkpoints \
+  --device cuda \
+  --dtype bfloat16 \
+  --warm-runs 100 \
+  --output artifacts/evaluation/full-student.json
+```
+
+Build the prompt-free public aggregate:
+
+```bash
+uv run python scripts/minilm/build_public_summary.py \
+  --training-50 artifacts/minilm-ardy-core40-timeline-50e/training_report.json \
+  --training-100 artifacts/minilm-ardy-core40-timeline-100e/training_report.json \
+  --validation-fp32-50 artifacts/evaluation/conditions-timeline-val-fp32-50e.json \
+  --validation-fp32-100 artifacts/evaluation/conditions-timeline-val-fp32-100e.json \
+  --condition-test artifacts/evaluation/conditions-timeline-test.json \
+  --motion-test artifacts/evaluation/motion-metrics-timeline-test.json \
+  --benchmark-encoder-teacher artifacts/evaluation/encoder-teacher.json \
+  --benchmark-encoder-student artifacts/evaluation/encoder-student.json \
+  --benchmark-full-teacher artifacts/evaluation/full-teacher.json \
+  --benchmark-full-student artifacts/evaluation/full-student.json \
+  --output reports/minilm_core40_summary.json
+```
+
+Raw reports remain outside the public aggregate. The builder validates their
+lineage, complete FP32 validation protocol, selected artifact, test scope,
+deterministic motion protocol, benchmark pairing, and public-field allowlist,
+and records each input report's hash.
 
 ## Interpretation limits
 
-The public ARDY release does not include the proprietary Rigplay test split or
-the paper's TMR evaluator. Consequently, these motion results measure
-same-seed replacement fidelity to the original encoder, not ground-truth text
-semantics and not paper-comparable FID or R-precision. The natural-description
-source filter is a reproducible corpus proxy; it is not an automated spelling
-or grammar certification. The supported deployment assumption remains
-typo-free English motion prompts. This single-seed, same-source experiment
-does not establish statistical significance or cross-dataset language
-generalization.
+- Motion metrics measure same-seed replacement fidelity to the teacher, not
+  ground-truth text-to-motion semantics.
+- The proprietary Rigplay test split and TMR evaluator are unavailable, so
+  these values are not paper-comparable FID or R-precision.
+- Timing and memory are specific to the recorded software, hardware, and
+  fresh-process protocol.
+- One deterministic training seed does not establish statistical
+  significance.
+- Within-run saved epochs were selected with BF16 autocast. FP32 selection
+  compares the saved 50- and 100-epoch artifacts, not every discarded epoch.

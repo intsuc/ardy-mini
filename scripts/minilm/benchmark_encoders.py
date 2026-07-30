@@ -42,6 +42,10 @@ import torch
 
 DEFAULT_BASE_MODEL = "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp"
 DEFAULT_PEFT_MODEL = "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised"
+DEFAULT_FOUNDATION_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+DEFAULT_FOUNDATION_MODEL_REVISION = "8afb486c1db24fe5011ec46dfbe5b5dccdb575c2"
+DEFAULT_BASE_MODEL_REVISION = "31474e395ada192e8ed1586db6be79fb3b70c9c0"
+DEFAULT_PEFT_MODEL_REVISION = "baa8ebf04a1c2500e61288e7dad65e8ae42601a7"
 DEFAULT_STUDENT_PATH = "artifacts/minilm-ardy-core40"
 DEFAULT_PROMPT = "A person walks forward at a steady pace."
 DEFAULT_CHECKPOINTS_DIR = Path("checkpoints")
@@ -279,14 +283,49 @@ def _is_full_stack(command: str) -> bool:
 def _load_teacher(args: argparse.Namespace, device: str):
     from ardy.model.llm2vec.llm2vec_wrapper import LLM2VecEncoder
 
+    if __package__:
+        from .cache_teacher import resolve_pinned_snapshot
+    else:
+        from cache_teacher import resolve_pinned_snapshot
+
     # The production wrapper permits TEXT_ENCODER_DEVICE to override its
     # argument.  Make the benchmark CLI authoritative for this child process.
     previous_device = os.environ.get("TEXT_ENCODER_DEVICE")
     os.environ["TEXT_ENCODER_DEVICE"] = device
     try:
+        foundation_snapshot = resolve_pinned_snapshot(
+            args.foundation_model,
+            args.foundation_model_revision,
+            allow_patterns=(
+                "config.json",
+                "model*.safetensors",
+                "model.safetensors.index.json",
+            ),
+            local_files_only=True,
+        )
+        base_snapshot = resolve_pinned_snapshot(
+            args.base_model,
+            args.base_model_revision,
+            allow_patterns=(
+                "adapter_config.json",
+                "adapter_model.safetensors",
+                "config.json",
+                "special_tokens_map.json",
+                "tokenizer.json",
+                "tokenizer_config.json",
+            ),
+            local_files_only=True,
+        )
+        peft_snapshot = resolve_pinned_snapshot(
+            args.peft_model,
+            args.peft_model_revision,
+            allow_patterns=("adapter_config.json", "adapter_model.safetensors"),
+            local_files_only=True,
+        )
         return LLM2VecEncoder(
-            base_model_name_or_path=args.base_model,
-            peft_model_name_or_path=args.peft_model,
+            base_model_name_or_path=str(base_snapshot),
+            peft_model_name_or_path=str(peft_snapshot),
+            foundation_model_name_or_path=str(foundation_snapshot),
             dtype=args.dtype,
             llm_dim=args.llm_dim,
             device=device,
@@ -520,7 +559,40 @@ def _artifact_checkpoint_hashes(config: dict[str, Any]) -> set[str]:
         teacher_metadata = container.get("teacher_metadata")
         if isinstance(teacher_metadata, dict):
             values.append(teacher_metadata.get("checkpoint_sha256"))
+        teacher_lineage = container.get("teacher_cache_lineage")
+        if isinstance(teacher_lineage, dict):
+            values.append(teacher_lineage.get("checkpoint_sha256"))
     return {value for value in values if isinstance(value, str) and value}
+
+
+def _teacher_identity(args: argparse.Namespace) -> dict[str, Any]:
+    """Return the complete immutable teacher identity used by this process."""
+
+    return {
+        "foundation_model": args.foundation_model,
+        "foundation_model_revision": args.foundation_model_revision,
+        "base_model": args.base_model,
+        "base_model_revision": args.base_model_revision,
+        "peft_model": args.peft_model,
+        "peft_model_revision": args.peft_model_revision,
+        "llm_dim": args.llm_dim,
+    }
+
+
+def _student_artifact_identity(encoder: Any, args: argparse.Namespace) -> dict[str, Any]:
+    """Hash and summarize the complete local student artifact after measurement."""
+
+    artifact_dir = Path(args.student_path).resolve()
+    artifact_config = encoder.artifact_config
+    return {
+        "path": str(artifact_dir),
+        "files_sha256": _artifact_file_hashes(artifact_dir),
+        "artifact_fingerprint": artifact_config.get("artifact_fingerprint"),
+        "format_version": artifact_config.get("format_version"),
+        "base_model": artifact_config.get("base_model"),
+        "compatible_ardy_models": artifact_config.get("compatible_ardy_models"),
+        "output_dim": artifact_config.get("output_dim"),
+    }
 
 
 def _full_stack_identity(stack: FullConditionStack, args: argparse.Namespace) -> dict[str, Any]:
@@ -558,15 +630,9 @@ def _full_stack_identity(stack: FullConditionStack, args: argparse.Namespace) ->
         },
     }
     if stack.encoder_kind == "teacher":
-        identity["teacher"] = {
-            "base_model": args.base_model,
-            "peft_model": args.peft_model,
-            "llm_dim": args.llm_dim,
-        }
+        identity["teacher"] = _teacher_identity(args)
         return identity
 
-    artifact_dir = Path(args.student_path).resolve()
-    artifact_hashes = _artifact_file_hashes(artifact_dir)
     artifact_config = stack.encoder.artifact_config
     compatible_models = artifact_config.get("compatible_ardy_models")
     if not isinstance(compatible_models, list) or stack.resolved_ardy_model not in compatible_models:
@@ -586,17 +652,14 @@ def _full_stack_identity(stack: FullConditionStack, args: argparse.Namespace) ->
             "student artifact was distilled for a different ARDY checkpoint: "
             f"loaded={checkpoint_sha256}, artifact={sorted(expected_checkpoint_hashes)}"
         )
-    identity["student_artifact"] = {
-        "path": str(artifact_dir),
-        "files_sha256": artifact_hashes,
-        "artifact_fingerprint": artifact_config.get("artifact_fingerprint"),
-        "format_version": artifact_config.get("format_version"),
-        "base_model": artifact_config.get("base_model"),
-        "compatible_ardy_models": compatible_models,
-        "output_dim": artifact_config.get("output_dim"),
-        "expected_checkpoint_sha256": sorted(expected_checkpoint_hashes),
-        "checkpoint_sha256_verified": True,
-    }
+    student_identity = _student_artifact_identity(stack.encoder, args)
+    student_identity.update(
+        {
+            "expected_checkpoint_sha256": sorted(expected_checkpoint_hashes),
+            "checkpoint_sha256_verified": True,
+        }
+    )
+    identity["student_artifact"] = student_identity
     return identity
 
 
@@ -608,6 +671,29 @@ def _package_versions() -> dict[str, str | None]:
         except importlib.metadata.PackageNotFoundError:
             versions[distribution] = None
     return versions
+
+
+def _hardware_identity(cuda_device: torch.device | None) -> dict[str, Any]:
+    identity: dict[str, Any] = {
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "logical_cpu_count": os.cpu_count(),
+        "cuda": None,
+    }
+    if cuda_device is None:
+        return identity
+    index = cuda_device.index
+    if index is None:
+        index = torch.cuda.current_device()
+    properties = torch.cuda.get_device_properties(index)
+    identity["cuda"] = {
+        "index": index,
+        "name": properties.name,
+        "capability": list(torch.cuda.get_device_capability(index)),
+        "total_memory_bytes": int(properties.total_memory),
+        "torch_cuda_version": torch.version.cuda,
+    }
+    return identity
 
 
 def _minimum_present(values: list[int | None]) -> int | None:
@@ -662,9 +748,13 @@ def run(args: argparse.Namespace) -> None:
     output_shape, output_dtype, lengths = _shape_and_lengths(first_output)
     if len(output_shape) != 3 or output_shape[:2] != [1, 1]:
         raise RuntimeError(f"production batch-one wrapper returned unexpected shape {output_shape}")
-    if full_stack and output_shape != [1, 1, DIRECT_TEXT_DIM]:
-        raise RuntimeError(f"full condition stack returned {output_shape}, expected [1, 1, {DIRECT_TEXT_DIM}]")
-
+    expected_output_dim = LEGACY_TEXT_DIM if kind == "teacher" and not full_stack else DIRECT_TEXT_DIM
+    if output_shape != [1, 1, expected_output_dim]:
+        raise RuntimeError(
+            f"{args.encoder} returned {output_shape}, expected [1, 1, {expected_output_dim}]"
+        )
+    if lengths != [1]:
+        raise RuntimeError(f"{args.encoder} returned unexpected lengths {lengths!r}")
     def warm_operation():
         latencies: list[float] = []
         last_output = None
@@ -678,6 +768,10 @@ def run(args: argparse.Namespace) -> None:
     warm_shape, warm_dtype, warm_lengths = _shape_and_lengths(warm_output)
     if warm_shape != output_shape:
         raise RuntimeError(f"output shape changed from {output_shape} to {warm_shape}")
+    if warm_dtype != output_dtype:
+        raise RuntimeError(f"output dtype changed from {output_dtype} to {warm_dtype}")
+    if warm_lengths != lengths:
+        raise RuntimeError(f"output lengths changed from {lengths!r} to {warm_lengths!r}")
 
     process_end = _host_memory()
     stage_memories = (load_memory, first_memory, warm_memory)
@@ -695,8 +789,13 @@ def run(args: argparse.Namespace) -> None:
         [None if stage["cuda_peak"] is None else stage["cuda_peak"]["reserved_bytes"] for stage in stage_memories]
     )
     identity_started = time.perf_counter()
-    identity = _full_stack_identity(stack, args) if stack is not None else None
-    identity_seconds = time.perf_counter() - identity_started if stack is not None else None
+    if stack is not None:
+        identity = _full_stack_identity(stack, args)
+    elif kind == "teacher":
+        identity = {"teacher": _teacher_identity(args)}
+    else:
+        identity = {"student_artifact": _student_artifact_identity(encoder, args)}
+    identity_seconds = time.perf_counter() - identity_started
     result: dict[str, Any] = {
         "schema_version": 1,
         "encoder": args.encoder,
@@ -705,6 +804,7 @@ def run(args: argparse.Namespace) -> None:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "command": [sys.executable, *sys.argv],
         "versions": _package_versions(),
+        "hardware": _hardware_identity(cuda_device),
         "configuration": {
             "fresh_process_required": True,
             "process_id": os.getpid(),
@@ -717,12 +817,40 @@ def run(args: argparse.Namespace) -> None:
             "ardy_model_dtype": ardy_model_dtype,
             "prompt": args.prompt,
             "warm_runs": args.warm_runs,
+            "first_measured_calls": 1,
+            "warmup_calls_before_warm_measurement": 1,
+            "warm_measured_calls": args.warm_runs,
             "external_batch_size": 1,
             "production_wrapper": f"{type(encoder).__module__}.{type(encoder).__qualname__}",
             "timed_operation": (
                 "prompt -> encoder -> root_model.embed_text/body_model.embed_text -> concat[root,body]"
                 if full_stack
                 else "prompt -> encoder"
+            ),
+            "load_timing_scope": (
+                "path-specific imports, local-only pinned Hugging Face snapshot resolution, "
+                "Core40 construction, encoder construction, and device transfer"
+                if full_stack and kind == "teacher"
+                else (
+                    "path-specific imports, local-only pinned Hugging Face snapshot resolution, "
+                    "encoder construction, and device transfer"
+                    if kind == "teacher"
+                    else (
+                        "path-specific imports, Core40 construction, local artifact validation, "
+                        "encoder construction, and device transfer"
+                        if full_stack
+                        else (
+                            "path-specific imports, local artifact validation, "
+                            "encoder construction, and device transfer"
+                        )
+                    )
+                )
+            ),
+            "cuda_context_timing": (
+                "CUDA synchronization initializes the context before each stage timer; "
+                "context initialization is excluded from stage latency"
+                if cuda_device is not None
+                else None
             ),
         },
         "timing_seconds": {
@@ -746,8 +874,24 @@ def run(args: argparse.Namespace) -> None:
             "measurement_notes": {
                 "rss": "Linux /proc/self/status VmRSS; sampled every 5 ms during each stage",
                 "rss_peak": "stage sampled peak plus process-lifetime /proc VmHWM",
-                "mem_available": "Linux /proc/meminfo MemAvailable; drops are relative to each stage start",
-                "cuda": "PyTorch allocator allocated/reserved bytes; excludes CUDA driver/context memory",
+                "mem_available": (
+                    "Linux system-wide /proc/meminfo MemAvailable; drops are relative to "
+                    "each stage start and are sensitive to other processes and page cache"
+                ),
+                "cuda": (
+                    "absolute PyTorch allocator allocated/reserved bytes on the selected "
+                    "device; excludes CUDA driver/context and non-PyTorch allocations"
+                ),
+                "unified_memory": (
+                    "RSS/MemAvailable and CUDA allocator figures can describe overlapping "
+                    "physical memory on unified-memory systems; do not add them"
+                ),
+                "snapshot_resolution": (
+                    "teacher load measurements include local-only pinned Hugging Face "
+                    "snapshot cache resolution; network downloads are disabled"
+                    if kind == "teacher"
+                    else "student load measurements read the supplied local artifact"
+                ),
                 "identity_hashing": "model/artifact SHA-256 is computed after process_end and excluded from metrics",
             },
             "process_start": asdict(process_start),
@@ -779,14 +923,8 @@ def run(args: argparse.Namespace) -> None:
         "identity": identity,
     }
     if kind == "teacher":
-        result["configuration"].update(
-            {
-                "base_model": args.base_model,
-                "peft_model": args.peft_model,
-                "llm_dim": args.llm_dim,
-                "teacher_internal_batch_size": 1,
-            }
-        )
+        result["configuration"].update(_teacher_identity(args))
+        result["configuration"]["teacher_internal_batch_size"] = 1
     else:
         result["configuration"].update(
             {
@@ -828,6 +966,19 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
 def _add_teacher_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-model", default=DEFAULT_BASE_MODEL)
     parser.add_argument("--peft-model", default=DEFAULT_PEFT_MODEL)
+    parser.add_argument("--foundation-model", default=DEFAULT_FOUNDATION_MODEL)
+    parser.add_argument(
+        "--foundation-model-revision",
+        default=DEFAULT_FOUNDATION_MODEL_REVISION,
+    )
+    parser.add_argument(
+        "--base-model-revision",
+        default=DEFAULT_BASE_MODEL_REVISION,
+    )
+    parser.add_argument(
+        "--peft-model-revision",
+        default=DEFAULT_PEFT_MODEL_REVISION,
+    )
     parser.add_argument("--llm-dim", type=int, default=LEGACY_TEXT_DIM)
 
 

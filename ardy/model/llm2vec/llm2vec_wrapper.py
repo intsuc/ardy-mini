@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Modified by intsuc in 2026: added distilled MiniLM text-encoder support.
+# Modified by intsuc in 2026: added distilled MiniLM text-encoder support and
+# deterministic single-device teacher encoding.
 """LLM2Vec encoder wrapper for ARDY text conditioning."""
 
 import hashlib
@@ -23,6 +24,7 @@ class LLM2VecEncoder:
         dtype: str,
         llm_dim: int,
         device: str = "auto",
+        foundation_model_name_or_path: str | None = None,
     ) -> None:
         torch_dtype = getattr(torch, dtype)
         self.llm_dim = llm_dim
@@ -32,11 +34,17 @@ class LLM2VecEncoder:
         if "TEXT_ENCODERS_DIR" in os.environ:
             base_model_name_or_path = os.path.join(os.environ["TEXT_ENCODERS_DIR"], base_model_name_or_path)
             peft_model_name_or_path = os.path.join(os.environ["TEXT_ENCODERS_DIR"], peft_model_name_or_path)
+            if foundation_model_name_or_path is not None:
+                foundation_model_name_or_path = os.path.join(
+                    os.environ["TEXT_ENCODERS_DIR"],
+                    foundation_model_name_or_path,
+                )
 
         namespace_payload = json.dumps(
             {
                 "base_model": base_model_name_or_path,
                 "peft_model": peft_model_name_or_path,
+                "foundation_model": foundation_model_name_or_path,
                 "dtype": dtype,
                 "llm_dim": llm_dim,
             },
@@ -50,6 +58,7 @@ class LLM2VecEncoder:
         self.model = LLM2Vec.from_pretrained(
             base_model_name_or_path=base_model_name_or_path,
             peft_model_name_or_path=peft_model_name_or_path,
+            foundation_model_name_or_path=foundation_model_name_or_path,
             torch_dtype=torch_dtype,
             cache_dir=cache_dir,
         )
@@ -102,6 +111,7 @@ class LLM2VecEncoder:
                 batch_size=1,
                 show_progress_bar=False,
                 device=self._device,
+                use_multiprocessing=False,
             )
 
         assert len(encoded_text.shape)

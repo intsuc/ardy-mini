@@ -31,12 +31,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Modified by intsuc in 2026: added explicit foundation-model loading for
+# revision-pinned, reproducible teacher inference and an explicit serial
+# encoding mode that honors the requested device.
 
 import json
 import logging
 import os
-from functools import partial
-from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -113,6 +115,7 @@ class LLM2Vec(nn.Module):
         cls,
         base_model_name_or_path,
         peft_model_name_or_path=None,
+        foundation_model_name_or_path=None,
         merge_peft=False,
         enable_bidirectional=True,
         **kwargs,
@@ -121,35 +124,64 @@ class LLM2Vec(nn.Module):
         keys = ["pooling_mode", "max_length", "doc_max_length", "skip_instruction"]
         encoder_args = {key: kwargs.pop(key, None) for key in keys if kwargs.get(key) is not None}
 
-        tokenizer = AutoTokenizer.from_pretrained(base_model_name_or_path)
+        tokenizer = AutoTokenizer.from_pretrained(
+            base_model_name_or_path,
+            cache_dir=kwargs.get("cache_dir"),
+        )
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "left"
 
-        config = AutoConfig.from_pretrained(base_model_name_or_path)
+        config_source = foundation_model_name_or_path or base_model_name_or_path
+        config = AutoConfig.from_pretrained(
+            config_source,
+            cache_dir=kwargs.get("cache_dir"),
+        )
         config_class_name = config.__class__.__name__
 
         model_class = cls._get_model_class(config_class_name, enable_bidirectional=enable_bidirectional)
 
-        model = model_class.from_pretrained(base_model_name_or_path, **kwargs)
-
-        if os.path.isdir(base_model_name_or_path) and os.path.exists(f"{base_model_name_or_path}/config.json"):
-            with open(f"{base_model_name_or_path}/config.json", "r") as fIn:
-                config_dict = json.load(fIn)
-            config = PretrainedConfig.from_dict(config_dict)
-            model.config._name_or_path = config._name_or_path
-
-        # For special case where config.json and adapter weights are in the same directory
-        if hasattr(model, "peft_config"):
+        if foundation_model_name_or_path is not None:
+            model = model_class.from_pretrained(
+                foundation_model_name_or_path,
+                **kwargs,
+            )
             model = PeftModel.from_pretrained(
                 model,
                 base_model_name_or_path,
+                cache_dir=kwargs.get("cache_dir"),
             )
             model = model.merge_and_unload()
+            if os.path.isdir(base_model_name_or_path) and os.path.exists(
+                f"{base_model_name_or_path}/config.json"
+            ):
+                with open(f"{base_model_name_or_path}/config.json", "r") as fIn:
+                    config_dict = json.load(fIn)
+                adapter_config = PretrainedConfig.from_dict(config_dict)
+                model.config._name_or_path = adapter_config._name_or_path
+        else:
+            model = model_class.from_pretrained(base_model_name_or_path, **kwargs)
+
+            if os.path.isdir(base_model_name_or_path) and os.path.exists(
+                f"{base_model_name_or_path}/config.json"
+            ):
+                with open(f"{base_model_name_or_path}/config.json", "r") as fIn:
+                    config_dict = json.load(fIn)
+                config = PretrainedConfig.from_dict(config_dict)
+                model.config._name_or_path = config._name_or_path
+
+            # For special case where config.json and adapter weights are in the same directory
+            if hasattr(model, "peft_config"):
+                model = PeftModel.from_pretrained(
+                    model,
+                    base_model_name_or_path,
+                )
+                model = model.merge_and_unload()
 
         if peft_model_name_or_path is not None:
             model = PeftModel.from_pretrained(
                 model,
                 peft_model_name_or_path,
+                cache_dir=kwargs.get("cache_dir"),
             )
             if merge_peft:
                 model = model.merge_and_unload()
@@ -187,7 +219,7 @@ class LLM2Vec(nn.Module):
         if self.pooling_mode == "eos_token":
             if self.model.config._name_or_path == "meta-llama/Meta-Llama-3-8B":
                 text = text.strip() + "<|end_of_text|>"
-            elif isinstance(self.model.config, LlamaConfig) or isinstance(self.model.config, MistralConfig):
+            elif isinstance(self.model.config, (LlamaConfig, MistralConfig)):
                 text = text.strip() + " </s>"
             elif isinstance(self.model.config, GemmaConfig):
                 text = text.strip() + "<eos>"
@@ -238,7 +270,7 @@ class LLM2Vec(nn.Module):
         assert sentence_feature["attention_mask"].shape == sentence_feature["embed_mask"].shape
         sentence_feature["attention_mask"] = sentence_feature["embed_mask"]
 
-    def forward(self, sentence_feature: Dict[str, Tensor]):
+    def forward(self, sentence_feature: dict[str, Tensor]):
         embed_mask = None
         if "embed_mask" in sentence_feature:
             embed_mask = sentence_feature.pop("embed_mask")
@@ -301,12 +333,13 @@ class LLM2Vec(nn.Module):
 
     def encode(
         self,
-        sentences: Union[str, List[str]],
+        sentences: str | list[str],
         batch_size: int = 32,
         show_progress_bar: bool = True,
         convert_to_numpy: bool = False,
         convert_to_tensor: bool = False,
-        device: Optional[str] = None,
+        device: str | None = None,
+        use_multiprocessing: bool | None = None,
     ):
         """Encode a list of sentences to their respective embeddings.
 
@@ -319,6 +352,8 @@ class LLM2Vec(nn.Module):
             device: torch backend device identifier (e.g., 'cuda', 'cpu','mps' etc.). If not specified,
             the default is to use cuda when available, otherwise cpu. Note that only the choice of 'cuda' supports
             multiprocessing as currently implemented.
+            use_multiprocessing: whether to use one worker per visible CUDA device. ``None`` preserves the
+            original automatic behavior; ``False`` runs serially and honors ``device``.
 
         Returns: embeddings of the sentences. Embeddings are detached and always on the CPU (see _encode implementation).
         """
@@ -347,7 +382,10 @@ class LLM2Vec(nn.Module):
         sentences_sorted = [sentences[idx] for idx in length_sorted_idx]
         all_embeddings = []
 
-        if torch.cuda.device_count() <= 1:
+        use_multiple_devices = (
+            torch.cuda.device_count() > 1 and use_multiprocessing is not False
+        )
+        if not use_multiple_devices:
             # This branch also support mps devices
             self.to(device)
             for start_index in trange(
@@ -423,7 +461,7 @@ class LLM2Vec(nn.Module):
     def _encode(
         self,
         sentences_batch,
-        device: Optional[str] = None,
+        device: str | None = None,
         convert_to_numpy: bool = False,
         multiprocessing=False,
     ):
@@ -445,7 +483,7 @@ class LLM2Vec(nn.Module):
 
         return embeddings
 
-    def _text_length(self, text: Union[List[int], List[List[int]]]):
+    def _text_length(self, text: list[int] | list[list[int]]):
         """Help function to get the length for the input text.
 
         Text can be either a string (which means a single text) a list of ints (which means a single
@@ -464,8 +502,8 @@ class LLM2Vec(nn.Module):
 
     def resize_token_embeddings(
         self,
-        new_num_tokens: Optional[int] = None,
-        pad_to_multiple_of: Optional[int] = None,
+        new_num_tokens: int | None = None,
+        pad_to_multiple_of: int | None = None,
     ) -> nn.Embedding:
         return self.model.resize_token_embeddings(new_num_tokens=new_num_tokens, pad_to_multiple_of=pad_to_multiple_of)
 

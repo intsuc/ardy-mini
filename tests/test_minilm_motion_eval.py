@@ -11,16 +11,75 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from ardy.minilm_teacher_cache import (
+    TIMELINE_PROMPT_DEDUPLICATION,
+    TIMELINE_PROMPT_GROUPING,
+    TIMELINE_PROMPT_MAX_CHARACTERS,
+    TIMELINE_PROMPT_NORMALIZATION,
+    TIMELINE_SPLIT_HASH_NAMESPACE,
+    prompt_provenance_sha256,
+)
 from scripts.minilm.evaluate_motion import (
+    assert_exact_repeatability,
     json_safe,
     load_test_embeddings,
     mean_metrics,
     paired_metrics,
+    selected_prompt_sha256,
     sha256_file,
     student_teacher_checkpoint_sha256,
     validate_basic_args,
     validate_seeds,
 )
+
+
+def _prompt_provenance(manifest_sha256: str) -> dict:
+    return {
+        "format": "ardy-minilm-prompt-provenance",
+        "format_version": 1,
+        "dataset": {
+            "repo_id": "nvidia/SEED-Timeline-Annotations",
+            "revision": "b2cf916d8ef7a1e49fc4f0ce9e00c1981d3b9d8f",
+            "filename": "timelines.jsonl",
+            "sha256": "379d6a5b86cea06b7201d485d19ee53512cc58449352b3cf113a95d1d27603d8",
+            "size_bytes": 80_373_523,
+            "resolved_from": "hugging_face_hub",
+            "owner": "NVIDIA",
+            "license": "CC BY 4.0",
+            "url": "https://huggingface.co/datasets/nvidia/SEED-Timeline-Annotations",
+        },
+        "preparation": {
+            "sources": ["overview_description", "events.description"],
+            "normalization": TIMELINE_PROMPT_NORMALIZATION,
+            "deduplication": TIMELINE_PROMPT_DEDUPLICATION,
+            "max_prompt_characters": TIMELINE_PROMPT_MAX_CHARACTERS,
+            "grouping": TIMELINE_PROMPT_GROUPING,
+            "split_hash_namespace": TIMELINE_SPLIT_HASH_NAMESPACE,
+            "seed": 20260726,
+            "split_ratios": {"train": 0.8, "val": 0.1, "test": 0.1},
+            "sample_size": 0,
+        },
+        "counts": {
+            "timeline_rows": 3,
+            "recording_families": 3,
+            "recording_components": 3,
+            "missing_propagation_references": 0,
+            "raw_overview_descriptions": 3,
+            "raw_event_descriptions": 3,
+            "dropped_prompt_too_long": 0,
+            "unique_descriptions": 3,
+            "unique_before_sampling": 3,
+            "written": 3,
+            "groups_written": 3,
+            "splits": {"train": 1, "val": 1, "test": 1},
+            "split_groups": {"train": 1, "val": 1, "test": 1},
+            "sources": {"overview_description": 2, "events.description": 1},
+        },
+        "manifest": {
+            "filename": "prompts.jsonl",
+            "sha256": manifest_sha256,
+        },
+    }
 
 
 class MotionMetricTests(unittest.TestCase):
@@ -89,6 +148,34 @@ class MotionMetricTests(unittest.TestCase):
         self.assertEqual(safe, {"finite": 1.0, "values": [None, None, 3]})
         json.dumps(safe, allow_nan=False)
 
+    def test_selected_prompt_digest_is_order_sensitive(self):
+        forward = selected_prompt_sha256(["walk", "turn"])
+        reverse = selected_prompt_sha256(["turn", "walk"])
+
+        self.assertEqual(len(forward), 64)
+        self.assertNotEqual(forward, reverse)
+
+    def test_repeatability_requires_exact_motion_arrays(self):
+        output = {
+            "root_positions": np.zeros((2, 3), dtype=np.float32),
+            "posed_joints": np.zeros((2, 1, 3), dtype=np.float32),
+            "global_root_heading": np.zeros((2, 2), dtype=np.float32),
+            "foot_contacts": np.zeros((2, 2), dtype=np.float32),
+        }
+        self.assertEqual(
+            assert_exact_repeatability(output, output),
+            [
+                "root_positions",
+                "posed_joints",
+                "global_root_heading",
+                "foot_contacts",
+            ],
+        )
+        changed = {key: value.copy() for key, value in output.items()}
+        changed["root_positions"][0, 0] = 1.0
+        with self.assertRaisesRegex(RuntimeError, "arrays differ"):
+            assert_exact_repeatability(output, changed)
+
     def test_basic_argument_validation(self):
         valid = argparse.Namespace(
             num_prompts=1,
@@ -103,31 +190,25 @@ class MotionMetricTests(unittest.TestCase):
             ("duration", 0.0),
             ("save_samples", -1),
             ("cfg_weight", [2.0, math.inf]),
+            ("diffusion_steps", 0),
+            ("student_dtype", "float64"),
         ):
             invalid = argparse.Namespace(**vars(valid))
             setattr(invalid, field, value)
             with self.subTest(field=field, value=value), self.assertRaises(ValueError):
                 validate_basic_args(invalid)
 
-    def test_student_checkpoint_hash_supports_v2_and_legacy_metadata(self):
+    def test_student_checkpoint_hash_requires_canonical_cache_lineage(self):
         checkpoint_hash = "a" * 64
-        v2 = {
+        artifact = {
             "format_version": 2,
-            "metadata": {"teacher_metadata": {"checkpoint_sha256": checkpoint_hash}},
-        }
-        legacy = {
-            "format_version": 1,
-            "teacher_metadata": {"checkpoint_sha256": checkpoint_hash},
+            "metadata": {"teacher_cache_lineage": {"checkpoint_sha256": checkpoint_hash}},
         }
         self.assertEqual(
-            student_teacher_checkpoint_sha256(v2),
+            student_teacher_checkpoint_sha256(artifact),
             checkpoint_hash,
         )
-        self.assertEqual(
-            student_teacher_checkpoint_sha256(legacy),
-            checkpoint_hash,
-        )
-        with self.assertRaisesRegex(TypeError, "missing teacher checkpoint"):
+        with self.assertRaisesRegex(TypeError, "missing teacher-cache lineage"):
             student_teacher_checkpoint_sha256({"format_version": 2, "metadata": {}})
 
 
@@ -152,18 +233,68 @@ class TeacherCacheValidationTests(unittest.TestCase):
         }
         shard_path = cache_dir / "teacher-00000.pt"
         torch.save(shard, shard_path)
+        input_sha256 = sha256_file(prompt_manifest) if prompt_manifest is not None else "1" * 64
+        corpus_provenance = _prompt_provenance(input_sha256)
         metadata = {
+            "format_version": 3,
+            "input_path": str(cache_dir / "prompts.jsonl"),
+            "input_sha256": input_sha256,
+            "input_metadata_sha256": prompt_provenance_sha256(corpus_provenance),
+            "corpus_provenance": corpus_provenance,
+            "model_name": (
+                "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp + "
+                "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised"
+            ),
+            "foundation_model_name_or_path": "meta-llama/Meta-Llama-3-8B",
+            "foundation_model_revision": "a" * 40,
+            "base_model_name_or_path": ("McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp"),
+            "base_model_revision": "b" * 40,
+            "peft_model_name_or_path": ("McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised"),
+            "peft_model_revision": "c" * 40,
+            "model_revisions": {
+                "foundation_model": "meta-llama/Meta-Llama-3-8B",
+                "foundation": "a" * 40,
+                "base": "b" * 40,
+                "peft": "c" * 40,
+            },
+            "versions": {
+                "torch": "2.9.1",
+                "transformers": "5.1.0",
+                "peft": "0.18.1",
+                "safetensors": "0.7.0",
+            },
+            "device": {
+                "cli_requested": "cpu",
+                "env_override": None,
+                "requested": "cpu",
+                "resolved": "cpu",
+            },
+            "provenance_status": "recorded",
             "status": status,
             "count": 3,
             "completed_count": 3 if status == "complete" else 0,
             "teacher_dim": 4096,
             "target_dim": 2048,
+            "target_keys": [
+                "denoiser.backbone.root_model.embed_text.weight",
+                "denoiser.backbone.body_model.embed_text.weight",
+            ],
+            "target_order": ["root", "body"],
+            "bias_applied": False,
+            "dtype": {
+                "teacher_model": "bfloat16",
+                "teacher_embeddings": "float32",
+                "projection_weights": "float32",
+                "targets": "float32",
+            },
+            "teacher_batch_size": 1,
+            "checkpoint_path": str(cache_dir / "checkpoints" / "ARDY-Core-RP-20FPS-Horizon40" / "denoiser.safetensors"),
+            "checkpoint_sha256": "2" * 64,
             "split_counts": {"train": 1, "val": 1, "test": 1},
+            "shard_size": 3,
             "shards": [shard_path.name],
             "shard_sha256": {shard_path.name: sha256_file(shard_path)},
         }
-        if prompt_manifest is not None:
-            metadata["input_sha256"] = sha256_file(prompt_manifest)
         metadata_path = cache_dir / "metadata.json"
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
         return shard_path, metadata_path
@@ -216,17 +347,17 @@ class TeacherCacheValidationTests(unittest.TestCase):
             {
                 "text": "walk forward",
                 "split": "train",
-                "source": "content_natural_desc_1",
+                "source": "overview_description",
             },
             {
                 "text": second_text,
                 "split": "test",
-                "source": "content_natural_desc_2",
+                "source": "events.description",
             },
             {
                 "text": "turn left",
                 "split": "val",
-                "source": "content_technical_description",
+                "source": "overview_description",
             },
         ]
         path.write_text(
@@ -245,11 +376,11 @@ class TeacherCacheValidationTests(unittest.TestCase):
             records, _metadata, selection = load_test_embeddings(
                 cache_dir,
                 prompt_manifest=prompt_manifest,
-                sources=["content_natural_desc_2"],
+                sources=["events.description"],
             )
 
         self.assertEqual([text for text, _embedding in records], ["jump"])
-        self.assertEqual(selection["source_filter"], ["content_natural_desc_2"])
+        self.assertEqual(selection["source_filter"], ["events.description"])
         self.assertEqual(selection["eligible_test_prompts"], 1)
         self.assertEqual(
             selection["prompt_manifest_sha256"],
@@ -287,7 +418,7 @@ class TeacherCacheValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "requires"):
                 load_test_embeddings(
                     cache_dir,
-                    sources=["content_natural_desc_2"],
+                    sources=["events.description"],
                 )
             with self.assertRaisesRegex(ValueError, "unique"):
                 load_test_embeddings(

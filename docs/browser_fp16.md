@@ -65,12 +65,12 @@ FP32. Its conditions were extremely close to the reference (RMSE
 | Accumulated 200 frames | 8.496 mm | 24.604 mm | 735.802 mm |
 | Fifth window | 32.558 mm | 82.756 mm | 3,279.665 mm |
 
-The worst case was prompt `walk ff stop 180 slow` with seed `12031`. Its fifth
-window also reached `125.28°` global-rotation error and only `30.625%` contact
-agreement. More aggressive text-FP16 candidates could not provide a stronger
-tail guarantee, so the selected 112,430,592-byte text graph is copied exactly
-from the FP32 export. Its condition RMSE, MAE, and maximum absolute error are
-all zero (the reported cosine mean is one).
+One continuation at seed `12031` also reached `125.28°`
+global-rotation error and only `30.625%` contact agreement. More aggressive
+text-FP16 candidates could not provide a stronger tail guarantee, so the
+selected 112,430,592-byte text graph is copied exactly from the FP32 export.
+Its condition RMSE, MAE, and maximum absolute error are all zero (the reported
+cosine mean is one).
 
 ### Autoregressive denoiser
 
@@ -122,65 +122,88 @@ remains FP16.
 ## Final 64 × 3 × 5 evaluation
 
 The adopted decoder-only mixed-FP16 pack was evaluated on 64 frozen test
-prompts, three fixed seeds, and five consecutive 40-frame windows (192 paired
-200-frame motions; 960 windows total). These are fidelity errors relative to
-the FP32 browser graphs, not paper-comparable semantic motion metrics:
+prompts from the pinned NVIDIA SEED Timeline Annotations corpus, three fixed
+seeds, and five consecutive 40-frame windows (192 paired 200-frame motions;
+960 windows total). These are fidelity errors relative to the FP32 browser
+graphs, not paper-comparable semantic motion metrics:
 
 | Metric and scope | Mean | p95 | Maximum |
 |---|---:|---:|---:|
-| MPJPE, accumulated 200 frames | 0.278312 mm | 0.351433 mm | 0.464571 mm |
-| MPJPE, fifth window | 0.278785 mm | 0.361916 mm | 0.598959 mm |
-| Global rotation, accumulated | 0.079321° | 0.095760° | 0.106333° |
+| MPJPE, accumulated 200 frames | 0.265241 mm | 0.349735 mm | 0.409339 mm |
+| MPJPE, fifth window | 0.259722 mm | 0.350215 mm | 0.412430 mm |
+| Global rotation, accumulated | 0.076471° | 0.090211° | 0.101946° |
 | Root ADE, accumulated | 0 | 0 | 0 |
 | Root FDE, accumulated | 0 | 0 | 0 |
 
-Accumulated contact agreement was `99.994140625%`, with F1
-`0.99996181` and IoU `0.99992362`. Text conditions and denoiser outputs were
+Accumulated contact agreement was `99.998046875%`, with F1
+`0.99998785` and IoU `0.99997569`. Text conditions and denoiser outputs were
 exactly equal to their FP32 references; all measured difference came from the
 decoder.
 
-The complete machine-readable result, including per-window distributions and
-worst cases, is
+The Git-tracked machine-readable aggregate, including prompt-corpus
+provenance, content hashes, evaluation parameters, per-window distributions,
+pack identities, and the Python/ONNX Runtime/CPU evaluation environment, is
 [`reports/browser_fp16_ablation.json`](../reports/browser_fp16_ablation.json).
+It deliberately excludes prompt text, local absolute paths, and per-case
+worst-case attribution. The detailed local report retains those diagnostics
+under the ignored `artifacts/` directory.
 
 Reproduce the paired evaluation with:
 
 ```bash
+uv run --extra browser python scripts/export_browser.py \
+  --checkpoints-dir checkpoints \
+  --minilm-artifact artifacts/minilm-ardy-core40 \
+  --output artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz \
+  --fp32-reference-output \
+    artifacts/browser/ardy-minilm-core40-browser-v1-fp32-reference.tar.gz
+
 uv run --extra browser python scripts/evaluate_browser_fp16.py \
-  --reference-pack /path/to/fp32-reference.tar.gz \
+  --reference-pack \
+    artifacts/browser/ardy-minilm-core40-browser-v1-fp32-reference.tar.gz \
   --candidate-pack artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz \
-  --prompts artifacts/data/prompts-core40-expanded-frozen-eval.jsonl \
+  --prompts artifacts/data/prompts-core40-timeline.jsonl \
+  --prompt-metadata artifacts/data/prompts-core40-timeline.metadata.json \
   --split test \
   --count 64 \
   --seeds 12031,987654,20260729 \
   --cfg-weight 3.5 \
   --windows 5 \
-  --output reports/browser_fp16_ablation.json
+  --output artifacts/evaluation/browser-fp16-timeline-detailed.json \
+  --public-output reports/browser_fp16_ablation.json
 ```
+
+`--public-output` requires the canonical NVIDIA Timeline provenance sidecar.
+The evaluator validates that sidecar against the complete prompt-manifest
+filename, SHA-256, row count, and split counts. The public aggregate records
+that identity and the digest of the deterministically selected prompts, so the
+selection can be reproduced without checking prompt bodies into Git.
+Before creating any ONNX Runtime session, it also validates bounded canonical
+archive members, every declared file hash and size, the complete FP32 reference
+graphs, the production mixed-precision policy, public graph I/O, and the absence
+of external ONNX data. Input archives are prehashed and rechecked after
+extraction; any non-finite inference output or metric aborts report creation.
 
 ## Size result
 
 | Asset | FP32 bytes | Mixed-FP16 bytes | Saved |
 |---|---:|---:|---:|
-| Text encoder | 112,430,592 | 112,430,592 | 0 |
-| Denoiser | 590,701,706 | 590,701,706 | 0 |
-| Decoder | 71,642,198 | 36,181,508 | 35,460,690 |
-| ONNX total | 774,774,496 | 739,313,806 | 35,460,690 |
-| Gzip model pack | 718,137,762 | 684,835,577 | 33,302,185 |
+| Gzip model pack | 718,077,804 | 684,776,137 | 33,301,667 |
 
-The decoder is 49.497% smaller. This makes the total ONNX payload 4.5769%
-smaller and the final gzip pack 4.6373% smaller, saving 33.82 MiB of ONNX data
-and 31.76 MiB (0.0310 GiB) on transfer. The candidate archive SHA-256 is
-`145995ff6216076d2ee06d7a62a741c6d9a02434278d645a0446cd357aa95868`;
+The final gzip pack is 4.6376% smaller, saving 31.76 MiB (0.0310 GiB) on
+transfer. The production policy keeps the text encoder and denoiser
+byte-identical to FP32 and applies mixed FP16 only to the decoder. The
+candidate archive SHA-256 is
+`8641b8fbb94c245866300dcdbb3ad75a634d5427566fc4a8bd2fc8b9fe533a68`;
 the FP32 reference archive SHA-256 is
-`4962bc2c3b7135e8181de1229fc816924ebcd60e3d5ff1d9f5cc02b8505e8663`.
+`a9f5b37a0552e45dd7880fb347d4c3aa1206bc735b87cd2250a61178236074c3`.
 These are verified file/transfer reductions, not a claim that peak GPU memory
 drops by the same amount. Runtime allocations also include FP32 regions,
 activations, staging buffers, and browser/driver overhead.
 
 CPU FP16 inference is intentionally not used by the application and was slower
-than FP32 in the evaluation environment: the candidate took `1.31319`
-seconds per five-window case versus `1.25773` seconds for the FP32 reference.
+than FP32 in the evaluation environment: the candidate took `1.31786`
+seconds per five-window case versus `1.28885` seconds for the FP32 reference.
 This is diagnostic only. Actual deployment timing must use the opt-in WebGPU
 Playwright test documented in [`browser_demo.md`](browser_demo.md).
 

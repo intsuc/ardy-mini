@@ -12,7 +12,7 @@ metadata.
 Example:
 
     uv run python scripts/minilm/train.py \
-      --cache-dir artifacts/teacher-core40 \
+      --cache-dir artifacts/teacher-core40-timeline \
       --output-dir artifacts/minilm-ardy-core40
 """
 
@@ -21,10 +21,14 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import platform
 import random
 import time
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
+from importlib.metadata import version
 from pathlib import Path
 
 import numpy as np
@@ -35,16 +39,81 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 
-from ardy.minilm_teacher_cache import load_teacher_cache, sha256_file
+from ardy.minilm_teacher_cache import (
+    load_teacher_cache,
+    sha256_file,
+    teacher_cache_fingerprint,
+    validated_teacher_lineage,
+)
 from ardy.model.minilm_encoder import (
     ARDY_CONDITION_DIM,
+    ARTIFACT_CONFIG,
     POOLING_MODES,
     MotionConditionStudent,
 )
 from ardy.model.registry import resolve_model_name
 
 DEFAULT_BASE_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+DEFAULT_BASE_MODEL_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
 DEFAULT_ARDY_MODEL = "ARDY-Core-RP-20FPS-Horizon40"
+DETERMINISTIC_CUBLAS_WORKSPACE_CONFIGS = frozenset((":16:8", ":4096:8"))
+DEFAULT_CUBLAS_WORKSPACE_CONFIG = ":4096:8"
+
+
+def training_runtime_versions() -> dict[str, str]:
+    """Return the package versions that can affect student training."""
+    versions = {
+        package: version(package)
+        for package in (
+            "numpy",
+            "safetensors",
+            "tokenizers",
+            "torch",
+            "transformers",
+        )
+    }
+    versions.update(
+        {
+            "python": platform.python_version(),
+            "machine": platform.machine(),
+            "cuda_runtime": torch.version.cuda or "none",
+            "cudnn": str(torch.backends.cudnn.version() or "none"),
+        }
+    )
+    return versions
+
+
+def _saved_artifact_identity(output_dir: Path) -> tuple[str, int]:
+    """Read the immutable fingerprint and payload size from a saved artifact."""
+
+    config_path = output_dir / ARTIFACT_CONFIG
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"saved artifact config is invalid JSON: {config_path}") from error
+    if not isinstance(config, dict):
+        raise TypeError(f"saved artifact config must be an object: {config_path}")
+    fingerprint = config.get("artifact_fingerprint")
+    if (
+        not isinstance(fingerprint, str)
+        or len(fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in fingerprint)
+    ):
+        raise ValueError("saved artifact config has no valid artifact_fingerprint")
+    manifest = config.get("artifact_files")
+    if not isinstance(manifest, dict) or not manifest:
+        raise ValueError("saved artifact config has no artifact_files manifest")
+    payload_size = 0
+    for relative_path, entry in manifest.items():
+        if not isinstance(relative_path, str) or not isinstance(entry, dict):
+            raise TypeError("saved artifact artifact_files is invalid")
+        size = entry.get("size_bytes")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise ValueError(
+                f"saved artifact size_bytes is invalid for {relative_path!r}"
+            )
+        payload_size += size
+    return fingerprint, payload_size
 
 
 @dataclass
@@ -89,16 +158,13 @@ class TokenizingCollator:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache-dir", required=True, help="Teacher-cache directory")
-    parser.add_argument(
-        "--eval-cache-dir",
-        default=None,
-        help=(
-            "optional teacher cache supplying byte-for-byte frozen validation "
-            "and test targets while --cache-dir supplies training examples"
-        ),
-    )
     parser.add_argument("--output-dir", default="artifacts/minilm-ardy-core40")
     parser.add_argument("--base-model", default=DEFAULT_BASE_MODEL)
+    parser.add_argument(
+        "--base-model-revision",
+        default=DEFAULT_BASE_MODEL_REVISION,
+        help="immutable all-MiniLM-L6-v2 commit",
+    )
     parser.add_argument("--ardy-model", default=DEFAULT_ARDY_MODEL)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--head-warmup-epochs", type=int, default=1)
@@ -114,26 +180,126 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--head-lr", type=float, default=2e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-ratio", type=float, default=0.05)
+    parser.add_argument(
+        "--lr-schedule-epochs",
+        type=int,
+        default=None,
+        help=(
+            "cosine-schedule horizon in epochs; defaults to --epochs. Set the "
+            "same horizon for shorter/longer runs to compare one shared "
+            "training trajectory"
+        ),
+    )
     parser.add_argument("--cosine-weight", type=float, default=0.10)
     parser.add_argument("--relational-weight", type=float, default=0.02)
     parser.add_argument("--train-max-length", type=int, default=128)
     parser.add_argument("--runtime-max-length", type=int, default=256)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=20260726)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="training device; auto selects CUDA when available, otherwise CPU",
+    )
     parser.add_argument("--no-bf16", action="store_true", help="Disable CUDA BF16 autocast")
     return parser.parse_args()
 
 
 def seed_everything(seed: int) -> None:
+    workspace_config = os.environ.setdefault(
+        "CUBLAS_WORKSPACE_CONFIG",
+        DEFAULT_CUBLAS_WORKSPACE_CONFIG,
+    )
+    if workspace_config not in DETERMINISTIC_CUBLAS_WORKSPACE_CONFIGS:
+        raise ValueError(
+            "CUBLAS_WORKSPACE_CONFIG must be ':16:8' or ':4096:8' for "
+            f"deterministic training, got {workspace_config!r}"
+        )
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
-def load_cached_examples(cache_dir: str | Path) -> tuple[CachedExamples, dict]:
+def require_fresh_output_dir(output_dir: str | Path) -> Path:
+    """Reject an existing output before any expensive training starts."""
+
+    output_path = Path(output_dir)
+    if output_path.exists() or output_path.is_symlink():
+        raise FileExistsError(
+            f"--output-dir already exists: {output_path}. "
+            "Use a new path so stale or partial artifact files cannot be mixed "
+            "with this run."
+        )
+    return output_path
+
+
+def cosine_lr_multiplier(
+    step: int,
+    *,
+    warmup_steps: int,
+    schedule_steps: int,
+) -> float:
+    """Return the deterministic warmup/cosine multiplier for one update."""
+
+    if warmup_steps and step < warmup_steps:
+        return max(step, 1) / warmup_steps
+    progress = (step - warmup_steps) / max(
+        1,
+        schedule_steps - warmup_steps,
+    )
+    return 0.5 * (
+        1.0 + math.cos(math.pi * min(max(progress, 0.0), 1.0))
+    )
+
+
+def resolve_training_device(requested: str) -> torch.device:
+    value = "cuda" if requested == "auto" and torch.cuda.is_available() else requested
+    if value == "auto":
+        value = "cpu"
+    device = torch.device(value)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is unavailable")
+    return device
+
+
+def cuda_supports_bf16(device: torch.device) -> bool:
+    if device.type != "cuda":
+        return False
+    with torch.cuda.device(device):
+        return torch.cuda.is_bf16_supported()
+
+
+def training_device_details(
+    requested: str,
+    resolved: torch.device,
+) -> dict[str, object]:
+    details: dict[str, object] = {
+        "requested": requested,
+        "resolved": str(resolved),
+        "type": resolved.type,
+    }
+    if resolved.type == "cuda":
+        index = resolved.index
+        if index is None:
+            index = torch.cuda.current_device()
+        details.update(
+            {
+                "index": index,
+                "name": torch.cuda.get_device_name(index),
+                "capability": list(torch.cuda.get_device_capability(index)),
+            }
+        )
+    return details
+
+
+def load_cached_examples(
+    cache_dir: str | Path,
+) -> tuple[CachedExamples, dict, dict, str]:
     cache = load_teacher_cache(
         cache_dir,
         keep_teacher_embeddings=False,
@@ -149,7 +315,9 @@ def load_cached_examples(cache_dir: str | Path) -> tuple[CachedExamples, dict]:
     )
     if not torch.isfinite(examples.targets).all():
         raise ValueError("Teacher cache targets contain non-finite values")
-    return examples, cache.metadata
+    lineage = validated_teacher_lineage(cache.metadata)
+    fingerprint = teacher_cache_fingerprint(cache)
+    return examples, cache.metadata, lineage, fingerprint
 
 
 def validate_training_args(args: argparse.Namespace) -> None:
@@ -170,8 +338,23 @@ def validate_training_args(args: argparse.Namespace) -> None:
         or not 0 <= args.head_warmup_epochs <= args.epochs
     ):
         raise ValueError("--head-warmup-epochs must be between zero and --epochs")
+    lr_schedule_epochs = getattr(args, "lr_schedule_epochs", None)
+    if lr_schedule_epochs is not None and (
+        isinstance(lr_schedule_epochs, bool)
+        or not isinstance(lr_schedule_epochs, int)
+        or lr_schedule_epochs < args.epochs
+    ):
+        raise ValueError(
+            "--lr-schedule-epochs must be at least --epochs when specified"
+        )
     if isinstance(args.num_workers, bool) or not isinstance(args.num_workers, int) or args.num_workers < 0:
         raise ValueError("--num-workers must be a non-negative integer")
+    if (
+        isinstance(args.seed, bool)
+        or not isinstance(args.seed, int)
+        or not 0 <= args.seed < 2**32
+    ):
+        raise ValueError("--seed must be an integer between 0 and 4294967295")
 
     positive_float_fields = ("backbone_lr", "head_lr")
     for field in positive_float_fields:
@@ -191,19 +374,27 @@ def validate_training_args(args: argparse.Namespace) -> None:
         raise ValueError("--warmup-ratio must be finite and between zero and one")
     if not isinstance(args.base_model, str) or not args.base_model.strip():
         raise ValueError("--base-model must be a non-empty string")
+    if (
+        not isinstance(args.base_model_revision, str)
+        or len(args.base_model_revision) != 40
+        or any(
+            character not in "0123456789abcdef"
+            for character in args.base_model_revision
+        )
+    ):
+        raise ValueError(
+            "--base-model-revision must be a 40-character lowercase commit SHA"
+        )
     if not isinstance(args.ardy_model, str) or not args.ardy_model.strip():
         raise ValueError("--ardy-model must be a non-empty string")
     for field in ("cache_dir", "output_dir"):
         value = getattr(args, field)
         if not isinstance(value, (str, Path)) or not str(value).strip():
             raise ValueError(f"--{field.replace('_', '-')} must be a non-empty path")
-    if args.eval_cache_dir is not None and (
-        not isinstance(args.eval_cache_dir, (str, Path)) or not str(args.eval_cache_dir).strip()
-    ):
-        raise ValueError("--eval-cache-dir must be a non-empty path when provided")
     if args.pooling_mode not in POOLING_MODES:
         raise ValueError(f"--pooling-mode must be one of {POOLING_MODES}")
-    torch.device(args.device)
+    if args.device != "auto":
+        torch.device(args.device)
 
 
 def resolve_and_validate_teacher_checkpoint(
@@ -230,69 +421,6 @@ def resolve_and_validate_teacher_checkpoint(
             f"metadata={checkpoint_hash}, actual={actual_hash}"
         )
     return resolved_model, checkpoint_path
-
-
-def validate_frozen_evaluation_cache(
-    training_examples: CachedExamples,
-    training_metadata: dict,
-    evaluation_examples: CachedExamples,
-    evaluation_metadata: dict,
-) -> None:
-    """Require an evaluation cache with identical teacher identity and val/test text."""
-
-    identity_fields = (
-        "base_model_name_or_path",
-        "peft_model_name_or_path",
-        "checkpoint_sha256",
-        "target_keys",
-        "target_order",
-        "bias_applied",
-        "teacher_dim",
-        "target_dim",
-        "dtype",
-        "model_revisions",
-    )
-    mismatches = [field for field in identity_fields if training_metadata.get(field) != evaluation_metadata.get(field)]
-    if mismatches:
-        raise ValueError(
-            f"training and frozen-evaluation teacher caches have different teacher identities: {mismatches}"
-        )
-
-    training_prompt_texts = {
-        text
-        for text, split in zip(
-            training_examples.texts,
-            training_examples.splits,
-            strict=True,
-        )
-        if split == "train"
-    }
-    for split in ("val", "test"):
-        training_texts = [
-            text
-            for text, row_split in zip(
-                training_examples.texts,
-                training_examples.splits,
-                strict=True,
-            )
-            if row_split == split
-        ]
-        evaluation_texts = [
-            text
-            for text, row_split in zip(
-                evaluation_examples.texts,
-                evaluation_examples.splits,
-                strict=True,
-            )
-            if row_split == split
-        ]
-        if training_texts != evaluation_texts:
-            raise ValueError(f"frozen-evaluation {split} prompt text/order does not match the training cache manifest")
-        if len(evaluation_texts) != len(set(evaluation_texts)):
-            raise ValueError(f"frozen-evaluation {split} contains duplicate prompt text")
-        overlap = training_prompt_texts.intersection(evaluation_texts)
-        if overlap:
-            raise ValueError(f"training prompts overlap frozen-evaluation {split}: {len(overlap)} prompt(s)")
 
 
 def make_loader(
@@ -425,38 +553,43 @@ def average_logs(logs: Iterable[dict[str, float]]) -> dict[str, float]:
 
 def train(args: argparse.Namespace) -> dict:
     validate_training_args(args)
+    output_dir = require_fresh_output_dir(args.output_dir)
     seed_everything(args.seed)
-    device = torch.device(args.device)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is unavailable")
-    use_bf16 = device.type == "cuda" and not args.no_bf16
+    device = resolve_training_device(args.device)
+    use_bf16 = (
+        device.type == "cuda"
+        and not args.no_bf16
+        and cuda_supports_bf16(device)
+    )
+    device_details = training_device_details(args.device, device)
+    runtime_versions = training_runtime_versions()
 
-    examples, teacher_metadata = load_cached_examples(args.cache_dir)
-    evaluation_examples = examples
-    evaluation_metadata = teacher_metadata
-    if args.eval_cache_dir is not None:
-        evaluation_examples, evaluation_metadata = load_cached_examples(args.eval_cache_dir)
-        validate_frozen_evaluation_cache(
-            examples,
-            teacher_metadata,
-            evaluation_examples,
-            evaluation_metadata,
-        )
+    (
+        examples,
+        teacher_metadata,
+        teacher_lineage,
+        teacher_fingerprint,
+    ) = load_cached_examples(args.cache_dir)
     resolved_ardy_model, teacher_checkpoint = resolve_and_validate_teacher_checkpoint(
         args.ardy_model,
         teacher_metadata,
     )
+    split_counts = Counter(examples.splits)
     train_dataset = ConditionDataset(examples, "train")
-    val_dataset = ConditionDataset(evaluation_examples, "val")
-    test_dataset = ConditionDataset(evaluation_examples, "test")
+    val_dataset = ConditionDataset(examples, "val")
     print(
-        f"Loaded teacher cache: train={len(train_dataset)}, val={len(val_dataset)}, test={len(test_dataset)}",
+        f"Loaded teacher cache: train={len(train_dataset)}, "
+        f"val={len(val_dataset)}, test={split_counts['test']} (held out)",
         flush=True,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.base_model,
+        revision=args.base_model_revision,
+    )
     model = MotionConditionStudent.from_base_model(
         args.base_model,
+        revision=args.base_model_revision,
         adapter_dim=args.adapter_dim,
         condition_dim=ARDY_CONDITION_DIM,
         normalize_embedding=True,
@@ -474,15 +607,6 @@ def train(args: argparse.Namespace) -> dict:
     )
     val_loader = make_loader(
         val_dataset,
-        tokenizer,
-        args.batch_size,
-        args.train_max_length,
-        False,
-        args.num_workers,
-        args.seed,
-    )
-    test_loader = make_loader(
-        test_dataset,
         tokenizer,
         args.batch_size,
         args.train_max_length,
@@ -510,19 +634,26 @@ def train(args: argparse.Namespace) -> dict:
         ],
         weight_decay=args.weight_decay,
     )
-    total_steps = max(1, args.epochs * len(train_loader))
-    warmup_steps = int(total_steps * args.warmup_ratio)
+    optimizer_updates = max(1, args.epochs * len(train_loader))
+    lr_schedule_epochs = getattr(args, "lr_schedule_epochs", None) or args.epochs
+    lr_schedule_steps = max(1, lr_schedule_epochs * len(train_loader))
+    warmup_steps = int(lr_schedule_steps * args.warmup_ratio)
 
-    def lr_lambda(step: int) -> float:
-        if warmup_steps and step < warmup_steps:
-            return max(step, 1) / warmup_steps
-        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-        return 0.5 * (1.0 + math.cos(math.pi * min(max(progress, 0.0), 1.0)))
-
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lambda step: cosine_lr_multiplier(
+            step,
+            warmup_steps=warmup_steps,
+            schedule_steps=lr_schedule_steps,
+        ),
+    )
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir()
     history = []
     best_score = -float("inf")
+    best_epoch = 0
     best_state: dict[str, torch.Tensor] | None = None
+    best_validation_metrics: dict[str, float] | None = None
     started = time.perf_counter()
 
     for epoch in range(args.epochs):
@@ -575,29 +706,28 @@ def train(args: argparse.Namespace) -> dict:
         print(json.dumps(epoch_result, sort_keys=True), flush=True)
         if score > best_score:
             best_score = score
+            best_epoch = epoch + 1
             best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+            best_validation_metrics = dict(val_metrics)
 
     assert best_state is not None
+    assert best_validation_metrics is not None
     model.load_state_dict(best_state)
     model.to(device)
-    validation_metrics = evaluate(model, val_loader, device, use_bf16)
-    test_metrics = evaluate(model, test_loader, device, use_bf16)
+    validation_metrics = best_validation_metrics
     elapsed = time.perf_counter() - started
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
     metadata = {
         "target_definition": "[W_root @ LLM2Vec(prompt), W_body @ LLM2Vec(prompt)] (bias excluded)",
-        "teacher_cache": str(Path(args.cache_dir).resolve()),
-        "evaluation_teacher_cache": (None if args.eval_cache_dir is None else str(Path(args.eval_cache_dir).resolve())),
-        "teacher_checkpoint": str(teacher_checkpoint),
-        "teacher_metadata": teacher_metadata,
-        "evaluation_teacher_metadata": evaluation_metadata,
+        "teacher_cache": Path(args.cache_dir).name,
+        "teacher_cache_lineage": teacher_lineage,
+        "teacher_cache_fingerprint": teacher_fingerprint,
+        "teacher_checkpoint": teacher_checkpoint.name,
         "training": {
             "seed": args.seed,
             "train_examples": len(train_dataset),
             "validation_examples": len(val_dataset),
-            "test_examples": len(test_dataset),
+            "test_examples": split_counts["test"],
             "epochs": args.epochs,
             "head_warmup_epochs": args.head_warmup_epochs,
             "batch_size": args.batch_size,
@@ -607,28 +737,45 @@ def train(args: argparse.Namespace) -> dict:
             "head_lr": args.head_lr,
             "weight_decay": args.weight_decay,
             "warmup_ratio": args.warmup_ratio,
+            "lr_schedule_epochs": lr_schedule_epochs,
+            "lr_schedule_steps": lr_schedule_steps,
+            "warmup_steps": warmup_steps,
             "cosine_weight": args.cosine_weight,
             "relational_weight": args.relational_weight,
             "train_max_length": args.train_max_length,
             "runtime_max_length": args.runtime_max_length,
             "num_workers": args.num_workers,
             "device": str(device),
+            "device_details": device_details,
             "bf16_autocast": use_bf16,
+            "deterministic_algorithms": (
+                torch.are_deterministic_algorithms_enabled()
+            ),
+            "cublas_workspace_config": os.environ["CUBLAS_WORKSPACE_CONFIG"],
+            "cudnn_deterministic": torch.backends.cudnn.deterministic,
+            "cudnn_benchmark": torch.backends.cudnn.benchmark,
             "train_batches_per_epoch": len(train_loader),
-            "optimizer_updates": total_steps,
-            "elapsed_seconds": elapsed,
+            "optimizer_updates": optimizer_updates,
             "base_model": args.base_model,
+            "base_model_revision": args.base_model_revision,
             "ardy_model": resolved_ardy_model,
+            "selected_epoch": best_epoch,
+            "best_validation_score": best_score,
+            "runtime_versions": runtime_versions,
+        },
+        "selection": {
+            "split": "val",
+            "metric": "mean(root_cosine, body_cosine)",
+            "test_evaluated": False,
         },
         "validation_metrics": validation_metrics,
-        "test_metrics": test_metrics,
         "provenance_notice": (
             "Derived using ARDY checkpoint projections and LLM2Vec teacher outputs. "
             "Review NVIDIA Open Model, Meta Llama, LLM2Vec, and source-corpus licenses "
             "before redistribution."
         ),
     }
-    model.save_artifact(
+    artifact_path = model.save_artifact(
         output_dir,
         tokenizer,
         metadata,
@@ -636,13 +783,27 @@ def train(args: argparse.Namespace) -> dict:
         compatible_ardy_models=[resolved_ardy_model],
         max_length=args.runtime_max_length,
     )
+    artifact_fingerprint, artifact_payload_size_bytes = (
+        _saved_artifact_identity(Path(artifact_path))
+    )
     training_report = {
-        "artifact": str(output_dir.resolve()),
+        "schema_version": 1,
+        "artifact": output_dir.name,
+        "artifact_fingerprint": artifact_fingerprint,
+        "artifact_payload_size_bytes": artifact_payload_size_bytes,
         "base_model": args.base_model,
         "ardy_model": resolved_ardy_model,
+        "configuration": metadata["training"],
         "best_validation_score": best_score,
+        "best_epoch": best_epoch,
+        "teacher_cache_fingerprint": teacher_fingerprint,
+        "runtime_versions": runtime_versions,
+        "selection": {
+            "split": "val",
+            "metric": "mean(root_cosine, body_cosine)",
+            "test_evaluated": False,
+        },
         "validation": validation_metrics,
-        "test": test_metrics,
         "elapsed_seconds": elapsed,
         "history": history,
     }

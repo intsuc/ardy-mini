@@ -298,12 +298,16 @@ class MotionConditionStudent(nn.Module):
     def from_base_model(
         cls,
         base_model_name_or_path: str,
+        revision: str | None = None,
         adapter_dim: int = 768,
         condition_dim: int = 1024,
         normalize_embedding: bool = True,
         pooling_mode: str = "mean",
     ) -> MotionConditionStudent:
-        backbone = AutoModel.from_pretrained(base_model_name_or_path)
+        backbone = AutoModel.from_pretrained(
+            base_model_name_or_path,
+            revision=revision,
+        )
         model = cls(
             backbone=backbone,
             adapter_dim=adapter_dim,

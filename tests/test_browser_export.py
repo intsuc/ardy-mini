@@ -4,16 +4,27 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
+import os
 import tarfile
+from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
 
+import pytest
 import torch
 from torch import nn
 
 from ardy.browser.export import (
+    BrowserExportConfig,
+    _build_fp32_reference_payload,
     _graph_contracts,
+    _local_checkpoint_identity,
+    _publish_archive_set,
     _specialize_denoiser_position_tables,
+    _validate_config,
     _write_deterministic_tar_gz,
 )
 from ardy.browser.wrappers import (
@@ -319,3 +330,246 @@ def test_browser_archive_is_reproducible_ustar_with_root_level_members(tmp_path)
         assert all(info.uid == 0 and info.gid == 0 for info in infos)
         assert all(info.mode == 0o644 for info in infos)
         assert archive.extractfile("denoiser.onnx").read() == b"onnx payload"
+
+
+def test_browser_export_validates_optional_fp32_reference_output(tmp_path: Path):
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    output = tmp_path / "mixed.tar.gz"
+
+    with pytest.raises(ValueError, match="different paths"):
+        _validate_config(
+            BrowserExportConfig(
+                output_path=output,
+                fp32_reference_output_path=tmp_path / "." / output.name,
+                minilm_artifact=artifact,
+            )
+        )
+
+    with pytest.raises(ValueError, match=r"must end in \.tar\.gz"):
+        _validate_config(
+            BrowserExportConfig(
+                output_path=output,
+                fp32_reference_output_path=tmp_path / "reference.tgz",
+                minilm_artifact=artifact,
+            )
+        )
+
+    reference_directory = tmp_path / "reference.tar.gz"
+    reference_directory.mkdir()
+    with pytest.raises(IsADirectoryError, match="FP32 reference output"):
+        _validate_config(
+            BrowserExportConfig(
+                output_path=output,
+                fp32_reference_output_path=reference_directory,
+                minilm_artifact=artifact,
+            )
+        )
+
+
+def _without_pack_specific_metadata(manifest: dict) -> dict:
+    contract = copy.deepcopy(manifest)
+    for key in ("files", "precision", "verification"):
+        contract.pop(key, None)
+    return contract
+
+
+def test_fp32_reference_payload_matches_candidate_contract_and_is_reproducible(
+    tmp_path: Path,
+):
+    candidate_dir = tmp_path / "candidate"
+    tokenizer_dir = candidate_dir / "tokenizer"
+    tokenizer_dir.mkdir(parents=True)
+    tokenizer_paths = [
+        tokenizer_dir / "tokenizer.json",
+        tokenizer_dir / "tokenizer_config.json",
+    ]
+    tokenizer_paths[0].write_bytes(b'{"tokenizer":"identical"}\n')
+    tokenizer_paths[1].write_bytes(b'{"max_length":128}\n')
+
+    reference_dir = tmp_path / "reference"
+    reference_dir.mkdir()
+    graph_payloads = {
+        "text_encoder": b"original fp32 text graph",
+        "denoiser": b"original fp32 denoiser graph",
+        "decoder": b"original fp32 decoder graph",
+    }
+    graph_paths = {}
+    for graph_name, payload in graph_payloads.items():
+        graph_path = reference_dir / f"{graph_name}.onnx"
+        graph_path.write_bytes(payload)
+        graph_paths[graph_name] = graph_path
+
+    candidate_manifest = {
+        "format": "ardy-browser-model-pack",
+        "schema_version": 2,
+        "model": {"id": "test-model", "variant": "test"},
+        "files": {"mixed-only.onnx": {"sha256": "candidate", "size_bytes": 1}},
+        "tokenizer": {"directory": "tokenizer", "max_length": 128},
+        "graphs": {graph_name: {"model": f"{graph_name}.onnx"} for graph_name in graph_payloads},
+        "dimensions": {"text_condition_dim": 2048},
+        "runtime": {
+            "contract_revision": 3,
+            "required_webgpu_features": ["shader-f16"],
+        },
+        "precision": {
+            "format": "mixed-fp16",
+            "toolchain": {
+                "onnx": "test",
+                "onnxruntime": "test",
+                "torch": "test",
+            },
+        },
+        "verification": {"mixed_precision": {"status": "passed"}},
+    }
+    fp32_verification = {"backend": "onnxruntime-cpu", "status": "passed"}
+
+    members = _build_fp32_reference_payload(
+        candidate_manifest=candidate_manifest,
+        output_dir=reference_dir,
+        graph_paths=graph_paths,
+        tokenizer_paths=tokenizer_paths,
+        verification=fp32_verification,
+    )
+    reference_manifest = json.loads((reference_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    assert _without_pack_specific_metadata(reference_manifest) == (_without_pack_specific_metadata(candidate_manifest))
+    assert reference_manifest["precision"] == {
+        "format": "fp32",
+        "public_io_dtype": "float32",
+        "required_webgpu_features": [],
+        "toolchain": candidate_manifest["precision"]["toolchain"],
+        "onnx_bytes": sum(map(len, graph_payloads.values())),
+        "graphs": {
+            graph_name: {
+                "model": f"{graph_name}.onnx",
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size_bytes": len(payload),
+            }
+            for graph_name, payload in sorted(graph_payloads.items())
+        },
+    }
+    assert reference_manifest["verification"] == {"fp32_export": fp32_verification}
+    for source in tokenizer_paths:
+        copied = reference_dir / "tokenizer" / source.name
+        assert copied.read_bytes() == source.read_bytes()
+        assert (
+            reference_manifest["files"][f"tokenizer/{source.name}"]["sha256"]
+            == hashlib.sha256(source.read_bytes()).hexdigest()
+        )
+
+    first = tmp_path / "reference-first.tar.gz"
+    second = tmp_path / "reference-second.tar.gz"
+    _write_deterministic_tar_gz(reference_dir, members, first)
+    _write_deterministic_tar_gz(reference_dir, members, second)
+
+    assert first.read_bytes() == second.read_bytes()
+    with tarfile.open(first, mode="r:gz") as archive:
+        assert [member.name for member in archive.getmembers()] == [
+            "manifest.json",
+            "decoder.onnx",
+            "denoiser.onnx",
+            "text_encoder.onnx",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer_config.json",
+        ]
+
+
+def test_local_checkpoint_identity_binds_all_source_files_without_local_path(
+    tmp_path: Path,
+):
+    model_name = "ARDY-Core-RP-20FPS-Horizon40"
+    checkpoint_dir = tmp_path / model_name
+    checkpoint_dir.mkdir()
+    payloads = {
+        "config.yaml": b"model: test\n",
+        "denoiser.safetensors": b"denoiser",
+        "tokenizer.safetensors": b"tokenizer",
+    }
+    for filename, payload in payloads.items():
+        (checkpoint_dir / filename).write_bytes(payload)
+
+    identity = _local_checkpoint_identity(tmp_path, model_name)
+
+    assert identity is not None
+    assert identity["format"] == "ardy-local-checkpoint-files"
+    assert set(identity["files"]) == set(payloads)
+    assert len(identity["fingerprint"]) == 64
+    encoded = json.dumps(identity)
+    assert str(tmp_path) not in encoded
+    for filename, payload in payloads.items():
+        assert identity["files"][filename] == {
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size_bytes": len(payload),
+        }
+
+    (checkpoint_dir / "denoiser.safetensors").write_bytes(b"changed")
+    changed = _local_checkpoint_identity(tmp_path, model_name)
+    assert changed is not None
+    assert changed["fingerprint"] != identity["fingerprint"]
+
+
+def test_archive_set_publication_rolls_back_both_destinations_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    candidate_stage = tmp_path / "candidate.stage"
+    reference_stage = tmp_path / "reference.stage"
+    candidate_output = tmp_path / "candidate.tar.gz"
+    reference_output = tmp_path / "reference.tar.gz"
+    candidate_stage.write_bytes(b"new candidate")
+    reference_stage.write_bytes(b"new reference")
+    candidate_output.write_bytes(b"old candidate")
+    reference_output.write_bytes(b"old reference")
+
+    real_replace = os.replace
+    failed = False
+
+    def fail_second_publish(source, destination):
+        nonlocal failed
+        if (
+            not failed
+            and Path(source) == reference_stage
+            and Path(destination) == reference_output
+        ):
+            failed = True
+            raise OSError("simulated reference publication failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("ardy.browser.export.os.replace", fail_second_publish)
+
+    with pytest.raises(OSError, match="simulated"):
+        _publish_archive_set(
+            [
+                (candidate_stage, candidate_output),
+                (reference_stage, reference_output),
+            ]
+        )
+
+    assert candidate_output.read_bytes() == b"old candidate"
+    assert reference_output.read_bytes() == b"old reference"
+    assert candidate_stage.read_bytes() == b"new candidate"
+    assert reference_stage.read_bytes() == b"new reference"
+
+
+def test_archive_set_publication_replaces_both_destinations(tmp_path: Path):
+    candidate_stage = tmp_path / "candidate.stage"
+    reference_stage = tmp_path / "reference.stage"
+    candidate_output = tmp_path / "candidate.tar.gz"
+    reference_output = tmp_path / "reference.tar.gz"
+    candidate_stage.write_bytes(b"new candidate")
+    reference_stage.write_bytes(b"new reference")
+    candidate_output.write_bytes(b"old candidate")
+    reference_output.write_bytes(b"old reference")
+
+    _publish_archive_set(
+        [
+            (candidate_stage, candidate_output),
+            (reference_stage, reference_output),
+        ]
+    )
+
+    assert candidate_output.read_bytes() == b"new candidate"
+    assert reference_output.read_bytes() == b"new reference"
+    assert not candidate_stage.exists()
+    assert not reference_stage.exists()

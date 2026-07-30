@@ -13,8 +13,8 @@ evaluation tools, interactive-demo integration, a local-only browser export
 and WebGPU-only demo, tests, and aggregate benchmark documentation. It
 is not affiliated with or endorsed by NVIDIA.
 
-No pretrained or fine-tuned model weights, ARDY checkpoints, teacher caches,
-prompt manifests, BONES-SEED records, prompt-level evaluation reports, or
-generated motions are distributed in this repository. See
+No pretrained or fine-tuned model weights, ARDY checkpoints, external
+datasets, teacher caches, prompt manifests, prompt-level evaluation reports,
+or generated motions are distributed in this repository. See
 THIRD_PARTY_MODELS_AND_DATA.md for the separate terms that govern resources
-used by the optional training and evaluation workflow.
+used by the training, evaluation, and kinematic-constraint demo workflows.

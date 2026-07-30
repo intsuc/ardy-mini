@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import copy
 import gzip
 import hashlib
 import json
@@ -84,6 +85,11 @@ _MIXED_PRECISION_LIMITS = {
         "global_root_heading": {"rmse": 1e-6},
     },
 }
+_LOCAL_CHECKPOINT_FILES = (
+    "config.yaml",
+    "denoiser.safetensors",
+    "tokenizer.safetensors",
+)
 
 
 @contextmanager
@@ -116,6 +122,7 @@ class BrowserExportConfig:
 
     output_path: Path
     minilm_artifact: Path
+    fp32_reference_output_path: Path | None = None
     checkpoints_dir: Path | None = None
     model: str = "core"
     model_id: str = DEFAULT_MODEL_ID
@@ -139,6 +146,39 @@ def _file_record(path: Path) -> dict[str, Any]:
     return {
         "sha256": _sha256_file(path),
         "size_bytes": path.stat().st_size,
+    }
+
+
+def _local_checkpoint_identity(
+    checkpoints_dir: Path | None,
+    resolved_model: str,
+) -> dict[str, Any] | None:
+    """Bind a local export to its complete ARDY checkpoint payload without paths."""
+
+    if checkpoints_dir is None:
+        return None
+    checkpoint_dir = checkpoints_dir / resolved_model
+    files: dict[str, dict[str, Any]] = {}
+    for filename in _LOCAL_CHECKPOINT_FILES:
+        path = checkpoint_dir / filename
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"ARDY checkpoint payload is missing required file: {path}"
+            )
+        files[filename] = _file_record(path)
+    unsigned = {
+        "format": "ardy-local-checkpoint-files",
+        "format_version": 1,
+        "files": files,
+    }
+    encoded = json.dumps(
+        unsigned,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        **unsigned,
+        "fingerprint": hashlib.sha256(encoded).hexdigest(),
     }
 
 
@@ -178,6 +218,14 @@ def _validate_config(config: BrowserExportConfig) -> None:
         raise IsADirectoryError(f"Browser model-pack output must be a .tar.gz file: {config.output_path}")
     if not config.output_path.name.endswith(".tar.gz"):
         raise ValueError(f"Browser model-pack output must end in .tar.gz: {config.output_path}")
+    reference_path = config.fp32_reference_output_path
+    if reference_path is not None:
+        if reference_path.exists() and reference_path.is_dir():
+            raise IsADirectoryError(f"FP32 reference output must be a .tar.gz file: {reference_path}")
+        if not reference_path.name.endswith(".tar.gz"):
+            raise ValueError(f"FP32 reference output must end in .tar.gz: {reference_path}")
+        if reference_path.resolve() == config.output_path.resolve():
+            raise ValueError("Mixed-FP16 and FP32 reference outputs must use different paths.")
 
 
 def _specialize_denoiser_position_tables(
@@ -292,6 +340,71 @@ def _write_deterministic_tar_gz(
         output_path.chmod(0o644)
     finally:
         temporary_path.unlink(missing_ok=True)
+
+
+def _unused_sibling_path(destination: Path, suffix: str) -> Path:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=suffix,
+        dir=destination.parent,
+    )
+    os.close(descriptor)
+    path = Path(name)
+    path.unlink()
+    return path
+
+
+def _publish_archive_set(
+    staged_archives: list[tuple[Path, Path]],
+) -> None:
+    """Publish a prepared archive set together, rolling back ordinary failures."""
+
+    if not staged_archives:
+        raise ValueError("At least one staged archive is required.")
+    destinations = [destination.resolve() for _, destination in staged_archives]
+    if len(set(destinations)) != len(destinations):
+        raise ValueError("Archive publication destinations must be distinct.")
+    for staged, destination in staged_archives:
+        if not staged.is_file():
+            raise FileNotFoundError(f"Staged browser archive is missing: {staged}")
+        if destination.exists() and destination.is_dir():
+            raise IsADirectoryError(f"Browser archive destination is a directory: {destination}")
+
+    backups: dict[Path, Path] = {}
+    published: list[tuple[Path, Path]] = []
+    try:
+        for _, destination in staged_archives:
+            if destination.exists() or destination.is_symlink():
+                backup = _unused_sibling_path(destination, ".rollback")
+                os.replace(destination, backup)
+                backups[destination] = backup
+        for staged, destination in staged_archives:
+            os.replace(staged, destination)
+            published.append((staged, destination))
+    except BaseException as error:
+        rollback_errors: list[BaseException] = []
+        for staged, destination in reversed(published):
+            try:
+                if destination.exists() or destination.is_symlink():
+                    os.replace(destination, staged)
+            except OSError as rollback_error:
+                rollback_errors.append(rollback_error)
+        for destination, backup in reversed(tuple(backups.items())):
+            try:
+                if backup.exists() or backup.is_symlink():
+                    os.replace(backup, destination)
+            except OSError as rollback_error:
+                rollback_errors.append(rollback_error)
+        if rollback_errors:
+            raise RuntimeError(
+                "Browser archive publication failed and rollback was incomplete: "
+                f"{rollback_errors}"
+            ) from error
+        raise
+    else:
+        for backup in backups.values():
+            backup.unlink(missing_ok=True)
 
 
 def _export_graph(
@@ -814,6 +927,7 @@ def _build_manifest(
     payload_paths: list[Path],
     verification: dict[str, Any] | None,
     precision_reports: dict[str, MixedPrecisionReport],
+    checkpoint_identity: dict[str, Any] | None,
 ) -> dict[str, Any]:
     motion_rep = model.motion_rep
     autoencoder = model.autoencoder
@@ -842,6 +956,11 @@ def _build_manifest(
             "variant": "MiniLM Core40 interactive",
             "ardy_model": resolved_model,
             "minilm_artifact_fingerprint": artifact_config.get("artifact_fingerprint"),
+            **(
+                {"ardy_checkpoint": checkpoint_identity}
+                if checkpoint_identity is not None
+                else {}
+            ),
         },
         "files": files,
         "tokenizer": {
@@ -981,16 +1100,88 @@ def _build_manifest(
     return manifest
 
 
+def _build_fp32_reference_payload(
+    *,
+    candidate_manifest: dict[str, Any],
+    output_dir: Path,
+    graph_paths: dict[str, Path],
+    tokenizer_paths: list[Path],
+    verification: dict[str, Any] | None,
+) -> list[Path]:
+    """Build a matching FP32 pack payload from the already exported graphs."""
+    expected_graphs = set(candidate_manifest["graphs"])
+    if set(graph_paths) != expected_graphs:
+        raise ValueError(
+            "FP32 reference graphs must match the candidate graph contract; "
+            f"expected {sorted(expected_graphs)}, got {sorted(graph_paths)}."
+        )
+
+    reference_tokenizer_dir = output_dir / "tokenizer"
+    reference_tokenizer_dir.mkdir(parents=True, exist_ok=True)
+    reference_tokenizer_paths: list[Path] = []
+    for source in tokenizer_paths:
+        destination = reference_tokenizer_dir / source.name
+        shutil.copy2(source, destination)
+        reference_tokenizer_paths.append(destination)
+
+    payload_paths = list(graph_paths.values()) + reference_tokenizer_paths
+    manifest = copy.deepcopy(candidate_manifest)
+    manifest["files"] = {path.relative_to(output_dir).as_posix(): _file_record(path) for path in sorted(payload_paths)}
+
+    graph_precision: dict[str, Any] = {}
+    for graph_name, graph_path in sorted(graph_paths.items()):
+        expected_model_path = candidate_manifest["graphs"][graph_name]["model"]
+        relative_path = graph_path.relative_to(output_dir).as_posix()
+        if relative_path != expected_model_path:
+            raise ValueError(
+                f"FP32 reference graph {graph_name!r} must be stored as {expected_model_path!r}, got {relative_path!r}."
+            )
+        graph_precision[graph_name] = {
+            "model": relative_path,
+            **_file_record(graph_path),
+        }
+
+    candidate_precision = candidate_manifest["precision"]
+    fp32_onnx_bytes = sum(record["size_bytes"] for record in graph_precision.values())
+    manifest["precision"] = {
+        "format": "fp32",
+        "public_io_dtype": "float32",
+        "required_webgpu_features": [],
+        "toolchain": copy.deepcopy(candidate_precision["toolchain"]),
+        "onnx_bytes": fp32_onnx_bytes,
+        "graphs": graph_precision,
+    }
+
+    # Keep the runtime contract identical to the candidate. The FP32 archive
+    # is an evaluator reference, and evaluate_browser_fp16 intentionally
+    # permits differences only in files, precision, and verification.
+    if verification is None:
+        manifest.pop("verification", None)
+    else:
+        manifest["verification"] = {"fp32_export": verification}
+
+    manifest_path = output_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return [manifest_path, *payload_paths]
+
+
 def _export_browser_model_pack_directory(
     config: BrowserExportConfig,
     output_dir: Path,
-) -> list[Path]:
+) -> tuple[list[Path], list[Path] | None]:
     """Export and validate the three browser graphs in a temporary directory."""
     device = _resolve_device(config.device)
 
     resolved_model = resolve_model_name(
         config.model,
         checkpoints_dir=(str(config.checkpoints_dir) if config.checkpoints_dir is not None else None),
+    )
+    checkpoint_identity = _local_checkpoint_identity(
+        config.checkpoints_dir,
+        resolved_model,
     )
     model = load_model(
         resolved_model,
@@ -1182,13 +1373,23 @@ def _export_browser_model_pack_directory(
         payload_paths=payload_paths,
         verification=verification,
         precision_reports=precision_reports,
+        checkpoint_identity=checkpoint_identity,
     )
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    return [manifest_path, *payload_paths]
+    reference_payload_paths = None
+    if config.fp32_reference_output_path is not None:
+        reference_payload_paths = _build_fp32_reference_payload(
+            candidate_manifest=manifest,
+            output_dir=fp32_dir,
+            graph_paths=fp32_graph_paths,
+            tokenizer_paths=tokenizer_paths,
+            verification=fp32_verification,
+        )
+    return [manifest_path, *payload_paths], reference_payload_paths
 
 
 def export_browser_model_pack(config: BrowserExportConfig) -> Path:
@@ -1196,12 +1397,47 @@ def export_browser_model_pack(config: BrowserExportConfig) -> Path:
     _validate_config(config)
     with tempfile.TemporaryDirectory(prefix="ardy-browser-export-") as temporary_directory:
         output_dir = Path(temporary_directory)
-        member_paths = _export_browser_model_pack_directory(config, output_dir)
-        _write_deterministic_tar_gz(
-            output_dir,
-            member_paths,
-            config.output_path,
-        )
+        member_paths, reference_member_paths = _export_browser_model_pack_directory(config, output_dir)
+        if config.fp32_reference_output_path is None:
+            _write_deterministic_tar_gz(
+                output_dir,
+                member_paths,
+                config.output_path,
+            )
+        else:
+            if reference_member_paths is None:
+                raise RuntimeError("FP32 reference payload was not produced.")
+            candidate_stage = _unused_sibling_path(
+                config.output_path,
+                ".candidate-stage",
+            )
+            reference_stage = _unused_sibling_path(
+                config.fp32_reference_output_path,
+                ".reference-stage",
+            )
+            try:
+                _write_deterministic_tar_gz(
+                    output_dir,
+                    member_paths,
+                    candidate_stage,
+                )
+                _write_deterministic_tar_gz(
+                    output_dir / ".fp32-reference",
+                    reference_member_paths,
+                    reference_stage,
+                )
+                _publish_archive_set(
+                    [
+                        (candidate_stage, config.output_path),
+                        (
+                            reference_stage,
+                            config.fp32_reference_output_path,
+                        ),
+                    ]
+                )
+            finally:
+                candidate_stage.unlink(missing_ok=True)
+                reference_stage.unlink(missing_ok=True)
     return config.output_path
 
 

@@ -42,7 +42,7 @@ import torch.nn.functional as F
 from ardy.minilm_teacher_cache import (
     VALID_SPLITS,
     load_teacher_cache,
-    teacher_cache_fingerprint,
+    validate_artifact_teacher_cache_fingerprint,
 )
 from ardy.model.minilm_encoder import MiniLMArdyEncoder
 
@@ -138,8 +138,21 @@ def _normalize_student_output(output: Any, expected_rows: int, output_dim: int) 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    try:
+        temporary.write_text(
+            json.dumps(
+                payload,
+                allow_nan=False,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def run(args: argparse.Namespace) -> None:
@@ -165,6 +178,10 @@ def run(args: argparse.Namespace) -> None:
     )
     student_load_seconds = time.perf_counter() - load_started
     artifact_config = student.artifact_config
+    cache_fingerprint = validate_artifact_teacher_cache_fingerprint(
+        artifact_config,
+        cache,
+    )
     condition_dim = int(artifact_config["condition_dim"])
     output_dim = int(artifact_config["output_dim"])
     if condition_dim != EXPECTED_CONDITION_DIM or output_dim != 2 * condition_dim:
@@ -256,6 +273,7 @@ def run(args: argparse.Namespace) -> None:
             "dtype": args.dtype,
             "batch_size": args.batch_size,
             "max_samples": args.max_samples,
+            "max_length": args.max_length,
             "expected_ardy_model": args.expected_ardy_model,
             "nrmse_definition": "RMSE divided by target RMS over the same elements",
         },
@@ -265,7 +283,7 @@ def run(args: argparse.Namespace) -> None:
             "shards": [str(path) for path in shard_paths],
             "shard_count": len(shard_paths),
             "evaluated_shard_count": evaluated_shards,
-            "cache_fingerprint": teacher_cache_fingerprint(cache),
+            "cache_fingerprint": cache_fingerprint,
             "examples_seen_in_loaded_shards": total_cache_examples,
             "evaluated_examples": evaluated_examples,
         },
@@ -278,7 +296,13 @@ def run(args: argparse.Namespace) -> None:
         "metrics": {name: accumulator.finalize() for name, accumulator in metrics.items()},
     }
     _write_json(args.output, result)
-    print(json.dumps({"output": str(args.output), "result": result}, indent=2))
+    print(
+        json.dumps(
+            {"output": str(args.output), "result": result},
+            allow_nan=False,
+            indent=2,
+        )
+    )
 
 
 def parse_args() -> argparse.Namespace:

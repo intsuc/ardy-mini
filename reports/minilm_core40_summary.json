@@ -1,358 +1,1234 @@
 {
-  "schema_version": 2,
-  "report_kind": "aggregate_only",
+  "dataset_and_teacher": {
+    "corpus_provenance": {
+      "counts": {
+        "dropped_prompt_too_long": 2,
+        "groups_written": 3702,
+        "missing_propagation_references": 12,
+        "raw_event_descriptions": 352703,
+        "raw_overview_descriptions": 142220,
+        "recording_components": 3702,
+        "recording_families": 4090,
+        "sources": {
+          "events.description": 46538,
+          "overview_description": 17749
+        },
+        "split_groups": {
+          "test": 341,
+          "train": 2977,
+          "val": 384
+        },
+        "splits": {
+          "test": 6095,
+          "train": 51482,
+          "val": 6710
+        },
+        "timeline_rows": 142220,
+        "unique_before_sampling": 64287,
+        "unique_descriptions": 64287,
+        "written": 64287
+      },
+      "dataset": {
+        "filename": "timelines.jsonl",
+        "license": "CC BY 4.0",
+        "owner": "NVIDIA",
+        "repo_id": "nvidia/SEED-Timeline-Annotations",
+        "resolved_from": "hugging_face_hub",
+        "revision": "b2cf916d8ef7a1e49fc4f0ce9e00c1981d3b9d8f",
+        "sha256": "379d6a5b86cea06b7201d485d19ee53512cc58449352b3cf113a95d1d27603d8",
+        "size_bytes": 80373523,
+        "url": "https://huggingface.co/datasets/nvidia/SEED-Timeline-Annotations"
+      },
+      "format": "ardy-minilm-prompt-provenance",
+      "format_version": 1,
+      "manifest": {
+        "filename": "prompts-core40-timeline.jsonl",
+        "sha256": "c80b0656dd04c28da1d665b4b9a9422f975be5c72b0fe9011b976a3672bb1eac"
+      },
+      "preparation": {
+        "deduplication": "global case- and punctuation-insensitive alphanumeric-token match after normalization; overview_description preferred",
+        "grouping": "NFKC/casefold filename; require <take>__A<actor>[_M], remove actor, mirror, and terminal three-digit non-angle take suffixes; union propagated_from_filename families",
+        "max_prompt_characters": 512,
+        "normalization": "Unicode NFKC, trim, collapse whitespace",
+        "sample_size": 0,
+        "seed": 20260726,
+        "sources": [
+          "overview_description",
+          "events.description"
+        ],
+        "split_hash_namespace": "ardy-minilm-nvidia-timeline-split-v3",
+        "split_ratios": {
+          "test": 0.1,
+          "train": 0.8,
+          "val": 0.1
+        }
+      }
+    },
+    "prompt_manifest_sha256": "c80b0656dd04c28da1d665b4b9a9422f975be5c72b0fe9011b976a3672bb1eac",
+    "prompt_provenance_sidecar_sha256": "37086140d78b36b5145de36e8c64ac0558c86960c4bbcc96630f6c0556ffff64",
+    "split_counts": {
+      "test": 6095,
+      "train": 51482,
+      "val": 6710
+    },
+    "teacher": {
+      "base_model_name_or_path": "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp",
+      "base_model_revision": "31474e395ada192e8ed1586db6be79fb3b70c9c0",
+      "bias_applied": false,
+      "checkpoint_sha256": "1019d0bf269cf8d1b3e3e9b4a384a58c112672959b071279ddb65814d77660cd",
+      "device": {
+        "capability": [
+          12,
+          1
+        ],
+        "cli_requested": "cuda",
+        "env_override": null,
+        "index": 0,
+        "name": "NVIDIA GB10",
+        "requested": "cuda",
+        "resolved": "cuda"
+      },
+      "dtype": {
+        "projection_weights": "float32",
+        "targets": "float32",
+        "teacher_embeddings": "float32",
+        "teacher_model": "bfloat16"
+      },
+      "foundation_model_name_or_path": "meta-llama/Meta-Llama-3-8B-Instruct",
+      "foundation_model_revision": "8afb486c1db24fe5011ec46dfbe5b5dccdb575c2",
+      "model_name": "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp + McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised",
+      "model_revisions": {
+        "base": "31474e395ada192e8ed1586db6be79fb3b70c9c0",
+        "foundation": "8afb486c1db24fe5011ec46dfbe5b5dccdb575c2",
+        "foundation_model": "meta-llama/Meta-Llama-3-8B-Instruct",
+        "peft": "baa8ebf04a1c2500e61288e7dad65e8ae42601a7"
+      },
+      "peft_model_name_or_path": "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised",
+      "peft_model_revision": "baa8ebf04a1c2500e61288e7dad65e8ae42601a7",
+      "provenance_status": "recorded",
+      "target_dim": 2048,
+      "target_keys": [
+        "denoiser.backbone.root_model.embed_text.weight",
+        "denoiser.backbone.body_model.embed_text.weight"
+      ],
+      "target_order": [
+        "root",
+        "body"
+      ],
+      "teacher_batch_size": 1,
+      "teacher_dim": 4096,
+      "versions": {
+        "peft": "0.19.1",
+        "safetensors": "0.8.0",
+        "torch": "2.13.0+cu130",
+        "transformers": "5.8.1"
+      }
+    },
+    "teacher_cache_fingerprint": "93aa874b15b8d312ffea40d03fc098af0fd05969932a14fa667616b76e34dc07",
+    "total_prompts": 64287
+  },
   "distribution": {
-    "contains_model_weights": false,
-    "contains_dataset_records": false,
-    "contains_prompt_text": false,
-    "contains_record_identifiers": false,
     "contains_absolute_paths": false,
+    "contains_dataset_record_ids": false,
+    "contains_dataset_records": false,
+    "contains_model_weights": false,
+    "contains_prompt_text": false,
     "third_party_notices": "../THIRD_PARTY_MODELS_AND_DATA.md"
   },
-  "dataset_notice": {
-    "attribution": "Training data includes Motion Data by Bones Studio.",
-    "provider": "https://bones.studio/",
-    "license": "https://bones.studio/info/seed-license"
-  },
-  "experiment": {
-    "ardy_source_commit": "693f74d13b3d04a0a22ce127ee79c929dd89756b",
-    "ardy_model": "ARDY-Core-RP-20FPS-Horizon40",
-    "ardy_checkpoint_sha256": "1019d0bf269cf8d1b3e3e9b4a384a58c112672959b071279ddb65814d77660cd",
-    "student_base": "sentence-transformers/all-MiniLM-L6-v2",
-    "adopted_student_artifact_fingerprint": "b2e4af890d4a733049a377b96355eb1f3a5716378f9304010906823cf6af7fcb",
-    "adopted_student_artifact_size_bytes": 113713137,
-    "machine": "NVIDIA GB10, aarch64 Linux, unified memory",
-    "runtime": {
-      "python": "3.11.15",
-      "pytorch": "2.13.0+cu130",
-      "transformers": "5.8.1",
-      "encoder_dtype": "bfloat16",
-      "ardy_model_dtype": "float32"
-    }
-  },
-  "corpus": {
-    "source_unique_prompts": 50246,
-    "baseline_manifest": {
-      "total_prompts": 16384,
-      "train_prompts": 13151,
-      "validation_prompts": 1641,
-      "test_prompts": 1592,
-      "content_family_groups": 3768,
-      "sha256": "aa8da14f83c09e18015f2c73a067587de0b9c7ae417e01835c1a8bd4511ec163"
-    },
-    "expanded_manifest": {
-      "total_prompts": 43666,
-      "train_prompts": 40433,
-      "validation_prompts": 1641,
-      "test_prompts": 1592,
-      "content_family_groups": 3807,
-      "train_content_family_groups": 3073,
-      "added_train_prompts": 27282,
-      "train_corpus_multiplier": 3.074519,
-      "frozen_evaluation": true,
-      "sha256": "2402968157a94caee0e21e6d904029be6d2355bfb1397dca5c5a2e068c8d6069"
-    },
-    "external_datasets_adopted": [],
-    "expansion_decision": "Adopted previously unused BONES-SEED training descriptions to isolate corpus diversity without adding a new data-license domain.",
-    "future_synthetic_grammar": {
-      "status": "proposed_not_adopted",
-      "dimensions": [
-        "action",
-        "direction",
-        "speed",
-        "style",
-        "posture",
-        "limb",
-        "transition_order"
-      ],
-      "safeguards": [
-        "Generate only from training parents.",
-        "Group surface forms by canonical semantic program.",
-        "Reject contradictions, duplicates, and semantic collisions with frozen evaluation prompts.",
-        "Record template version, seed, and parent provenance."
-      ]
-    }
-  },
-  "teacher_cache": {
-    "baseline_seconds": 1448.4939,
-    "expanded_seconds": 3755.5772,
-    "expanded_rows": 43666,
-    "expanded_shards": 171
-  },
-  "training_runs": {
-    "baseline_16384": {
-      "artifact_fingerprint": "04d94fa2b8e122ac2f8397c65f22adff00d6e8936813b94180360b6599e014b9",
-      "artifact_size_bytes": 113689186,
-      "train_prompts": 13151,
-      "epochs": 50,
-      "optimizer_updates": 5150,
-      "example_exposures": 657550,
-      "training_seconds": 215.0535,
-      "best_epoch": 50,
-      "best_validation_root_body_mean_cosine": 0.95290256
-    },
-    "expanded_compute_matched_16e": {
-      "artifact_fingerprint": "df8b2f5b1c8e35275ca855a524c31f5162c8f9c40224f8efa2f4988c3a3a27da",
-      "artifact_size_bytes": 113687190,
-      "train_prompts": 40433,
-      "epochs": 16,
-      "optimizer_updates": 5056,
-      "example_exposures": 646928,
-      "training_seconds": 202.9671,
-      "best_epoch": 16,
-      "best_validation_root_body_mean_cosine": 0.96055135
-    },
-    "expanded_adopted_50e": {
-      "artifact_fingerprint": "b2e4af890d4a733049a377b96355eb1f3a5716378f9304010906823cf6af7fcb",
-      "artifact_size_bytes": 113713137,
-      "train_prompts": 40433,
-      "epochs": 50,
-      "optimizer_updates": 15800,
-      "example_exposures": 2021650,
-      "training_seconds": 626.0719,
-      "best_epoch": 49,
-      "best_validation_root_body_mean_cosine": 0.96612066
-    }
-  },
-  "condition_fidelity": {
-    "test_examples": 1592,
-    "frozen_prompt_order_and_teacher_targets": true,
-    "runs": {
-      "baseline_16384": {
-        "root": {
-          "cosine_mean": 0.96411,
-          "cosine_p5": 0.89095,
-          "rmse": 1.95419,
-          "nrmse": 0.26401,
-          "mae": 1.40455
-        },
-        "body": {
-          "cosine_mean": 0.95181,
-          "cosine_p5": 0.84966,
-          "rmse": 1.83318,
-          "nrmse": 0.3014,
-          "mae": 1.30885
-        },
-        "combined": {
-          "cosine_mean": 0.95933,
-          "cosine_p5": 0.87277,
-          "rmse": 1.89465,
-          "nrmse": 0.27968,
-          "mae": 1.3567
-        }
-      },
-      "expanded_compute_matched_16e": {
-        "root": {
-          "cosine_mean": 0.97004,
-          "cosine_p5": 0.9091,
-          "rmse": 1.78121,
-          "nrmse": 0.24064,
-          "mae": 1.2867
-        },
-        "body": {
-          "cosine_mean": 0.95912,
-          "cosine_p5": 0.8757,
-          "rmse": 1.68612,
-          "nrmse": 0.27722,
-          "mae": 1.20807
-        },
-        "combined": {
-          "cosine_mean": 0.96579,
-          "cosine_p5": 0.89964,
-          "rmse": 1.73431,
-          "nrmse": 0.25601,
-          "mae": 1.24738
-        }
-      },
-      "expanded_adopted_50e": {
-        "root": {
-          "cosine_mean": 0.97431,
-          "cosine_p5": 0.91548,
-          "rmse": 1.65038,
-          "nrmse": 0.22296,
-          "mae": 1.16578
-        },
-        "body": {
-          "cosine_mean": 0.96492,
-          "cosine_p5": 0.89122,
-          "rmse": 1.56391,
-          "nrmse": 0.25713,
-          "mae": 1.09829
-        },
-        "combined": {
-          "cosine_mean": 0.97066,
-          "cosine_p5": 0.9047,
-          "rmse": 1.60773,
-          "nrmse": 0.23732,
-          "mae": 1.13203
-        }
-      }
-    },
-    "change": {
-      "baseline_to_compute_matched_16e": {
-        "combined_cosine_absolute_gain": 0.0064593,
-        "combined_rmse_reduction_percent": 8.4628
-      },
-      "baseline_to_adopted_50e": {
-        "combined_cosine_absolute_gain": 0.01133109,
-        "combined_rmse_reduction_percent": 15.1441,
-        "combined_mae_reduction_percent": 16.5596
-      },
-      "compute_matched_16e_to_adopted_50e": {
-        "combined_cosine_absolute_gain": 0.00487178,
-        "combined_rmse_reduction_percent": 7.299
-      }
-    }
-  },
+  "format": "ardy-minilm-core40-public-summary",
+  "format_version": 1,
+  "limitations": [
+    "Motion metrics measure same-seed replacement fidelity, not ground-truth text-to-motion semantics.",
+    "The proprietary Rigplay test split and TMR evaluator are unavailable, so these are not paper-comparable FID or R-precision results.",
+    "Benchmark timing and memory are specific to the recorded software, hardware, and fresh-process protocol.",
+    "A single deterministic training seed does not establish statistical significance.",
+    "Within each run, the saved epoch was selected under BF16 autocast. FP32 comparison covers the saved 50e and 100e artifacts, not every discarded epoch checkpoint."
+  ],
   "performance": {
-    "architecture_invariance": {
-      "parameter_count": 28227968,
-      "parameter_bytes": 56455936,
-      "cuda_allocated_peak_bytes": 90812928,
-      "baseline_and_expanded_equal": true,
-      "repeated_latency_ranges_overlap": true
+    "benchmark_prompt_sha256": "cdc2de1a9c1ec70bcd9433d7a1b9f0911c310c24c7727ab9d21834ead96838e6",
+    "encoder_only": {
+      "comparison": {
+        "cuda_allocated_peak_reduction_fraction": 0.99403194523881,
+        "first_encode_p50_speedup": 1.7649461056209537,
+        "load_speedup": 40.760375718508634,
+        "parameter_bytes_reduction_fraction": 0.9962803173089326,
+        "rss_peak_reduction_fraction": 0.8988268110432127,
+        "warm_encode_mean_speedup": 74.0876928713368,
+        "warm_encode_p50_speedup": 80.56892071550001
+      },
+      "student": {
+        "benchmark_scope": "encoder_only",
+        "configuration": {
+          "ardy_model_device": null,
+          "ardy_model_dtype": null,
+          "cuda_context_timing": "CUDA synchronization initializes the context before each stage timer; context initialization is excluded from stage latency",
+          "device_requested": "cuda",
+          "device_resolved": "cuda",
+          "dtype_requested": "bfloat16",
+          "external_batch_size": 1,
+          "first_measured_calls": 1,
+          "fresh_process_required": true,
+          "load_timing_scope": "path-specific imports, local artifact validation, encoder construction, and device transfer",
+          "model_device": "cuda:0",
+          "model_dtype": "bfloat16",
+          "production_wrapper": "ardy.model.minilm_encoder.MiniLMArdyEncoder",
+          "timed_operation": "prompt -> encoder",
+          "warm_measured_calls": 100,
+          "warm_runs": 100,
+          "warmup_calls_before_warm_measurement": 1
+        },
+        "encoder": "student",
+        "encoder_kind": "student",
+        "hardware": {
+          "cuda": {
+            "capability": [
+              12,
+              1
+            ],
+            "index": 0,
+            "name": "NVIDIA GB10",
+            "torch_cuda_version": "13.0",
+            "total_memory_bytes": 130596122624
+          },
+          "logical_cpu_count": 20,
+          "machine": "aarch64",
+          "platform": "Linux-6.17.0-1026-nvidia-aarch64-with-glibc2.39"
+        },
+        "identity": {
+          "student_artifact": {
+            "artifact_fingerprint": "605639d3e0189f10dd3487c2bcf613825699475573eb34f57ac71113902c2f83",
+            "base_model": "sentence-transformers/all-MiniLM-L6-v2",
+            "compatible_ardy_models": [
+              "ARDY-Core-RP-20FPS-Horizon40"
+            ],
+            "files_sha256": {
+              "ardy_minilm_config.json": "f9a379435056d5d7fc78e55613c7487af20130ad062c3efb24078c8c9efccc22",
+              "backbone/config.json": "ddb601b730f0402f063d8f5eb39050b2569675c3303580098ecd35b8d8db3aac",
+              "backbone/model.safetensors": "0bf8c254df755534cd0e167a042896b9a7d4ddd5139703738b91202cea3814df",
+              "backbone/tokenizer.json": "2fc687b11de0bc1b3d8348f92e3b49ef1089a621506c7661fbf3248fcd54947e",
+              "backbone/tokenizer_config.json": "4b91f63e0ec01ae5112b4fab0027b301a38d94f6b1fd001abf2236390168b553",
+              "condition_heads.safetensors": "e703fefde3df710e32d051f00fca342240103864ffebf2aa00cc79cde508e99c"
+            },
+            "format_version": 2,
+            "output_dim": 2048
+          }
+        },
+        "memory_summary": {
+          "cuda_allocated_current_bytes": 90717696,
+          "cuda_allocated_peak_bytes": 90812928,
+          "cuda_reserved_current_bytes": 109051904,
+          "cuda_reserved_peak_bytes": 109051904,
+          "mem_available_after_bytes": 118134587392,
+          "mem_available_before_bytes": 119399772160,
+          "mem_available_drop_bytes": 1265184768,
+          "mem_available_min_bytes": 118134587392,
+          "rss_current_bytes": 1706418176,
+          "rss_peak_bytes": 1706418176
+        },
+        "output": {
+          "dtype": "bfloat16",
+          "lengths": [
+            1
+          ],
+          "shape": [
+            1,
+            1,
+            2048
+          ],
+          "warm_dtype": "bfloat16",
+          "warm_lengths": [
+            1
+          ],
+          "warm_shape": [
+            1,
+            1,
+            2048
+          ]
+        },
+        "parameters": {
+          "parameter_bytes": 56455936,
+          "parameter_count": 28227968,
+          "trainable_parameter_count": 0
+        },
+        "timing_seconds": {
+          "first_encode": {
+            "max": 0.45696578407660127,
+            "mean": 0.45696578407660127,
+            "min": 0.45696578407660127,
+            "p50": 0.45696578407660127,
+            "p95": 0.45696578407660127,
+            "samples": 1
+          },
+          "load": 1.4696755160111934,
+          "warm_encode": {
+            "max": 0.0031154348980635405,
+            "mean": 0.0013513457495719194,
+            "min": 0.0011848851572722197,
+            "p50": 0.0012365959119051695,
+            "p95": 0.0018191973562352358,
+            "samples": 100
+          }
+        },
+        "versions": {
+          "ardy": "0.2.0",
+          "peft": "0.19.1",
+          "python": "3.11.15",
+          "safetensors": "0.8.0",
+          "torch": "2.13.0+cu130",
+          "transformers": "5.8.1"
+        }
+      },
+      "teacher": {
+        "benchmark_scope": "encoder_only",
+        "configuration": {
+          "ardy_model_device": null,
+          "ardy_model_dtype": null,
+          "cuda_context_timing": "CUDA synchronization initializes the context before each stage timer; context initialization is excluded from stage latency",
+          "device_requested": "cuda",
+          "device_resolved": "cuda",
+          "dtype_requested": "bfloat16",
+          "external_batch_size": 1,
+          "first_measured_calls": 1,
+          "fresh_process_required": true,
+          "load_timing_scope": "path-specific imports, local-only pinned Hugging Face snapshot resolution, encoder construction, and device transfer",
+          "model_device": "cuda:0",
+          "model_dtype": "bfloat16",
+          "production_wrapper": "ardy.model.llm2vec.llm2vec_wrapper.LLM2VecEncoder",
+          "timed_operation": "prompt -> encoder",
+          "warm_measured_calls": 100,
+          "warm_runs": 100,
+          "warmup_calls_before_warm_measurement": 1
+        },
+        "encoder": "teacher",
+        "encoder_kind": "teacher",
+        "hardware": {
+          "cuda": {
+            "capability": [
+              12,
+              1
+            ],
+            "index": 0,
+            "name": "NVIDIA GB10",
+            "torch_cuda_version": "13.0",
+            "total_memory_bytes": 130596122624
+          },
+          "logical_cpu_count": 20,
+          "machine": "aarch64",
+          "platform": "Linux-6.17.0-1026-nvidia-aarch64-with-glibc2.39"
+        },
+        "identity": {
+          "teacher": {
+            "base_model": "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp",
+            "base_model_revision": "31474e395ada192e8ed1586db6be79fb3b70c9c0",
+            "foundation_model": "meta-llama/Meta-Llama-3-8B-Instruct",
+            "foundation_model_revision": "8afb486c1db24fe5011ec46dfbe5b5dccdb575c2",
+            "llm_dim": 4096,
+            "peft_model": "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised",
+            "peft_model_revision": "baa8ebf04a1c2500e61288e7dad65e8ae42601a7"
+          }
+        },
+        "memory_summary": {
+          "cuda_allocated_current_bytes": 15211209728,
+          "cuda_allocated_peak_bytes": 15216503808,
+          "cuda_reserved_current_bytes": 15351152640,
+          "cuda_reserved_peak_bytes": 15351152640,
+          "mem_available_after_bytes": 102037200896,
+          "mem_available_before_bytes": 119956066304,
+          "mem_available_drop_bytes": 23466811392,
+          "mem_available_min_bytes": 96489254912,
+          "rss_current_bytes": 1748471808,
+          "rss_peak_bytes": 16866308096
+        },
+        "output": {
+          "dtype": "float32",
+          "lengths": [
+            1
+          ],
+          "shape": [
+            1,
+            1,
+            4096
+          ],
+          "warm_dtype": "float32",
+          "warm_lengths": [
+            1
+          ],
+          "warm_shape": [
+            1,
+            1,
+            4096
+          ]
+        },
+        "parameters": {
+          "parameter_bytes": 15177621504,
+          "parameter_count": 7546867712,
+          "trainable_parameter_count": 0
+        },
+        "timing_seconds": {
+          "first_encode": {
+            "max": 0.806519981008023,
+            "mean": 0.806519981008023,
+            "min": 0.806519981008023,
+            "p50": 0.806519981008023,
+            "p95": 0.806519981008023,
+            "samples": 1
+          },
+          "load": 59.90452621690929,
+          "warm_encode": {
+            "max": 0.10297516896389425,
+            "mean": 0.10011808885727078,
+            "min": 0.09831305895932019,
+            "p50": 0.09963119798339903,
+            "p95": 0.10206679411930963,
+            "samples": 100
+          }
+        },
+        "versions": {
+          "ardy": "0.2.0",
+          "peft": "0.19.1",
+          "python": "3.11.15",
+          "safetensors": "0.8.0",
+          "torch": "2.13.0+cu130",
+          "transformers": "5.8.1"
+        }
+      }
     },
     "full_condition_stack": {
-      "operation": "prompt -> encoder -> Core40 root/body projections",
-      "warm_runs": 100,
-      "original_llm2vec": {
-        "warm_latency_p50_ms": 98.97,
-        "warm_latency_mean_ms": 99.719,
-        "load_time_s": 55.857,
-        "first_encode_ms": 798.682,
-        "cuda_allocated_peak_gib": 15.023,
-        "process_rss_peak_gib": 15.264,
-        "parameter_bytes_gib": 14.848
+      "comparison": {
+        "cuda_allocated_peak_reduction_fraction": 0.9376427470561207,
+        "first_encode_p50_speedup": 1.880852080058046,
+        "load_speedup": 31.84882536613333,
+        "parameter_bytes_reduction_fraction": 0.9484734382724413,
+        "rss_peak_reduction_fraction": 0.8479669403152252,
+        "warm_encode_mean_speedup": 81.2950555770635,
+        "warm_encode_p50_speedup": 86.54645344881229
       },
-      "minilm_student": {
-        "warm_latency_p50_ms": 1.185,
-        "warm_latency_mean_ms": 1.269,
-        "load_time_s": 1.832,
-        "first_encode_ms": 380.459,
-        "cuda_allocated_peak_gib": 0.937,
-        "process_rss_peak_gib": 2.415,
-        "parameter_bytes_gib": 0.765
+      "student": {
+        "benchmark_scope": "full_condition_stack",
+        "configuration": {
+          "ardy_model_device": "cuda:0",
+          "ardy_model_dtype": "float32",
+          "cuda_context_timing": "CUDA synchronization initializes the context before each stage timer; context initialization is excluded from stage latency",
+          "device_requested": "cuda",
+          "device_resolved": "cuda",
+          "dtype_requested": "bfloat16",
+          "external_batch_size": 1,
+          "first_measured_calls": 1,
+          "fresh_process_required": true,
+          "load_timing_scope": "path-specific imports, Core40 construction, local artifact validation, encoder construction, and device transfer",
+          "model_device": "cuda:0",
+          "model_dtype": "bfloat16",
+          "production_wrapper": "ardy.model.minilm_encoder.MiniLMArdyEncoder",
+          "timed_operation": "prompt -> encoder -> root_model.embed_text/body_model.embed_text -> concat[root,body]",
+          "warm_measured_calls": 100,
+          "warm_runs": 100,
+          "warmup_calls_before_warm_measurement": 1
+        },
+        "encoder": "full-student",
+        "encoder_kind": "student",
+        "hardware": {
+          "cuda": {
+            "capability": [
+              12,
+              1
+            ],
+            "index": 0,
+            "name": "NVIDIA GB10",
+            "torch_cuda_version": "13.0",
+            "total_memory_bytes": 130596122624
+          },
+          "logical_cpu_count": 20,
+          "machine": "aarch64",
+          "platform": "Linux-6.17.0-1026-nvidia-aarch64-with-glibc2.39"
+        },
+        "identity": {
+          "ardy": {
+            "checkpoint_sha256": "1019d0bf269cf8d1b3e3e9b4a384a58c112672959b071279ddb65814d77660cd",
+            "files_sha256": {
+              "config.yaml": "d8999e5c1f045a91f706fb2d5c9f2eea530af5560c1bc859d0d6257394eadd7e",
+              "denoiser.safetensors": "1019d0bf269cf8d1b3e3e9b4a384a58c112672959b071279ddb65814d77660cd",
+              "tokenizer.safetensors": "58a887e299a3a6779b5b4ff361b452c4349d45b513b5957f2a961d393623abcd"
+            },
+            "requested_model": "core",
+            "resolved_model": "ARDY-Core-RP-20FPS-Horizon40"
+          },
+          "condition_path": {
+            "body_projection": {
+              "in_features": 4096,
+              "out_features": 1024,
+              "projected_text_index": 1
+            },
+            "encoder_kind": "student",
+            "encoder_output_dim": 2048,
+            "output_dim": 2048,
+            "output_order": [
+              "root",
+              "body"
+            ],
+            "projection_bias_included": true,
+            "root_projection": {
+              "in_features": 4096,
+              "out_features": 1024,
+              "projected_text_index": 0
+            }
+          },
+          "student_artifact": {
+            "artifact_fingerprint": "605639d3e0189f10dd3487c2bcf613825699475573eb34f57ac71113902c2f83",
+            "base_model": "sentence-transformers/all-MiniLM-L6-v2",
+            "checkpoint_sha256_verified": true,
+            "compatible_ardy_models": [
+              "ARDY-Core-RP-20FPS-Horizon40"
+            ],
+            "expected_checkpoint_sha256": [
+              "1019d0bf269cf8d1b3e3e9b4a384a58c112672959b071279ddb65814d77660cd"
+            ],
+            "files_sha256": {
+              "ardy_minilm_config.json": "f9a379435056d5d7fc78e55613c7487af20130ad062c3efb24078c8c9efccc22",
+              "backbone/config.json": "ddb601b730f0402f063d8f5eb39050b2569675c3303580098ecd35b8d8db3aac",
+              "backbone/model.safetensors": "0bf8c254df755534cd0e167a042896b9a7d4ddd5139703738b91202cea3814df",
+              "backbone/tokenizer.json": "2fc687b11de0bc1b3d8348f92e3b49ef1089a621506c7661fbf3248fcd54947e",
+              "backbone/tokenizer_config.json": "4b91f63e0ec01ae5112b4fab0027b301a38d94f6b1fd001abf2236390168b553",
+              "condition_heads.safetensors": "e703fefde3df710e32d051f00fca342240103864ffebf2aa00cc79cde508e99c"
+            },
+            "format_version": 2,
+            "output_dim": 2048
+          }
+        },
+        "memory_summary": {
+          "cuda_allocated_current_bytes": 1005763072,
+          "cuda_allocated_peak_bytes": 1005858304,
+          "cuda_reserved_current_bytes": 1010827264,
+          "cuda_reserved_peak_bytes": 1010827264,
+          "mem_available_after_bytes": 117104005120,
+          "mem_available_before_bytes": 119384190976,
+          "mem_available_drop_bytes": 2280185856,
+          "mem_available_min_bytes": 117104005120,
+          "rss_current_bytes": 1785671680,
+          "rss_peak_bytes": 2593554432
+        },
+        "output": {
+          "dtype": "float32",
+          "lengths": [
+            1
+          ],
+          "shape": [
+            1,
+            1,
+            2048
+          ],
+          "warm_dtype": "float32",
+          "warm_lengths": [
+            1
+          ],
+          "warm_shape": [
+            1,
+            1,
+            2048
+          ]
+        },
+        "parameters": {
+          "ardy_model": {
+            "parameter_bytes": 765013216,
+            "parameter_count": 191253304,
+            "trainable_parameter_count": 155823252
+          },
+          "combined": {
+            "parameter_bytes": 821469152,
+            "parameter_count": 219481272,
+            "trainable_parameter_count": 155823252
+          },
+          "encoder": {
+            "parameter_bytes": 56455936,
+            "parameter_count": 28227968,
+            "trainable_parameter_count": 0
+          },
+          "parameter_bytes": 821469152,
+          "parameter_count": 219481272,
+          "trainable_parameter_count": 155823252
+        },
+        "timing_seconds": {
+          "first_encode": {
+            "max": 0.4396084789186716,
+            "mean": 0.4396084789186716,
+            "min": 0.4396084789186716,
+            "p50": 0.4396084789186716,
+            "p95": 0.4396084789186716,
+            "samples": 1
+          },
+          "load": 1.9013644501101226,
+          "warm_encode": {
+            "max": 0.002212823135778308,
+            "mean": 0.0012303843535482882,
+            "min": 0.001126724062487483,
+            "p50": 0.0011505879228934646,
+            "p95": 0.0015265682712197301,
+            "samples": 100
+          }
+        },
+        "versions": {
+          "ardy": "0.2.0",
+          "peft": "0.19.1",
+          "python": "3.11.15",
+          "safetensors": "0.8.0",
+          "torch": "2.13.0+cu130",
+          "transformers": "5.8.1"
+        }
       },
-      "change": {
-        "warm_latency_p50_speedup": 83.53,
-        "warm_latency_mean_speedup": 78.6,
-        "load_time_speedup": 30.49,
-        "first_encode_speedup": 2.1,
-        "cuda_allocated_peak_reduction_percent": 93.76,
-        "process_rss_peak_reduction_percent": 84.18,
-        "parameter_bytes_reduction_percent": 94.85
-      }
-    },
-    "encoder_only": {
-      "operation": "prompt -> encoder",
-      "warm_runs": 100,
-      "original_llm2vec": {
-        "warm_latency_p50_ms": 98.938,
-        "cuda_allocated_peak_gib": 14.172,
-        "process_rss_peak_gib": 15.709,
-        "parameter_bytes_gib": 14.135
-      },
-      "minilm_student": {
-        "warm_latency_p50_ms": 1.24,
-        "cuda_allocated_peak_gib": 0.085,
-        "process_rss_peak_gib": 1.59,
-        "parameter_bytes_gib": 0.053
-      },
-      "change": {
-        "warm_latency_p50_speedup": 79.76,
-        "cuda_allocated_peak_reduction_percent": 99.4,
-        "process_rss_peak_reduction_percent": 89.88,
-        "parameter_bytes_reduction_percent": 99.63
+      "teacher": {
+        "benchmark_scope": "full_condition_stack",
+        "configuration": {
+          "ardy_model_device": "cuda:0",
+          "ardy_model_dtype": "float32",
+          "cuda_context_timing": "CUDA synchronization initializes the context before each stage timer; context initialization is excluded from stage latency",
+          "device_requested": "cuda",
+          "device_resolved": "cuda",
+          "dtype_requested": "bfloat16",
+          "external_batch_size": 1,
+          "first_measured_calls": 1,
+          "fresh_process_required": true,
+          "load_timing_scope": "path-specific imports, local-only pinned Hugging Face snapshot resolution, Core40 construction, encoder construction, and device transfer",
+          "model_device": "cuda:0",
+          "model_dtype": "bfloat16",
+          "production_wrapper": "ardy.model.llm2vec.llm2vec_wrapper.LLM2VecEncoder",
+          "timed_operation": "prompt -> encoder -> root_model.embed_text/body_model.embed_text -> concat[root,body]",
+          "warm_measured_calls": 100,
+          "warm_runs": 100,
+          "warmup_calls_before_warm_measurement": 1
+        },
+        "encoder": "full-teacher",
+        "encoder_kind": "teacher",
+        "hardware": {
+          "cuda": {
+            "capability": [
+              12,
+              1
+            ],
+            "index": 0,
+            "name": "NVIDIA GB10",
+            "torch_cuda_version": "13.0",
+            "total_memory_bytes": 130596122624
+          },
+          "logical_cpu_count": 20,
+          "machine": "aarch64",
+          "platform": "Linux-6.17.0-1026-nvidia-aarch64-with-glibc2.39"
+        },
+        "identity": {
+          "ardy": {
+            "checkpoint_sha256": "1019d0bf269cf8d1b3e3e9b4a384a58c112672959b071279ddb65814d77660cd",
+            "files_sha256": {
+              "config.yaml": "d8999e5c1f045a91f706fb2d5c9f2eea530af5560c1bc859d0d6257394eadd7e",
+              "denoiser.safetensors": "1019d0bf269cf8d1b3e3e9b4a384a58c112672959b071279ddb65814d77660cd",
+              "tokenizer.safetensors": "58a887e299a3a6779b5b4ff361b452c4349d45b513b5957f2a961d393623abcd"
+            },
+            "requested_model": "core",
+            "resolved_model": "ARDY-Core-RP-20FPS-Horizon40"
+          },
+          "condition_path": {
+            "body_projection": {
+              "in_features": 4096,
+              "out_features": 1024,
+              "projected_text_index": 1
+            },
+            "encoder_kind": "teacher",
+            "encoder_output_dim": 4096,
+            "output_dim": 2048,
+            "output_order": [
+              "root",
+              "body"
+            ],
+            "projection_bias_included": true,
+            "root_projection": {
+              "in_features": 4096,
+              "out_features": 1024,
+              "projected_text_index": 0
+            }
+          },
+          "teacher": {
+            "base_model": "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp",
+            "base_model_revision": "31474e395ada192e8ed1586db6be79fb3b70c9c0",
+            "foundation_model": "meta-llama/Meta-Llama-3-8B-Instruct",
+            "foundation_model_revision": "8afb486c1db24fe5011ec46dfbe5b5dccdb575c2",
+            "llm_dim": 4096,
+            "peft_model": "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised",
+            "peft_model_revision": "baa8ebf04a1c2500e61288e7dad65e8ae42601a7"
+          }
+        },
+        "memory_summary": {
+          "cuda_allocated_current_bytes": 16125280256,
+          "cuda_allocated_peak_bytes": 16130574336,
+          "cuda_reserved_current_bytes": 16273899520,
+          "cuda_reserved_peak_bytes": 16273899520,
+          "mem_available_after_bytes": 100852178944,
+          "mem_available_before_bytes": 119983759360,
+          "mem_available_drop_bytes": 24588382208,
+          "mem_available_min_bytes": 95395377152,
+          "rss_current_bytes": 1774751744,
+          "rss_peak_bytes": 17059147776
+        },
+        "output": {
+          "dtype": "float32",
+          "lengths": [
+            1
+          ],
+          "shape": [
+            1,
+            1,
+            2048
+          ],
+          "warm_dtype": "float32",
+          "warm_lengths": [
+            1
+          ],
+          "warm_shape": [
+            1,
+            1,
+            2048
+          ]
+        },
+        "parameters": {
+          "ardy_model": {
+            "parameter_bytes": 765013216,
+            "parameter_count": 191253304,
+            "trainable_parameter_count": 155823252
+          },
+          "combined": {
+            "parameter_bytes": 15942634720,
+            "parameter_count": 7738121016,
+            "trainable_parameter_count": 155823252
+          },
+          "encoder": {
+            "parameter_bytes": 15177621504,
+            "parameter_count": 7546867712,
+            "trainable_parameter_count": 0
+          },
+          "parameter_bytes": 15942634720,
+          "parameter_count": 7738121016,
+          "trainable_parameter_count": 155823252
+        },
+        "timing_seconds": {
+          "first_encode": {
+            "max": 0.8268385219853371,
+            "mean": 0.8268385219853371,
+            "min": 0.8268385219853371,
+            "p50": 0.8268385219853371,
+            "p95": 0.8268385219853371,
+            "samples": 1
+          },
+          "load": 60.55622432893142,
+          "warm_encode": {
+            "max": 0.1031751399859786,
+            "mean": 0.10002416440285743,
+            "min": 0.09804650000296533,
+            "p50": 0.09957930410746485,
+            "p95": 0.1019585006753914,
+            "samples": 100
+          }
+        },
+        "versions": {
+          "ardy": "0.2.0",
+          "peft": "0.19.1",
+          "python": "3.11.15",
+          "safetensors": "0.8.0",
+          "torch": "2.13.0+cu130",
+          "transformers": "5.8.1"
+        }
       }
     }
   },
-  "motion_fidelity": {
-    "prompt_count": 64,
-    "seeds_per_prompt": 3,
-    "matched_generation_count": 192,
-    "duration_seconds": 4,
-    "fps": 20,
-    "diffusion_steps": 10,
-    "runs": {
-      "baseline_16384": {
-        "global_mpjpe_m": 0.13517,
-        "root_ade_m": 0.10871,
-        "root_fde_m": 0.18495,
-        "root_aligned_mpjpe_m": 0.05227,
-        "joint_velocity_error_m_per_s": 0.18385,
-        "heading_mae_deg": 7.47676,
-        "motion_cosine": 0.98778,
-        "foot_contact_agreement": 0.9491,
-        "foot_contact_macro_f1": 0.94714,
-        "foot_contact_macro_iou": 0.9159,
-        "normalized_five_error_mean": 0.4107692
-      },
-      "expanded_compute_matched_16e": {
-        "global_mpjpe_m": 0.12329,
-        "root_ade_m": 0.09997,
-        "root_fde_m": 0.17643,
-        "root_aligned_mpjpe_m": 0.04582,
-        "joint_velocity_error_m_per_s": 0.17115,
-        "heading_mae_deg": 6.52046,
-        "motion_cosine": 0.98881,
-        "foot_contact_agreement": 0.94521,
-        "foot_contact_macro_f1": 0.9425,
-        "foot_contact_macro_iou": 0.91089,
-        "normalized_five_error_mean": 0.37691994
-      },
-      "expanded_adopted_50e": {
-        "global_mpjpe_m": 0.11748,
-        "root_ade_m": 0.09242,
-        "root_fde_m": 0.1747,
-        "root_aligned_mpjpe_m": 0.04724,
-        "joint_velocity_error_m_per_s": 0.15615,
-        "heading_mae_deg": 6.41535,
-        "motion_cosine": 0.9883,
-        "foot_contact_agreement": 0.95122,
-        "foot_contact_macro_f1": 0.94773,
-        "foot_contact_macro_iou": 0.91972,
-        "normalized_five_error_mean": 0.36364403
-      }
+  "raw_report_inputs": {
+    "benchmark_encoder_student": {
+      "filename": "encoder-student.json",
+      "sha256": "d24521c393e9934959467e012d8449bbdbc4f4d753c7d888d401842afe8fd5a7",
+      "size_bytes": 11894
     },
-    "original_llm2vec_different_seed_diversity": {
-      "global_mpjpe_m": 0.3366,
-      "root_ade_m": 0.28836,
-      "root_fde_m": 0.43799,
-      "root_aligned_mpjpe_m": 0.11248,
-      "joint_velocity_error_m_per_s": 0.47346,
-      "heading_mae_deg": 13.7339,
-      "motion_cosine": 0.94529,
-      "foot_contact_agreement": 0.83376,
-      "foot_contact_macro_f1": 0.82967,
-      "foot_contact_macro_iou": 0.76633
+    "benchmark_encoder_teacher": {
+      "filename": "encoder-teacher.json",
+      "sha256": "6f0a471ccd7ac3359e3751ff9d6448c356dc1add6cdcae1179a285230d72c3a4",
+      "size_bytes": 12000
     },
-    "change": {
-      "baseline_to_compute_matched_16e": {
-        "normalized_five_error_mean_reduction_percent": 8.2405
+    "benchmark_full_student": {
+      "filename": "full-student.json",
+      "sha256": "ae282cdab78889ac8417ee622bdd254c013ad0272d33f18b18c1e5de27e33208",
+      "size_bytes": 14167
+    },
+    "benchmark_full_teacher": {
+      "filename": "full-teacher.json",
+      "sha256": "a7dcbd0e8c9e7625b174204ff383a6f4f87ee21983ba1df1d8956164f649d4ac",
+      "size_bytes": 14077
+    },
+    "condition_test": {
+      "filename": "conditions-timeline-test.json",
+      "sha256": "eedd3ccfd336fab2de011175c04bec807b3c6088d485a1d47c42df525ce22df0",
+      "size_bytes": 60206
+    },
+    "motion_test": {
+      "filename": "motion-metrics-timeline-test.json",
+      "sha256": "133637f9edeaee775b36628a1e7c1e2f0be26e32db148b49571a9d7b07e03401",
+      "size_bytes": 266607
+    },
+    "training_100e": {
+      "filename": "training_report.json",
+      "sha256": "c0370032f66d2601bbfae71cf3e203f49053c3eeca9cabf5cfaba06e720a23d1",
+      "size_bytes": 79164
+    },
+    "training_50e": {
+      "filename": "training_report.json",
+      "sha256": "be515f89225545b00fd744f5417d371ed96c201e04d2b66f175719baec64c4b2",
+      "size_bytes": 40979
+    },
+    "validation_fp32_100e": {
+      "filename": "conditions-timeline-val-fp32-100e.json",
+      "sha256": "90756fc6e6934974f9be09f19a580ee575ed3075b9b57cb846bddf2869cd38e6",
+      "size_bytes": 60239
+    },
+    "validation_fp32_50e": {
+      "filename": "conditions-timeline-val-fp32-50e.json",
+      "sha256": "073eed5b8bb82927c0e357c1efa95f063aadb25dfeb419f854a37cd7389c839f",
+      "size_bytes": 60235
+    }
+  },
+  "report_kind": "aggregate_only",
+  "selection": {
+    "between_saved_artifacts": {
+      "candidates": {
+        "100e": {
+          "artifact_fingerprint": "605639d3e0189f10dd3487c2bcf613825699475573eb34f57ac71113902c2f83",
+          "configuration": {
+            "batch_size": 64,
+            "dtype": "float32",
+            "expected_ardy_model": "ARDY-Core-RP-20FPS-Horizon40",
+            "max_length": null,
+            "max_samples": null,
+            "nrmse_definition": "RMSE divided by target RMS over the same elements",
+            "teacher_dim": 4096
+          },
+          "evaluated_examples": 6710,
+          "metrics": {
+            "body": {
+              "cosine": {
+                "mean": 0.9670434959678218,
+                "p5": 0.9026891320934711
+              },
+              "elements": 6871040,
+              "examples": 6710,
+              "mae": 1.062128879378006,
+              "nrmse": 0.2574132014439143,
+              "rmse": 1.4934414461233538,
+              "target_rms": 5.8017282631432865
+            },
+            "overall": {
+              "cosine": {
+                "mean": 0.973279730216875,
+                "p5": 0.9173814607229032
+              },
+              "elements": 13742080,
+              "examples": 6710,
+              "mae": 1.1018232136352701,
+              "nrmse": 0.23234508284994593,
+              "rmse": 1.5432839714553368,
+              "target_rms": 6.642206293007831
+            },
+            "root": {
+              "cosine": {
+                "mean": 0.9769071955019719,
+                "p5": 0.9278364287454848
+              },
+              "elements": 6871040,
+              "examples": 6710,
+              "mae": 1.1415175478925348,
+              "nrmse": 0.2154353196836798,
+              "rmse": 1.5915663605715282,
+              "target_rms": 7.38767609187017
+            }
+          },
+          "selection_metric": "mean(root.cosine.mean, body.cosine.mean)",
+          "selection_score": 0.9719753457348969,
+          "split": "val"
+        },
+        "50e": {
+          "artifact_fingerprint": "6576680f627d5ab9a9ffbc44e780400e086a2ccdef8ef39b7eb5bd532de27829",
+          "configuration": {
+            "batch_size": 64,
+            "dtype": "float32",
+            "expected_ardy_model": "ARDY-Core-RP-20FPS-Horizon40",
+            "max_length": null,
+            "max_samples": null,
+            "nrmse_definition": "RMSE divided by target RMS over the same elements",
+            "teacher_dim": 4096
+          },
+          "evaluated_examples": 6710,
+          "metrics": {
+            "body": {
+              "cosine": {
+                "mean": 0.9655840496680649,
+                "p5": 0.9010531292846464
+              },
+              "elements": 6871040,
+              "examples": 6710,
+              "mae": 1.093543925980768,
+              "nrmse": 0.26249551642768665,
+              "rmse": 1.5229276566069025,
+              "target_rms": 5.8017282631432865
+            },
+            "overall": {
+              "cosine": {
+                "mean": 0.9721244418038572,
+                "p5": 0.9161654091876511
+              },
+              "elements": 13742080,
+              "examples": 6710,
+              "mae": 1.1348233852723308,
+              "nrmse": 0.2369697117019809,
+              "rmse": 1.574001710319149,
+              "target_rms": 6.642206293007831
+            },
+            "root": {
+              "cosine": {
+                "mean": 0.97592061623927,
+                "p5": 0.9263882006533487
+              },
+              "elements": 6871040,
+              "examples": 6710,
+              "mae": 1.1761028445638937,
+              "nrmse": 0.21975378428468764,
+              "rmse": 1.6234697782579817,
+              "target_rms": 7.38767609187017
+            }
+          },
+          "selection_metric": "mean(root.cosine.mean, body.cosine.mean)",
+          "selection_score": 0.9707523329536674,
+          "split": "val"
+        }
       },
-      "baseline_to_adopted_50e": {
-        "global_mpjpe_reduction_percent": 13.0885,
-        "root_ade_reduction_percent": 14.9844,
-        "joint_velocity_error_reduction_percent": 15.0648,
-        "normalized_five_error_mean_reduction_percent": 11.4724
+      "complete_split": true,
+      "metric": "mean(root.cosine.mean, body.cosine.mean)",
+      "precision": "float32",
+      "split": "val"
+    },
+    "metric": "mean(root.cosine.mean, body.cosine.mean)",
+    "rule": "highest complete-split FP32 saved-artifact score; exact ties select the shorter 50-epoch candidate",
+    "shared_trajectory_prefix_epochs": 50,
+    "shared_trajectory_prefix_verified": true,
+    "split": "val",
+    "test_metrics_used_for_selection": false,
+    "winner": "100e",
+    "within_run_checkpoint_selection": {
+      "candidates": {
+        "100e": {
+          "artifact_fingerprint": "605639d3e0189f10dd3487c2bcf613825699475573eb34f57ac71113902c2f83",
+          "artifact_payload_size_bytes": 113637018,
+          "configuration": {
+            "adapter_dim": 1536,
+            "ardy_model": "ARDY-Core-RP-20FPS-Horizon40",
+            "backbone_lr": 0.0001,
+            "base_model": "sentence-transformers/all-MiniLM-L6-v2",
+            "base_model_revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+            "batch_size": 128,
+            "bf16_autocast": true,
+            "cosine_weight": 0.5,
+            "cublas_workspace_config": ":4096:8",
+            "cudnn_benchmark": false,
+            "cudnn_deterministic": true,
+            "deterministic_algorithms": true,
+            "device": "cuda",
+            "device_details": {
+              "capability": [
+                12,
+                1
+              ],
+              "index": 0,
+              "name": "NVIDIA GB10",
+              "requested": "cuda",
+              "resolved": "cuda",
+              "type": "cuda"
+            },
+            "epochs": 100,
+            "head_lr": 0.003,
+            "head_warmup_epochs": 0,
+            "lr_schedule_epochs": 100,
+            "lr_schedule_steps": 40300,
+            "num_workers": 0,
+            "optimizer_updates": 40300,
+            "pooling_mode": "mean_cls_max_std",
+            "relational_weight": 0.05,
+            "runtime_max_length": 128,
+            "runtime_versions": {
+              "cuda_runtime": "13.0",
+              "cudnn": "92000",
+              "machine": "aarch64",
+              "numpy": "1.26.4",
+              "python": "3.11.15",
+              "safetensors": "0.8.0",
+              "tokenizers": "0.22.2",
+              "torch": "2.13.0",
+              "transformers": "5.8.1"
+            },
+            "seed": 20260726,
+            "test_examples": 6095,
+            "train_batches_per_epoch": 403,
+            "train_examples": 51482,
+            "train_max_length": 128,
+            "validation_examples": 6710,
+            "warmup_ratio": 0.05,
+            "warmup_steps": 2015,
+            "weight_decay": 0.01
+          },
+          "configured_epochs": 100,
+          "elapsed_seconds": 2015.7867008228786,
+          "teacher_cache_fingerprint": "93aa874b15b8d312ffea40d03fc098af0fd05969932a14fa667616b76e34dc07",
+          "within_run_checkpoint_selection": {
+            "best_epoch": 95,
+            "best_validation_score": 0.9719737470149994,
+            "metric": "mean(root_cosine, body_cosine)",
+            "precision": "bfloat16_autocast",
+            "split": "val",
+            "validation": {
+              "body_cosine": 0.9670425653457642,
+              "body_mae": 1.0621788501739502,
+              "body_nrmse": 0.25742142379625854,
+              "body_rmse": 1.493489146232605,
+              "root_cosine": 0.9769049286842346,
+              "root_mae": 1.1416058540344238,
+              "root_nrmse": 0.21544960717946335,
+              "root_rmse": 1.5916719436645508
+            }
+          }
+        },
+        "50e": {
+          "artifact_fingerprint": "6576680f627d5ab9a9ffbc44e780400e086a2ccdef8ef39b7eb5bd532de27829",
+          "artifact_payload_size_bytes": 113637018,
+          "configuration": {
+            "adapter_dim": 1536,
+            "ardy_model": "ARDY-Core-RP-20FPS-Horizon40",
+            "backbone_lr": 0.0001,
+            "base_model": "sentence-transformers/all-MiniLM-L6-v2",
+            "base_model_revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+            "batch_size": 128,
+            "bf16_autocast": true,
+            "cosine_weight": 0.5,
+            "cublas_workspace_config": ":4096:8",
+            "cudnn_benchmark": false,
+            "cudnn_deterministic": true,
+            "deterministic_algorithms": true,
+            "device": "cuda",
+            "device_details": {
+              "capability": [
+                12,
+                1
+              ],
+              "index": 0,
+              "name": "NVIDIA GB10",
+              "requested": "cuda",
+              "resolved": "cuda",
+              "type": "cuda"
+            },
+            "epochs": 50,
+            "head_lr": 0.003,
+            "head_warmup_epochs": 0,
+            "lr_schedule_epochs": 100,
+            "lr_schedule_steps": 40300,
+            "num_workers": 0,
+            "optimizer_updates": 20150,
+            "pooling_mode": "mean_cls_max_std",
+            "relational_weight": 0.05,
+            "runtime_max_length": 128,
+            "runtime_versions": {
+              "cuda_runtime": "13.0",
+              "cudnn": "92000",
+              "machine": "aarch64",
+              "numpy": "1.26.4",
+              "python": "3.11.15",
+              "safetensors": "0.8.0",
+              "tokenizers": "0.22.2",
+              "torch": "2.13.0",
+              "transformers": "5.8.1"
+            },
+            "seed": 20260726,
+            "test_examples": 6095,
+            "train_batches_per_epoch": 403,
+            "train_examples": 51482,
+            "train_max_length": 128,
+            "validation_examples": 6710,
+            "warmup_ratio": 0.05,
+            "warmup_steps": 2015,
+            "weight_decay": 0.01
+          },
+          "configured_epochs": 50,
+          "elapsed_seconds": 1018.0479056460317,
+          "teacher_cache_fingerprint": "93aa874b15b8d312ffea40d03fc098af0fd05969932a14fa667616b76e34dc07",
+          "within_run_checkpoint_selection": {
+            "best_epoch": 49,
+            "best_validation_score": 0.9707484245300293,
+            "metric": "mean(root_cosine, body_cosine)",
+            "precision": "bfloat16_autocast",
+            "split": "val",
+            "validation": {
+              "body_cosine": 0.9655790328979492,
+              "body_mae": 1.093705177307129,
+              "body_nrmse": 0.26252179441849194,
+              "body_rmse": 1.5230801105499268,
+              "root_cosine": 0.9759178161621094,
+              "root_mae": 1.1762772798538208,
+              "root_nrmse": 0.21977852370219478,
+              "root_rmse": 1.6236525774002075
+            }
+          }
+        }
       },
-      "compute_matched_16e_to_adopted_50e": {
-        "global_mpjpe_reduction_percent": 4.709,
-        "root_ade_reduction_percent": 7.548,
-        "joint_velocity_error_reduction_percent": 8.7607,
-        "root_aligned_mpjpe_increase_percent": 3.1077,
-        "motion_cosine_absolute_change": -0.00050675
+      "metric": "mean(root_cosine, body_cosine)",
+      "precision": "bfloat16_autocast",
+      "scope": "Each training run retained its best epoch using BF16 validation. Discarded epoch states cannot be re-ranked under FP32 without retraining or saved checkpoints.",
+      "split": "val"
+    }
+  },
+  "test_evaluation": {
+    "condition_fidelity": {
+      "artifact_fingerprint": "605639d3e0189f10dd3487c2bcf613825699475573eb34f57ac71113902c2f83",
+      "configuration": {
+        "batch_size": 64,
+        "dtype": "float32",
+        "expected_ardy_model": "ARDY-Core-RP-20FPS-Horizon40",
+        "max_length": null,
+        "max_samples": null,
+        "nrmse_definition": "RMSE divided by target RMS over the same elements",
+        "teacher_dim": 4096
+      },
+      "evaluated_examples": 6095,
+      "metrics": {
+        "body": {
+          "cosine": {
+            "mean": 0.9703314429127303,
+            "p5": 0.9158401094172207
+          },
+          "elements": 6241280,
+          "examples": 6095,
+          "mae": 1.0210080610090218,
+          "nrmse": 0.24376337584027422,
+          "rmse": 1.4206818991503225,
+          "target_rms": 5.828118741189503
+        },
+        "overall": {
+          "cosine": {
+            "mean": 0.9755699406198761,
+            "p5": 0.9303886878072108
+          },
+          "elements": 12482560,
+          "examples": 6095,
+          "mae": 1.0599095623745298,
+          "nrmse": 0.2218232566300632,
+          "rmse": 1.4744159228025937,
+          "target_rms": 6.6468049617605764
+        },
+        "root": {
+          "cosine": {
+            "mean": 0.9786085452182255,
+            "p5": 0.9375846531312103
+          },
+          "elements": 6241280,
+          "examples": 6095,
+          "mae": 1.0988110637400386,
+          "nrmse": 0.206945778223157,
+          "rmse": 1.5262593384658711,
+          "target_rms": 7.375165376990931
+        }
+      },
+      "selection_metric": "mean(root.cosine.mean, body.cosine.mean)",
+      "selection_score": 0.974469994065478,
+      "split": "test"
+    },
+    "motion_fidelity": {
+      "normalized_by_teacher_diversity": {
+        "global_mpjpe_m_vs_teacher_diversity": 0.30344068149176073,
+        "joint_velocity_error_m_per_s_vs_teacher_diversity": 0.31449049220220376,
+        "root_ade_m_vs_teacher_diversity": 0.28945406270544277,
+        "root_aligned_mpjpe_m_vs_teacher_diversity": 0.3214700501516988,
+        "root_fde_m_vs_teacher_diversity": 0.33889629673181076
+      },
+      "paired_teacher_student": {
+        "foot_contact_agreement": 0.9689778645833332,
+        "foot_contact_macro_f1": 0.9685271247284518,
+        "foot_contact_macro_iou": 0.9496082181582598,
+        "global_mpjpe_m": 0.06475225607849626,
+        "heading_mae_deg": 3.1571794255345504,
+        "joint_velocity_error_m_per_s": 0.10005908423705086,
+        "motion_cosine": 0.9963530135488661,
+        "root_ade_m": 0.04775554170330434,
+        "root_aligned_mpjpe_m": 0.0314030194666463,
+        "root_fde_m": 0.08180610254634242
+      },
+      "scope": {
+        "cfg_weight": [
+          2.0,
+          2.0
+        ],
+        "checkpoint_sha256": "1019d0bf269cf8d1b3e3e9b4a384a58c112672959b071279ddb65814d77660cd",
+        "determinism": {
+          "cublas_workspace_config": ":4096:8",
+          "cuda_matmul_allow_tf32": false,
+          "cudnn_allow_tf32": false,
+          "cudnn_benchmark": false,
+          "cudnn_deterministic": true,
+          "float32_matmul_precision": "highest",
+          "torch_deterministic_algorithms": true,
+          "torch_deterministic_warn_only": false
+        },
+        "diffusion_steps": 10,
+        "duration_seconds": 4.0,
+        "eligible_test_prompts": 6095,
+        "fps": 20.0,
+        "held_out_test_prompts_available": 6095,
+        "num_frames": 80,
+        "postprocess_applied": false,
+        "prompt_count": 64,
+        "prompt_manifest_sha256": "c80b0656dd04c28da1d665b4b9a9422f975be5c72b0fe9011b976a3672bb1eac",
+        "prompt_selection_algorithm": "evenly_spaced_numpy_linspace_v1",
+        "repeatability_check": {
+          "compared_keys": [
+            "root_positions",
+            "posed_joints",
+            "global_root_heading",
+            "foot_contacts"
+          ],
+          "enabled": true,
+          "exact_equal": true,
+          "prompt_index": 0,
+          "seed": 0
+        },
+        "resolved_model": "ARDY-Core-RP-20FPS-Horizon40",
+        "seeds": [
+          0,
+          1,
+          2
+        ],
+        "selected_prompt_sha256": "22111a86318ab5ea930016e9b4ac569a31ec35b73de67eb3068ca8f6dab10ab8",
+        "source_filter": [
+          "overview_description",
+          "events.description"
+        ],
+        "split": "test",
+        "student_dtype": "float32",
+        "teacher_cache_fingerprint": "93aa874b15b8d312ffea40d03fc098af0fd05969932a14fa667616b76e34dc07",
+        "teacher_diversity_seed_pairs": 3
+      },
+      "teacher_seed_diversity": {
+        "foot_contact_agreement": 0.85751953125,
+        "foot_contact_macro_f1": 0.8487791430828043,
+        "foot_contact_macro_iou": 0.7991966809854768,
+        "global_mpjpe_m": 0.21339345719949046,
+        "heading_mae_deg": 10.053720312773589,
+        "joint_velocity_error_m_per_s": 0.3181625095766558,
+        "motion_cosine": 0.979775245335944,
+        "root_ade_m": 0.16498487275302756,
+        "root_aligned_mpjpe_m": 0.09768567694510732,
+        "root_fde_m": 0.24138978010456266
       }
     }
   },
-  "limitations": [
-    "Motion metrics measure same-seed replacement fidelity, not ground-truth text semantics.",
-    "The proprietary Rigplay test split and TMR evaluator were unavailable, so these are not paper-comparable FID or R-precision results.",
-    "The supported deployment domain is well-formed, typo-free English motion prompts.",
-    "The experiment uses one training seed and does not establish statistical significance.",
-    "The held-out prompts come from the same BONES source; cross-dataset language generalization was not measured.",
-    "No external motion-caption dataset was included in the adopted weights.",
-    "CUDA allocator figures exclude CUDA driver and context memory.",
-    "Encoder timing excludes diffusion, motion decoding, post-processing, and rendering."
-  ]
+  "winner": {
+    "ardy_model": "ARDY-Core-RP-20FPS-Horizon40",
+    "artifact_fingerprint": "605639d3e0189f10dd3487c2bcf613825699475573eb34f57ac71113902c2f83",
+    "artifact_payload_size_bytes": 113637018,
+    "base_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "candidate": "100e"
+  }
 }

@@ -7,20 +7,35 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import importlib.metadata
 import json
 import math
+import os
+import platform
+import re
 import tarfile
 import tempfile
 import time
+from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import numpy as np
+import onnx
+from onnx import TensorProto
 
 from ardy.browser.precision import (
     MIXED_FP16_POLICIES,
     MIXED_FP16_POLICY_VERSION,
+    validate_fp32_source_graph,
+    validate_no_external_data,
+    validate_no_storage_only_fp16_casts,
+    validate_production_policy_coverage,
+)
+from ardy.minilm_teacher_cache import (
+    prompt_provenance_sha256,
+    validate_prompt_provenance,
 )
 
 
@@ -60,6 +75,85 @@ class RolloutResult:
     windows: list[dict[str, np.ndarray]]
     accumulated: dict[str, np.ndarray]
     continuity: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class InputFileIdentity:
+    """Stable identity captured before an evaluator input is consumed."""
+
+    filename: str
+    size_bytes: int
+    sha256: str
+    stat_signature: tuple[int, int, int, int, int]
+
+
+@dataclass(frozen=True)
+class ReferenceGraphContract:
+    """Lightweight FP32 facts retained after releasing an ONNX protobuf."""
+
+    initializer_stats: dict[str, Any]
+    io_contract: tuple[
+        tuple[tuple[str, bytes], ...],
+        tuple[tuple[str, bytes], ...],
+    ]
+    node_count: int
+
+
+_MODEL_PACK_FORMAT = "ardy-browser-model-pack"
+_MODEL_PACK_SCHEMA_VERSION = 2
+_RUNTIME_CONTRACT_REVISION = 3
+_REQUIRED_WEBGPU_FEATURES = ["shader-f16"]
+_EXPECTED_GRAPH_NAMES = ("text_encoder", "denoiser", "decoder")
+_EXPECTED_TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json")
+_EXPECTED_GRAPH_BINDINGS = {
+    "text_encoder": {
+        "inputs": {
+            "inputIds": "input_ids",
+            "attentionMask": "attention_mask",
+            "tokenTypeIds": "token_type_ids",
+        },
+        "outputs": {"textConditions": "text_conditions"},
+    },
+    "denoiser": {
+        "inputs": {
+            "cfgWeight": "cfg_weight",
+            "x": "x",
+            "historyLength": "history_len",
+            "generationLength": "generation_len",
+            "historyMask": "history_mask",
+            "generationMask": "generation_mask",
+            "historyTokenMask": "history_token_mask",
+            "generationTokenMask": "generation_token_mask",
+            "textConditions": "text_conditions",
+            "timestep": "timestep",
+            "firstHeadingAngle": "first_heading_angle",
+        },
+        "outputs": {"predX0": "pred_x0"},
+    },
+    "decoder": {
+        "inputs": {
+            "hybridTokens": "hybrid_tokens",
+            "motionPadMask": "motion_pad_mask",
+            "globalTranslation": "global_translation",
+        },
+        "outputs": {
+            "normalizedMotion": "normalized_motion",
+            "posedJoints": "posed_joints",
+            "localRotations": "local_rotations",
+            "globalRotations": "global_rotations",
+            "rootPositions": "root_positions",
+            "footContacts": "foot_contacts",
+            "globalRootHeading": "global_root_heading",
+        },
+    },
+}
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
+_MAX_TAR_ENTRIES = 10_000
+_MAX_TAR_ENTRY_BYTES = 0x7FFF_FFFF
+_MAX_TAR_BYTES = 8 * 1024 * 1024 * 1024
+_MAX_TAR_PATH_BYTES = 4_096
+_MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 
 
 class PortableRandom:
@@ -114,6 +208,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--reference-pack", type=Path, required=True)
     parser.add_argument("--candidate-pack", type=Path, required=True)
     parser.add_argument("--prompts", type=Path, required=True, help="JSONL records containing a `text` field.")
+    parser.add_argument(
+        "--prompt-metadata",
+        type=Path,
+        default=None,
+        help=(
+            "canonical NVIDIA Timeline prompt-provenance sidecar; inferred from "
+            "PROMPTS when present and required by --public-output"
+        ),
+    )
     parser.add_argument("--split", default="test", help="Optional JSONL split to select; use `all` for every record.")
     parser.add_argument("--count", type=int, default=64)
     parser.add_argument(
@@ -139,7 +242,24 @@ def _parse_args() -> argparse.Namespace:
         default=0.35,
         help="Initial heading in radians; non-zero by default to exercise continuation.",
     )
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help=(
+            "local detailed report; includes worst-case prompt text and should "
+            "remain in an ignored artifacts directory"
+        ),
+    )
+    parser.add_argument(
+        "--public-output",
+        type=Path,
+        default=None,
+        help=(
+            "optional Git-safe aggregate report with prompt provenance and "
+            "hashes, but no prompt text or absolute paths"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -151,20 +271,135 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _extract_pack(archive_path: Path, output_dir: Path) -> None:
+def _stat_signature(stat_result: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        stat_result.st_dev,
+        stat_result.st_ino,
+        stat_result.st_size,
+        stat_result.st_mtime_ns,
+        stat_result.st_ctime_ns,
+    )
+
+
+def _capture_file_identity(path: Path) -> InputFileIdentity:
+    """Hash one stable regular file and retain enough stat data for a recheck."""
+
+    before = path.stat()
+    if not path.is_file():
+        raise FileNotFoundError(f"Evaluator input is not a regular file: {path}")
+    digest = _sha256(path)
+    after = path.stat()
+    before_signature = _stat_signature(before)
+    after_signature = _stat_signature(after)
+    if before_signature != after_signature:
+        raise RuntimeError(f"Evaluator input changed while it was being hashed: {path}")
+    return InputFileIdentity(
+        filename=path.name,
+        size_bytes=after.st_size,
+        sha256=digest,
+        stat_signature=after_signature,
+    )
+
+
+def _verify_file_identity(path: Path, identity: InputFileIdentity) -> None:
+    """Fail when an input changed between its prehash and its consumption."""
+
+    current = path.stat()
+    if _stat_signature(current) != identity.stat_signature or _sha256(path) != identity.sha256:
+        raise RuntimeError(f"Evaluator input changed after its identity was captured: {path}")
+
+
+def _read_stable_bytes(path: Path) -> tuple[bytes, InputFileIdentity]:
+    """Read and identify the exact same file bytes."""
+
+    before = path.stat()
+    if not path.is_file():
+        raise FileNotFoundError(f"Evaluator input is not a regular file: {path}")
+    encoded = path.read_bytes()
+    after = path.stat()
+    before_signature = _stat_signature(before)
+    after_signature = _stat_signature(after)
+    if before_signature != after_signature or len(encoded) != after.st_size:
+        raise RuntimeError(f"Evaluator input changed while it was being read: {path}")
+    return encoded, InputFileIdentity(
+        filename=path.name,
+        size_bytes=len(encoded),
+        sha256=hashlib.sha256(encoded).hexdigest(),
+        stat_signature=after_signature,
+    )
+
+
+def _canonical_pack_path(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} must be a non-empty relative POSIX path.")
+    if (
+        "\\" in value
+        or _WINDOWS_DRIVE_PATTERN.match(value)
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or len(value.encode("utf-8")) > _MAX_TAR_PATH_BYTES
+    ):
+        raise ValueError(f"{label} is not a safe canonical POSIX path: {value!r}.")
+    path = PurePosixPath(value)
+    if (
+        path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or path.as_posix() != value
+    ):
+        raise ValueError(f"{label} is not a safe canonical POSIX path: {value!r}.")
+    return value
+
+
+def _extract_pack(
+    archive_path: Path,
+    output_dir: Path,
+    *,
+    expected_identity: InputFileIdentity,
+) -> set[str]:
+    """Extract the browser-compatible regular-file subset with bounded resources."""
+
+    seen: set[str] = set()
+    declared_bytes = 0
     with tarfile.open(archive_path, mode="r:gz") as archive:
-        for member in archive.getmembers():
-            member_path = Path(member.name)
-            if not member.isfile() or member_path.is_absolute() or ".." in member_path.parts:
-                raise ValueError(f"Unsafe browser-pack member: {member.name!r}")
-            destination = output_dir / member_path
+        for member_index, member in enumerate(archive):
+            if member_index >= _MAX_TAR_ENTRIES:
+                raise ValueError(f"Browser pack contains more than {_MAX_TAR_ENTRIES} entries.")
+            if not member.isfile() or member.pax_headers:
+                raise ValueError(f"Browser-pack entries must be plain POSIX regular files: {member.name!r}.")
+            archive_name = _canonical_pack_path(member.name, "browser-pack member")
+            if archive_name in seen:
+                raise ValueError(f"Duplicate browser-pack member: {archive_name!r}.")
+            if member_index == 0 and archive_name != "manifest.json":
+                raise ValueError("manifest.json must be the first browser-pack member.")
+            if member.size < 0 or member.size > _MAX_TAR_ENTRY_BYTES:
+                raise ValueError(
+                    f"Browser-pack member {archive_name!r} exceeds the per-file size limit."
+                )
+            if archive_name == "manifest.json" and member.size > _MAX_MANIFEST_BYTES:
+                raise ValueError("Browser-pack manifest exceeds the size limit.")
+            declared_bytes += member.size
+            if declared_bytes > _MAX_TAR_BYTES:
+                raise ValueError(f"Browser pack expands beyond {_MAX_TAR_BYTES} bytes.")
+
+            destination = output_dir / Path(*PurePosixPath(archive_name).parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
             source = archive.extractfile(member)
             if source is None:
                 raise ValueError(f"Unable to read browser-pack member: {member.name!r}")
-            with destination.open("wb") as output:
+            written = 0
+            with destination.open("xb") as output:
                 while chunk := source.read(8 * 1024 * 1024):
                     output.write(chunk)
+                    written += len(chunk)
+            if written != member.size:
+                raise ValueError(
+                    f"Browser-pack member {archive_name!r} was truncated "
+                    f"({written} of {member.size} bytes)."
+                )
+            seen.add(archive_name)
+    _verify_file_identity(archive_path, expected_identity)
+    if "manifest.json" not in seen:
+        raise ValueError("Browser pack is missing manifest.json.")
+    return seen
 
 
 def _session(path: Path):
@@ -183,8 +418,9 @@ def _session(path: Path):
     )
 
 
-def _load_runtime(directory: Path) -> PackRuntime:
-    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+def _create_runtime(directory: Path, manifest: dict[str, Any]) -> PackRuntime:
+    """Create ORT sessions only after both packs have passed static validation."""
+
     graphs = manifest["graphs"]
     return PackRuntime(
         directory=directory,
@@ -195,14 +431,554 @@ def _load_runtime(directory: Path) -> PackRuntime:
     )
 
 
+def _object(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TypeError(f"{label} must be a JSON object.")
+    return value
+
+
+def _nonnegative_integer(value: Any, label: str, *, positive: bool = False) -> int:
+    minimum = 1 if positive else 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        qualifier = "positive" if positive else "non-negative"
+        raise ValueError(f"{label} must be a {qualifier} integer.")
+    return value
+
+
+def _sha256_value(value: Any, label: str) -> str:
+    if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
+        raise ValueError(f"{label} must be a lowercase SHA-256 digest.")
+    return value
+
+
+def _fraction(value: Any, label: str, numerator: int, denominator: int) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not 0 <= value <= 1
+    ):
+        raise ValueError(f"{label} must be a finite fraction.")
+    expected = numerator / denominator
+    if not math.isclose(float(value), expected, rel_tol=1e-12, abs_tol=1e-12):
+        raise ValueError(f"{label} does not match the declared byte reduction.")
+    return float(value)
+
+
+def _initializer_precision_stats(model: onnx.ModelProto) -> dict[str, Any]:
+    element_bytes = {
+        TensorProto.FLOAT: 4,
+        TensorProto.UINT8: 1,
+        TensorProto.INT8: 1,
+        TensorProto.UINT16: 2,
+        TensorProto.INT16: 2,
+        TensorProto.INT32: 4,
+        TensorProto.INT64: 8,
+        TensorProto.BOOL: 1,
+        TensorProto.FLOAT16: 2,
+        TensorProto.DOUBLE: 8,
+        TensorProto.UINT32: 4,
+        TensorProto.UINT64: 8,
+        TensorProto.COMPLEX64: 8,
+        TensorProto.COMPLEX128: 16,
+        TensorProto.BFLOAT16: 2,
+    }
+    count_by_dtype: Counter[str] = Counter()
+    bytes_by_dtype: Counter[str] = Counter()
+    for initializer in model.graph.initializer:
+        dtype = TensorProto.DataType.Name(initializer.data_type).lower()
+        element_count = math.prod(initializer.dims)
+        count_by_dtype[dtype] += 1
+        bytes_by_dtype[dtype] += element_count * element_bytes.get(
+            initializer.data_type,
+            len(initializer.raw_data),
+        )
+    return {
+        "count_by_dtype": dict(sorted(count_by_dtype.items())),
+        "bytes_by_dtype": dict(sorted(bytes_by_dtype.items())),
+        "total_count": sum(count_by_dtype.values()),
+        "total_bytes": sum(bytes_by_dtype.values()),
+    }
+
+
+def _graph_io_types(values) -> dict[str, str]:
+    return {
+        value.name: TensorProto.DataType.Name(value.type.tensor_type.elem_type).lower()
+        for value in values
+    }
+
+
+def _graph_io_contract(model: onnx.ModelProto) -> tuple[tuple[tuple[str, bytes], ...], tuple[tuple[str, bytes], ...]]:
+    return (
+        tuple(
+            (value.name, value.type.SerializeToString(deterministic=True))
+            for value in model.graph.input
+        ),
+        tuple(
+            (value.name, value.type.SerializeToString(deterministic=True))
+            for value in model.graph.output
+        ),
+    )
+
+
+def _load_checked_onnx(path: Path, graph_name: str) -> onnx.ModelProto:
+    try:
+        model = onnx.load(path, load_external_data=False)
+    except Exception as error:
+        raise ValueError(f"Unable to load {graph_name} ONNX graph: {path.name}.") from error
+    validate_no_external_data(model)
+    onnx.checker.check_model(model, full_check=True)
+    return model
+
+
+def _validate_initializer_summary(
+    value: Any,
+    expected: dict[str, Any],
+    label: str,
+) -> None:
+    summary = _object(value, label)
+    if summary != expected:
+        raise ValueError(f"{label} does not match the ONNX initializer payload.")
+
+
+def _validate_manifest_files(
+    directory: Path,
+    manifest: dict[str, Any],
+    extracted_paths: set[str],
+) -> dict[str, Path]:
+    files = _object(manifest.get("files"), "manifest.files")
+    if "manifest.json" in files:
+        raise ValueError("manifest.files must not declare manifest.json.")
+    resolved: dict[str, Path] = {}
+    for raw_path, raw_record in files.items():
+        relative_path = _canonical_pack_path(raw_path, "manifest.files key")
+        record = _object(raw_record, f"manifest.files.{relative_path}")
+        expected_keys = {"sha256", "size_bytes"}
+        if not expected_keys.issubset(record):
+            raise ValueError(
+                f"manifest.files.{relative_path} must declare sha256 and size_bytes."
+            )
+        expected_size = _nonnegative_integer(
+            record["size_bytes"],
+            f"manifest.files.{relative_path}.size_bytes",
+        )
+        expected_hash = _sha256_value(
+            record["sha256"],
+            f"manifest.files.{relative_path}.sha256",
+        )
+        path = directory / Path(*PurePosixPath(relative_path).parts)
+        if not path.is_file() or path.is_symlink():
+            raise FileNotFoundError(f"Declared browser-pack file is missing: {relative_path}.")
+        if path.stat().st_size != expected_size:
+            raise ValueError(f"Browser-pack size mismatch for {relative_path}.")
+        if _sha256(path) != expected_hash:
+            raise ValueError(f"Browser-pack SHA-256 mismatch for {relative_path}.")
+        resolved[relative_path] = path
+    expected_archive_paths = {"manifest.json", *resolved}
+    if extracted_paths != expected_archive_paths:
+        missing = sorted(expected_archive_paths - extracted_paths)
+        extra = sorted(extracted_paths - expected_archive_paths)
+        raise ValueError(
+            f"Browser-pack members do not match manifest.files (missing={missing}, extra={extra})."
+        )
+    return resolved
+
+
+def _validate_common_manifest(
+    directory: Path,
+    extracted_paths: set[str],
+) -> tuple[dict[str, Any], dict[str, Path], dict[str, Path]]:
+    manifest_path = directory / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("Browser-pack manifest is invalid JSON.") from error
+    manifest = _object(manifest, "manifest")
+    if manifest.get("format") != _MODEL_PACK_FORMAT:
+        raise ValueError(f"manifest.format must be {_MODEL_PACK_FORMAT!r}.")
+    if manifest.get("schema_version") != _MODEL_PACK_SCHEMA_VERSION:
+        raise ValueError(
+            f"manifest.schema_version must be {_MODEL_PACK_SCHEMA_VERSION}."
+        )
+    files = _validate_manifest_files(directory, manifest, extracted_paths)
+
+    tokenizer = _object(manifest.get("tokenizer"), "manifest.tokenizer")
+    tokenizer_directory = _canonical_pack_path(
+        tokenizer.get("directory"),
+        "manifest.tokenizer.directory",
+    )
+    _nonnegative_integer(
+        tokenizer.get("max_length"),
+        "manifest.tokenizer.max_length",
+        positive=True,
+    )
+    required_tokenizer_paths = {
+        f"{tokenizer_directory}/{filename}" for filename in _EXPECTED_TOKENIZER_FILES
+    }
+    if not required_tokenizer_paths.issubset(files):
+        raise ValueError(
+            "Browser pack is missing one or more required tokenizer payloads."
+        )
+
+    graphs = _object(manifest.get("graphs"), "manifest.graphs")
+    if set(graphs) != set(_EXPECTED_GRAPH_NAMES):
+        raise ValueError(
+            f"manifest.graphs must contain exactly {list(_EXPECTED_GRAPH_NAMES)}."
+        )
+    graph_paths: dict[str, Path] = {}
+    graph_asset_names: set[str] = set()
+    for graph_name in _EXPECTED_GRAPH_NAMES:
+        graph = _object(graphs[graph_name], f"manifest.graphs.{graph_name}")
+        if "external_data" in graph and graph["external_data"] != []:
+            raise ValueError(
+                f"manifest.graphs.{graph_name} must not declare external ONNX data."
+            )
+        model_path = _canonical_pack_path(
+            graph.get("model"),
+            f"manifest.graphs.{graph_name}.model",
+        )
+        if model_path not in files:
+            raise ValueError(
+                f"manifest.graphs.{graph_name}.model is not declared in manifest.files."
+            )
+        graph_paths[graph_name] = files[model_path]
+        graph_asset_names.add(model_path)
+        expected_bindings = _EXPECTED_GRAPH_BINDINGS[graph_name]
+        for binding_kind in ("inputs", "outputs"):
+            bindings = _object(
+                graph.get(binding_kind),
+                f"manifest.graphs.{graph_name}.{binding_kind}",
+            )
+            if bindings != expected_bindings[binding_kind]:
+                raise ValueError(
+                    f"manifest.graphs.{graph_name}.{binding_kind} does not "
+                    "match the fixed browser evaluator contract."
+                )
+    if set(files) != required_tokenizer_paths | graph_asset_names:
+        raise ValueError("manifest.files contains unreferenced browser-pack assets.")
+
+    runtime = _object(manifest.get("runtime"), "manifest.runtime")
+    if runtime.get("contract_revision") != _RUNTIME_CONTRACT_REVISION:
+        raise ValueError(
+            f"manifest.runtime.contract_revision must be {_RUNTIME_CONTRACT_REVISION}."
+        )
+    if runtime.get("required_webgpu_features") != _REQUIRED_WEBGPU_FEATURES:
+        raise ValueError(
+            "manifest.runtime.required_webgpu_features must be ['shader-f16']."
+        )
+    if runtime.get("text_only") is not True:
+        raise ValueError("manifest.runtime.text_only must be true.")
+
+    dimensions = _object(manifest.get("dimensions"), "manifest.dimensions")
+    required_dimensions = (
+        "fps",
+        "num_frames_per_token",
+        "max_tokens",
+        "max_frames",
+        "generation_tokens",
+        "generation_frames",
+        "history_tokens",
+        "history_frames",
+        "root_features_per_frame",
+        "nframe_root_dim",
+        "latent_dim",
+        "hybrid_dim",
+        "motion_dim",
+        "body_dim",
+        "text_condition_dim",
+        "num_joints",
+    )
+    dimension_values = {
+        key: _nonnegative_integer(
+            dimensions.get(key),
+            f"manifest.dimensions.{key}",
+            positive=True,
+        )
+        for key in required_dimensions
+    }
+    if dimension_values["max_frames"] != (
+        dimension_values["max_tokens"] * dimension_values["num_frames_per_token"]
+    ):
+        raise ValueError("manifest.dimensions.max_frames is inconsistent.")
+    if dimension_values["generation_frames"] != (
+        dimension_values["generation_tokens"]
+        * dimension_values["num_frames_per_token"]
+    ):
+        raise ValueError("manifest.dimensions.generation_frames is inconsistent.")
+    if dimension_values["history_tokens"] != (
+        dimension_values["max_tokens"] - dimension_values["generation_tokens"]
+    ):
+        raise ValueError("manifest.dimensions.history_tokens is inconsistent.")
+    if dimension_values["history_frames"] != (
+        dimension_values["history_tokens"]
+        * dimension_values["num_frames_per_token"]
+    ):
+        raise ValueError("manifest.dimensions.history_frames is inconsistent.")
+    if dimension_values["nframe_root_dim"] != (
+        dimension_values["root_features_per_frame"]
+        * dimension_values["num_frames_per_token"]
+    ):
+        raise ValueError("manifest.dimensions.nframe_root_dim is inconsistent.")
+    if dimension_values["hybrid_dim"] != (
+        dimension_values["nframe_root_dim"] + dimension_values["latent_dim"]
+    ):
+        raise ValueError("manifest.dimensions.hybrid_dim is inconsistent.")
+    if dimension_values["text_condition_dim"] != 2048:
+        raise ValueError("manifest.dimensions.text_condition_dim must be 2048.")
+
+    generation = _object(manifest.get("generation"), "manifest.generation")
+    if generation.get("min_frames") != dimension_values["generation_frames"]:
+        raise ValueError("manifest.generation.min_frames is inconsistent.")
+    _nonnegative_integer(
+        generation.get("max_frames"),
+        "manifest.generation.max_frames",
+        positive=True,
+    )
+    if generation.get("denoising_steps") != 10:
+        raise ValueError("manifest.generation.denoising_steps must be 10.")
+    return manifest, files, graph_paths
+
+
+def _validate_fp32_precision(
+    manifest: dict[str, Any],
+    graph_paths: dict[str, Path],
+) -> dict[str, ReferenceGraphContract]:
+    precision = _object(manifest.get("precision"), "reference.precision")
+    if precision.get("format") != "fp32":
+        raise ValueError("Reference pack must declare precision.format='fp32'.")
+    if precision.get("public_io_dtype") != "float32":
+        raise ValueError("Reference precision.public_io_dtype must be 'float32'.")
+    if precision.get("required_webgpu_features") != []:
+        raise ValueError("Reference precision.required_webgpu_features must be empty.")
+    toolchain = _object(precision.get("toolchain"), "reference.precision.toolchain")
+    for package in ("torch", "onnx", "onnxruntime"):
+        if not isinstance(toolchain.get(package), str) or not toolchain[package]:
+            raise ValueError(
+                f"reference.precision.toolchain.{package} must be a non-empty string."
+            )
+    summaries = _object(precision.get("graphs"), "reference.precision.graphs")
+    if set(summaries) != set(_EXPECTED_GRAPH_NAMES):
+        raise ValueError("Reference precision.graphs must contain exactly three graphs.")
+
+    contracts: dict[str, ReferenceGraphContract] = {}
+    total_bytes = 0
+    for graph_name in _EXPECTED_GRAPH_NAMES:
+        graph_path = graph_paths[graph_name]
+        summary = _object(
+            summaries[graph_name],
+            f"reference.precision.graphs.{graph_name}",
+        )
+        if summary.get("model") != manifest["graphs"][graph_name]["model"]:
+            raise ValueError(
+                f"Reference precision graph path differs for {graph_name}."
+            )
+        expected_size = graph_path.stat().st_size
+        if summary.get("size_bytes") != expected_size:
+            raise ValueError(f"Reference precision size differs for {graph_name}.")
+        if summary.get("sha256") != _sha256(graph_path):
+            raise ValueError(f"Reference precision SHA-256 differs for {graph_name}.")
+        model = _load_checked_onnx(graph_path, graph_name)
+        validate_fp32_source_graph(model, graph_name)
+        validate_production_policy_coverage(model, graph_name)
+        contracts[graph_name] = ReferenceGraphContract(
+            initializer_stats=_initializer_precision_stats(model),
+            io_contract=_graph_io_contract(model),
+            node_count=len(model.graph.node),
+        )
+        total_bytes += expected_size
+    if precision.get("onnx_bytes") != total_bytes:
+        raise ValueError("Reference precision.onnx_bytes does not match graph sizes.")
+    return contracts
+
+
+def _validate_mixed_precision(
+    manifest: dict[str, Any],
+    graph_paths: dict[str, Path],
+    reference_contracts: dict[str, ReferenceGraphContract],
+    reference_graph_paths: dict[str, Path],
+) -> None:
+    precision = _object(manifest.get("precision"), "candidate.precision")
+    if precision.get("format") != "mixed-fp16":
+        raise ValueError("Candidate pack must declare precision.format='mixed-fp16'.")
+    if precision.get("policy_version") != MIXED_FP16_POLICY_VERSION:
+        raise ValueError(
+            f"Candidate precision.policy_version must be {MIXED_FP16_POLICY_VERSION}."
+        )
+    if precision.get("public_io_dtype") != "float32":
+        raise ValueError("Candidate precision.public_io_dtype must be 'float32'.")
+    if precision.get("required_webgpu_features") != _REQUIRED_WEBGPU_FEATURES:
+        raise ValueError(
+            "Candidate precision.required_webgpu_features must be ['shader-f16']."
+        )
+    toolchain = _object(precision.get("toolchain"), "candidate.precision.toolchain")
+    for package in ("torch", "onnx", "onnxruntime"):
+        if not isinstance(toolchain.get(package), str) or not toolchain[package]:
+            raise ValueError(
+                f"candidate.precision.toolchain.{package} must be a non-empty string."
+            )
+    summaries = _object(precision.get("graphs"), "candidate.precision.graphs")
+    if set(summaries) != set(_EXPECTED_GRAPH_NAMES):
+        raise ValueError("Candidate precision.graphs must contain exactly three graphs.")
+
+    source_total = 0
+    output_total = 0
+    saved_total = 0
+    for graph_name, policy in MIXED_FP16_POLICIES.items():
+        summary = _object(
+            summaries[graph_name],
+            f"candidate.precision.graphs.{graph_name}",
+        )
+        label = f"candidate.precision.graphs.{graph_name}"
+        if summary.get("schema_version") != 1:
+            raise ValueError(f"{label}.schema_version must be 1.")
+        if summary.get("graph_name") != graph_name:
+            raise ValueError(f"{label}.graph_name must be {graph_name!r}.")
+        if summary.get("policy_id") != policy.policy_id:
+            raise ValueError(f"{label}.policy_id must be {policy.policy_id!r}.")
+        if summary.get("conversion_mode") != policy.conversion_mode:
+            raise ValueError(
+                f"{label}.conversion_mode must be {policy.conversion_mode!r}."
+            )
+
+        source_path = reference_graph_paths[graph_name]
+        output_path = graph_paths[graph_name]
+        source_size = source_path.stat().st_size
+        output_size = output_path.stat().st_size
+        source_hash = _sha256(source_path)
+        output_hash = _sha256(output_path)
+        if summary.get("source_sha256") != source_hash:
+            raise ValueError(f"{label}.source_sha256 differs from the FP32 graph.")
+        if summary.get("output_sha256") != output_hash:
+            raise ValueError(f"{label}.output_sha256 differs from the candidate graph.")
+        if summary.get("source_size_bytes") != source_size:
+            raise ValueError(f"{label}.source_size_bytes differs from the FP32 graph.")
+        if summary.get("output_size_bytes") != output_size:
+            raise ValueError(f"{label}.output_size_bytes differs from the candidate graph.")
+        reduction = source_size - output_size
+        if reduction < 0 or summary.get("size_reduction_bytes") != reduction:
+            raise ValueError(f"{label}.size_reduction_bytes is inconsistent.")
+        _fraction(
+            summary.get("size_reduction_fraction"),
+            f"{label}.size_reduction_fraction",
+            reduction,
+            source_size,
+        )
+
+        source_contract = reference_contracts[graph_name]
+        output_model = _load_checked_onnx(output_path, graph_name)
+        if source_contract.io_contract != _graph_io_contract(output_model):
+            raise ValueError(f"Candidate {graph_name} changed the public ONNX I/O contract.")
+        output_stats = _initializer_precision_stats(output_model)
+        _validate_initializer_summary(
+            summary.get("source_initializers"),
+            source_contract.initializer_stats,
+            f"{label}.source_initializers",
+        )
+        _validate_initializer_summary(
+            summary.get("output_initializers"),
+            output_stats,
+            f"{label}.output_initializers",
+        )
+        if summary.get("source_node_count") != source_contract.node_count:
+            raise ValueError(f"{label}.source_node_count is inconsistent.")
+        if summary.get("output_node_count") != len(output_model.graph.node):
+            raise ValueError(f"{label}.output_node_count is inconsistent.")
+        cast_count = sum(node.op_type == "Cast" for node in output_model.graph.node)
+        if summary.get("output_cast_node_count") != cast_count:
+            raise ValueError(f"{label}.output_cast_node_count is inconsistent.")
+        if summary.get("graph_inputs") != _graph_io_types(output_model.graph.input):
+            raise ValueError(f"{label}.graph_inputs is inconsistent.")
+        if summary.get("graph_outputs") != _graph_io_types(output_model.graph.output):
+            raise ValueError(f"{label}.graph_outputs is inconsistent.")
+
+        if policy.conversion_mode == "fp32-identity":
+            if source_hash != output_hash or reduction != 0:
+                raise ValueError(
+                    f"Candidate {graph_name} must be byte-identical to its FP32 reference."
+                )
+            validate_fp32_source_graph(output_model, graph_name)
+        else:
+            if reduction == 0:
+                raise ValueError(f"Candidate {graph_name} mixed conversion must reduce size.")
+            if output_stats["count_by_dtype"].get("float16", 0) == 0:
+                raise ValueError(
+                    f"Candidate {graph_name} must contain FP16 initializers."
+                )
+            if output_stats["count_by_dtype"].get("bfloat16", 0):
+                raise ValueError(
+                    f"Candidate {graph_name} must not contain BF16 initializers."
+                )
+            validate_no_storage_only_fp16_casts(output_model, graph_name)
+        source_total += source_size
+        output_total += output_size
+        saved_total += reduction
+
+    if precision.get("source_onnx_bytes") != source_total:
+        raise ValueError("Candidate precision.source_onnx_bytes is inconsistent.")
+    if precision.get("mixed_onnx_bytes") != output_total:
+        raise ValueError("Candidate precision.mixed_onnx_bytes is inconsistent.")
+    if precision.get("saved_onnx_bytes") != saved_total:
+        raise ValueError("Candidate precision.saved_onnx_bytes is inconsistent.")
+    _fraction(
+        precision.get("saved_onnx_fraction"),
+        "candidate.precision.saved_onnx_fraction",
+        saved_total,
+        source_total,
+    )
+
+
+def _validate_pack_pair_before_sessions(
+    reference_dir: Path,
+    reference_members: set[str],
+    candidate_dir: Path,
+    candidate_members: set[str],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Validate payloads and precision semantics before ONNX Runtime sees bytes."""
+
+    reference_manifest, _, reference_graph_paths = _validate_common_manifest(
+        reference_dir,
+        reference_members,
+    )
+    candidate_manifest, _, candidate_graph_paths = _validate_common_manifest(
+        candidate_dir,
+        candidate_members,
+    )
+    reference_contracts = _validate_fp32_precision(
+        reference_manifest,
+        reference_graph_paths,
+    )
+    _validate_mixed_precision(
+        candidate_manifest,
+        candidate_graph_paths,
+        reference_contracts,
+        reference_graph_paths,
+    )
+    reference_placeholder = PackRuntime(
+        directory=reference_dir,
+        manifest=reference_manifest,
+        text_encoder=None,
+        denoiser=None,
+        decoder=None,
+    )
+    candidate_placeholder = PackRuntime(
+        directory=candidate_dir,
+        manifest=candidate_manifest,
+        text_encoder=None,
+        denoiser=None,
+        decoder=None,
+    )
+    precision_validation = _validate_compatible_packs(
+        reference_placeholder,
+        candidate_placeholder,
+    )
+    return reference_manifest, candidate_manifest, precision_validation
+
+
 def _without_precision_metadata(manifest: dict[str, Any]) -> dict[str, Any]:
     """Return the semantic model contract shared by FP32 and mixed packs."""
     contract = copy.deepcopy(manifest)
     for key in ("files", "precision", "verification"):
         contract.pop(key, None)
-    runtime = contract.get("runtime")
-    if isinstance(runtime, dict):
-        runtime.pop("required_webgpu_features", None)
     return contract
 
 
@@ -245,6 +1021,12 @@ def _tokenizer_payloads(runtime: PackRuntime) -> dict[str, str]:
 
 def _validate_compatible_packs(reference: PackRuntime, candidate: PackRuntime) -> dict[str, Any]:
     """Reject comparisons that change anything except ONNX precision."""
+    reference_precision = reference.manifest.get("precision")
+    if (
+        not isinstance(reference_precision, dict)
+        or reference_precision.get("format") != "fp32"
+    ):
+        raise ValueError("Reference pack must declare precision.format='fp32'.")
     difference = _first_difference(
         _without_precision_metadata(reference.manifest),
         _without_precision_metadata(candidate.manifest),
@@ -326,22 +1108,119 @@ def _validate_compatible_packs(reference: PackRuntime, candidate: PackRuntime) -
 def _contract_fingerprint(manifest: dict[str, Any]) -> str:
     encoded = json.dumps(
         _without_precision_metadata(manifest),
+        allow_nan=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _select_prompts(path: Path, split: str, count: int) -> list[str]:
+def _decode_prompt_records(path: Path, encoded: bytes) -> list[dict[str, Any]]:
+    try:
+        text = encoded.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"{path}: prompt manifest is not valid UTF-8.") from error
+    records: list[dict[str, Any]] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            raise ValueError(f"{path}:{line_number}: blank JSONL row.")
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"{path}:{line_number}: invalid JSON.") from error
+        if not isinstance(record, dict):
+            raise TypeError(f"{path}:{line_number}: expected a JSON object.")
+        if not isinstance(record.get("text"), str) or not record["text"]:
+            raise ValueError(f"{path}:{line_number}: text must be a non-empty string.")
+        records.append(record)
+    if not records:
+        raise ValueError(f"{path}: prompt manifest is empty.")
+    return records
+
+
+def _select_prompts(
+    path: Path,
+    split: str,
+    count: int,
+    *,
+    encoded: bytes | None = None,
+) -> list[str]:
     if count <= 0:
         raise ValueError("--count must be positive.")
-    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if encoded is None:
+        encoded, _ = _read_stable_bytes(path)
+    records = _decode_prompt_records(path, encoded)
     eligible = [str(record["text"]) for record in records if split == "all" or record.get("split") == split]
     unique = list(dict.fromkeys(eligible))
     if len(unique) < count:
         raise ValueError(f"Only {len(unique)} unique prompts are available for split {split!r}; {count} requested.")
     indices = np.linspace(0, len(unique) - 1, count, dtype=np.int64)
     return [unique[int(index)] for index in indices]
+
+
+def _prompt_manifest_identity(
+    path: Path,
+    metadata_path: Path | None,
+    *,
+    manifest_bytes: bytes | None = None,
+    manifest_identity: InputFileIdentity | None = None,
+    metadata_bytes: bytes | None = None,
+) -> dict[str, Any]:
+    """Return portable prompt-corpus identity, validating Timeline provenance."""
+
+    if manifest_bytes is None:
+        manifest_bytes, captured_identity = _read_stable_bytes(path)
+        manifest_identity = captured_identity
+    elif manifest_identity is None:
+        manifest_identity = InputFileIdentity(
+            filename=path.name,
+            size_bytes=len(manifest_bytes),
+            sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+            stat_signature=(0, 0, len(manifest_bytes), 0, 0),
+        )
+    manifest_sha256 = manifest_identity.sha256
+    identity: dict[str, Any] = {
+        "filename": manifest_identity.filename,
+        "size_bytes": manifest_identity.size_bytes,
+        "sha256": manifest_sha256,
+    }
+    if metadata_path is None:
+        return identity
+
+    if metadata_bytes is None:
+        metadata_bytes, _ = _read_stable_bytes(metadata_path)
+    encoded_metadata = metadata_bytes
+    try:
+        provenance = json.loads(encoded_metadata)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{metadata_path}: invalid prompt provenance JSON.") from error
+
+    records = _decode_prompt_records(path, manifest_bytes)
+    split_counts = Counter(record.get("split") for record in records)
+    expected_split_counts = {
+        split: split_counts.get(split, 0) for split in ("train", "val", "test")
+    }
+    validate_prompt_provenance(
+        provenance,
+        expected_manifest_sha256=manifest_sha256,
+        expected_manifest_filename=path.name,
+        expected_count=len(records),
+        expected_split_counts=expected_split_counts,
+    )
+    metadata_sha256 = hashlib.sha256(encoded_metadata).hexdigest()
+    canonical_sha256 = prompt_provenance_sha256(provenance)
+    if metadata_sha256 != canonical_sha256:
+        raise ValueError(
+            f"{metadata_path}: prompt provenance JSON is not canonically encoded "
+            f"(canonical SHA-256 {canonical_sha256}, actual {metadata_sha256})."
+        )
+    identity["provenance_sidecar"] = {
+        "filename": metadata_path.name,
+        "size_bytes": len(encoded_metadata),
+        "sha256": metadata_sha256,
+        "content": provenance,
+    }
+    return identity
 
 
 def _encode(runtime: PackRuntime, tokenizer, prompt: str) -> np.ndarray:
@@ -353,7 +1232,9 @@ def _encode(runtime: PackRuntime, tokenizer, prompt: str) -> np.ndarray:
     )
     encoded.setdefault("token_type_ids", np.zeros_like(encoded["input_ids"]))
     feeds = {name: encoded[name].astype(np.int64) for name in ("input_ids", "attention_mask", "token_type_ids")}
-    return runtime.text_encoder.run(None, feeds)[0].astype(np.float32)
+    conditions = runtime.text_encoder.run(None, feeds)[0].astype(np.float32)
+    _require_finite_array(conditions, "text encoder output")
+    return conditions
 
 
 def _parse_initial_translation(value: str) -> np.ndarray:
@@ -505,6 +1386,7 @@ def _denoise(
     for step in diffusion["timesteps"]:
         timestep[0] = step
         prediction = runtime.denoiser.run(None, feeds)[0]
+        _require_finite_array(prediction, f"denoiser output at timestep {step}")
         alpha = float(diffusion["alphas_cumprod"][step])
         alpha_previous = float(diffusion["alphas_cumprod_prev"][step])
         sqrt_alpha = math.sqrt(alpha)
@@ -519,6 +1401,7 @@ def _denoise(
         else:
             epsilon = (current / sqrt_alpha - predicted) / sqrt_reciprocal_minus_one
         sample[:, generation_slice] = (predicted * sqrt_previous + epsilon * sqrt_one_minus_previous).astype(np.float32)
+        _require_finite_array(sample[:, generation_slice], f"DDIM state at timestep {step}")
     return sample
 
 
@@ -588,7 +1471,13 @@ def _decode(
             "global_translation": global_translation[None],
         },
     )
-    return {output.name: value for output, value in zip(runtime.decoder.get_outputs(), outputs)}
+    result = {
+        output.name: value
+        for output, value in zip(runtime.decoder.get_outputs(), outputs)
+    }
+    for name, value in result.items():
+        _require_finite_array(value, f"decoder output {name}")
+    return result
 
 
 def _slice_generated_outputs(
@@ -707,6 +1596,7 @@ def _rollout(
 
 def _summary(values: list[float]) -> dict[str, float]:
     array = np.asarray(values, dtype=np.float64)
+    _require_finite_array(array, "metric summary")
     return {
         "mean": float(array.mean()),
         "p95": float(np.quantile(array, 0.95)),
@@ -725,6 +1615,9 @@ def _case_motion_metrics(
     candidate: dict[str, np.ndarray],
     fps: int,
 ) -> dict[str, float]:
+    for runtime_name, outputs in (("reference", reference), ("candidate", candidate)):
+        for output_name, value in outputs.items():
+            _require_finite_array(value, f"{runtime_name} motion output {output_name}")
     motion_ref = reference["normalized_motion"].astype(np.float32)
     motion_new = candidate["normalized_motion"].astype(np.float32)
     joints_ref = reference["posed_joints"].astype(np.float32)
@@ -828,8 +1721,165 @@ def _worst_cases(
     return result
 
 
+_PUBLIC_AGGREGATE_FIELDS = (
+    "method",
+    "runtime_environment",
+    "prompt_manifest",
+    "packs",
+    "contract_validation",
+    "text_conditions",
+    "motion_fidelity",
+    "motion_fidelity_by_window",
+    "continuation_coverage",
+    "cpu_timing",
+)
+_PROMPT_TEXT_KEYS = frozenset(("prompt", "prompts", "prompt_text", "prompt_texts"))
+
+
+def _require_finite_array(value: np.ndarray, label: str) -> None:
+    array = np.asarray(value)
+    if np.issubdtype(array.dtype, np.number) and not np.isfinite(array).all():
+        raise ValueError(f"{label} contains non-finite values.")
+
+
+def _validate_json_finite(value: Any, path: str = "report") -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _validate_json_finite(item, f"{path}.{key}")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_json_finite(item, f"{path}[{index}]")
+        return
+    if isinstance(value, (float, np.floating)) and not math.isfinite(float(value)):
+        raise ValueError(f"{path} must be finite.")
+
+
+def _validate_public_report(value: Any, path: str = "report") -> None:
+    """Fail closed if a public aggregate contains prompt text or a local path."""
+
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in _PROMPT_TEXT_KEYS:
+                raise ValueError(f"{path}.{key} must not contain prompt text.")
+            _validate_public_report(item, f"{path}.{key}")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_public_report(item, f"{path}[{index}]")
+        return
+    if not isinstance(value, str):
+        return
+    if (
+        Path(value).is_absolute()
+        or PureWindowsPath(value).is_absolute()
+        or value.startswith(("file://", "~/", "~\\"))
+    ):
+        raise ValueError(f"{path} must not contain an absolute local path.")
+
+
+def _build_public_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Build the Git-tracked aggregate by explicit allowlist."""
+
+    missing = [
+        field
+        for field in ("schema_version", *_PUBLIC_AGGREGATE_FIELDS)
+        if field not in report
+    ]
+    if missing:
+        raise ValueError(f"Detailed report is missing public aggregate fields: {missing}.")
+    prompt_manifest = report["prompt_manifest"]
+    if (
+        not isinstance(prompt_manifest, dict)
+        or not isinstance(prompt_manifest.get("provenance_sidecar"), dict)
+    ):
+        raise TypeError(
+            "A public report requires a validated prompt-provenance sidecar."
+        )
+    public_report = {
+        "format": "ardy-browser-fp16-aggregate",
+        "format_version": 1,
+        "source_report_schema_version": report["schema_version"],
+        **{
+            field: copy.deepcopy(report[field])
+            for field in _PUBLIC_AGGREGATE_FIELDS
+        },
+    }
+    _validate_json_finite(public_report)
+    _validate_public_report(public_report)
+    return public_report
+
+
+def _write_json_report(path: Path, report: dict[str, Any]) -> None:
+    _validate_json_finite(report)
+    encoded = json.dumps(
+        report,
+        allow_nan=False,
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(encoded, encoding="utf-8")
+
+
+def _write_reports(
+    report: dict[str, Any],
+    *,
+    detailed_output: Path,
+    public_output: Path | None,
+) -> dict[str, Any]:
+    """Write local diagnostics and, when requested, a Git-safe aggregate."""
+
+    if (
+        public_output is not None
+        and detailed_output.resolve() == public_output.resolve()
+    ):
+        raise ValueError("--output and --public-output must be different files.")
+    public_report = (
+        _build_public_report(report) if public_output is not None else None
+    )
+    _write_json_report(detailed_output, report)
+    if public_output is None or public_report is None:
+        return report
+    _write_json_report(public_output, public_report)
+    return public_report
+
+
+def _runtime_environment() -> dict[str, Any]:
+    packages: dict[str, str] = {}
+    for package in ("numpy", "onnx", "onnxruntime", "transformers"):
+        try:
+            packages[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            packages[package] = "not-installed"
+    return {
+        "python": {
+            "implementation": platform.python_implementation(),
+            "version": platform.python_version(),
+        },
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "processor": platform.processor(),
+        },
+        "logical_cpu_count": os.cpu_count(),
+        "packages": packages,
+        "onnxruntime": {
+            "execution_provider": "CPUExecutionProvider",
+            "graph_optimizations": "disabled",
+            "intra_op_num_threads": 8,
+        },
+    }
+
+
 def main() -> None:
     args = _parse_args()
+    if (
+        args.public_output is not None
+        and args.output.resolve() == args.public_output.resolve()
+    ):
+        raise ValueError("--output and --public-output must be different files.")
     seeds = [int(value.strip()) for value in args.seeds.split(",") if value.strip()]
     if not seeds:
         raise ValueError("--seeds must contain at least one integer.")
@@ -841,7 +1891,59 @@ def main() -> None:
     if not math.isfinite(args.initial_heading):
         raise ValueError("--initial-heading must be finite.")
     initial_heading = math.atan2(math.sin(args.initial_heading), math.cos(args.initial_heading))
-    prompts = _select_prompts(args.prompts, args.split, args.count)
+    prompt_bytes, prompt_file_identity = _read_stable_bytes(args.prompts)
+    prompts = _select_prompts(
+        args.prompts,
+        args.split,
+        args.count,
+        encoded=prompt_bytes,
+    )
+    prompt_metadata_path = args.prompt_metadata
+    if prompt_metadata_path is None:
+        inferred_metadata_path = args.prompts.with_suffix(".metadata.json")
+        if inferred_metadata_path.is_file():
+            prompt_metadata_path = inferred_metadata_path
+    if args.public_output is not None and prompt_metadata_path is None:
+        raise ValueError(
+            "--public-output requires --prompt-metadata or a sibling "
+            "PROMPTS.metadata.json provenance sidecar."
+        )
+    prompt_metadata_bytes = None
+    if prompt_metadata_path is not None:
+        prompt_metadata_bytes, _ = _read_stable_bytes(prompt_metadata_path)
+    prompt_manifest = _prompt_manifest_identity(
+        args.prompts,
+        prompt_metadata_path,
+        manifest_bytes=prompt_bytes,
+        manifest_identity=prompt_file_identity,
+        metadata_bytes=prompt_metadata_bytes,
+    )
+    if args.reference_pack.resolve() == args.candidate_pack.resolve():
+        raise ValueError("--reference-pack and --candidate-pack must be different files.")
+    protected_inputs = {
+        args.prompts.resolve(),
+        args.reference_pack.resolve(),
+        args.candidate_pack.resolve(),
+        *(
+            (prompt_metadata_path.resolve(),)
+            if prompt_metadata_path is not None
+            else ()
+        ),
+    }
+    for option, output_path in (
+        ("--output", args.output),
+        ("--public-output", args.public_output),
+    ):
+        if output_path is not None and output_path.resolve() in protected_inputs:
+            raise ValueError(f"{option} must not overwrite an evaluator input.")
+    for option, path in (
+        ("--reference-pack", args.reference_pack),
+        ("--candidate-pack", args.candidate_pack),
+    ):
+        if not path.name.lower().endswith(".tar.gz"):
+            raise ValueError(f"{option} must point to a .tar.gz browser pack.")
+    reference_pack_identity = _capture_file_identity(args.reference_pack)
+    candidate_pack_identity = _capture_file_identity(args.candidate_pack)
 
     try:
         from transformers import AutoTokenizer
@@ -854,11 +1956,28 @@ def main() -> None:
         candidate_dir = temporary_dir / "candidate"
         reference_dir.mkdir()
         candidate_dir.mkdir()
-        _extract_pack(args.reference_pack, reference_dir)
-        _extract_pack(args.candidate_pack, candidate_dir)
-        reference = _load_runtime(reference_dir)
-        candidate = _load_runtime(candidate_dir)
-        precision_validation = _validate_compatible_packs(reference, candidate)
+        reference_members = _extract_pack(
+            args.reference_pack,
+            reference_dir,
+            expected_identity=reference_pack_identity,
+        )
+        candidate_members = _extract_pack(
+            args.candidate_pack,
+            candidate_dir,
+            expected_identity=candidate_pack_identity,
+        )
+        (
+            reference_manifest,
+            candidate_manifest,
+            precision_validation,
+        ) = _validate_pack_pair_before_sessions(
+            reference_dir,
+            reference_members,
+            candidate_dir,
+            candidate_members,
+        )
+        reference = _create_runtime(reference_dir, reference_manifest)
+        candidate = _create_runtime(candidate_dir, candidate_manifest)
         dimensions = reference.manifest["dimensions"]
         accumulated_frames = args.windows * dimensions["generation_frames"]
         if accumulated_frames > reference.manifest["generation"]["max_frames"]:
@@ -1004,6 +2123,10 @@ def main() -> None:
                 "prompt_count": len(prompts),
                 "prompt_split": args.split,
                 "prompt_sha256": prompt_digest,
+                "prompt_selection": (
+                    "first-occurrence text deduplication in manifest order, "
+                    "then evenly spaced numpy.linspace integer indices"
+                ),
                 "seeds": seeds,
                 "case_count": len(prompts) * len(seeds),
                 "cfg_weight": args.cfg_weight,
@@ -1013,19 +2136,28 @@ def main() -> None:
                 "initial_translation": initial_translation.astype(float).tolist(),
                 "initial_heading": initial_heading,
             },
+            "runtime_environment": _runtime_environment(),
+            "prompt_manifest": prompt_manifest,
             "packs": {
                 "reference": {
-                    "file": args.reference_pack.name,
-                    "size_bytes": args.reference_pack.stat().st_size,
-                    "sha256": _sha256(args.reference_pack),
+                    "file": reference_pack_identity.filename,
+                    "size_bytes": reference_pack_identity.size_bytes,
+                    "sha256": reference_pack_identity.sha256,
                 },
                 "candidate": {
-                    "file": args.candidate_pack.name,
-                    "size_bytes": args.candidate_pack.stat().st_size,
-                    "sha256": _sha256(args.candidate_pack),
+                    "file": candidate_pack_identity.filename,
+                    "size_bytes": candidate_pack_identity.size_bytes,
+                    "sha256": candidate_pack_identity.sha256,
                 },
-                "saved_bytes": args.reference_pack.stat().st_size - args.candidate_pack.stat().st_size,
-                "saved_fraction": 1 - args.candidate_pack.stat().st_size / args.reference_pack.stat().st_size,
+                "saved_bytes": (
+                    reference_pack_identity.size_bytes
+                    - candidate_pack_identity.size_bytes
+                ),
+                "saved_fraction": (
+                    1
+                    - candidate_pack_identity.size_bytes
+                    / reference_pack_identity.size_bytes
+                ),
             },
             "contract_validation": {
                 "non_precision_contract_equal": True,
@@ -1076,12 +2208,19 @@ def main() -> None:
                 ),
             },
         }
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(
-            json.dumps(report, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+        printed_report = _write_reports(
+            report,
+            detailed_output=args.output,
+            public_output=args.public_output,
         )
-        print(json.dumps(report, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                printed_report,
+                allow_nan=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
 
 
 if __name__ == "__main__":

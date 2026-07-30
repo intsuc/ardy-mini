@@ -37,6 +37,15 @@ def parse_args() -> argparse.Namespace:
         help="Destination .tar.gz model-pack file (kept under ignored artifacts/ by default).",
     )
     parser.add_argument(
+        "--fp32-reference-output",
+        type=Path,
+        default=None,
+        help=(
+            "Optional destination .tar.gz for the matching original-FP32 "
+            "reference pack used by scripts/evaluate_browser_fp16.py."
+        ),
+    )
+    parser.add_argument(
         "--model",
         default="core",
         help="ARDY model key or full model name; this MiniLM browser artifact supports Core40 only.",
@@ -75,6 +84,7 @@ def main() -> None:
     archive_path = export_browser_model_pack(
         BrowserExportConfig(
             output_path=args.output,
+            fp32_reference_output_path=args.fp32_reference_output,
             minilm_artifact=args.minilm_artifact,
             checkpoints_dir=args.checkpoints_dir,
             model=args.model,
@@ -85,6 +95,8 @@ def main() -> None:
         )
     )
     print(f"Browser model pack exported: {archive_path}")
+    if args.fp32_reference_output is not None:
+        print(f"FP32 reference model pack exported: {args.fp32_reference_output}")
 
 
 if __name__ == "__main__":

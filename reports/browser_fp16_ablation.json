@@ -1,8 +1,8 @@
 {
   "continuation_coverage": {
-    "decoded_world_translation_norm_max": 13.47151572571169,
-    "first_heading_abs_max": 3.1391735802242393,
-    "first_heading_abs_min": 0.0023743816457473406,
+    "decoded_world_translation_norm_max": 19.901873486912873,
+    "first_heading_abs_max": 2.8601129628888535,
+    "first_heading_abs_min": 0.004064200935457434,
     "generation_token_offsets_observed": [
       0,
       10
@@ -17,7 +17,7 @@
     "candidate_graph_sha256": {
       "decoder": "37085139b5572ed0536e9e231c1e7af023d7cd98e536495708258fa1642e9b1d",
       "denoiser": "7fd49903ec65c0831e2fa692081fd64d8818c6d1f62320d2f2b5e71467a3ca64",
-      "text_encoder": "e378788c22ab6175a8e8e453bab3ad0c2062ee9feacce44468a1147c7ae80648"
+      "text_encoder": "c9a729e5490e58e77936d96c42d2bcf9a84e17717f633d80d7c2f52bbf66d552"
     },
     "candidate_policy_version": 3,
     "candidate_precision_format": "mixed-fp16",
@@ -36,26 +36,28 @@
       "text_encoder"
     ],
     "non_precision_contract_equal": true,
-    "non_precision_contract_sha256": "de9d4af1716738279a49fd601d1100e5854b8979d551a20c5f29f51bb02bb6b0",
+    "non_precision_contract_sha256": "7d74f21dffa4449b8a0ab4d9c822559313f06cb575c4cca09d6c087143c11c08",
     "reference_graph_sha256": {
       "decoder": "1fcd909b2997002edca559ba016ab3accc5b2d5e5ba0c7e85a6ab54d2100a80f",
       "denoiser": "7fd49903ec65c0831e2fa692081fd64d8818c6d1f62320d2f2b5e71467a3ca64",
-      "text_encoder": "e378788c22ab6175a8e8e453bab3ad0c2062ee9feacce44468a1147c7ae80648"
+      "text_encoder": "c9a729e5490e58e77936d96c42d2bcf9a84e17717f633d80d7c2f52bbf66d552"
     },
     "tokenizer_payload_sha256": {
       "tokenizer/tokenizer.json": "2fc687b11de0bc1b3d8348f92e3b49ef1089a621506c7661fbf3248fcd54947e",
-      "tokenizer/tokenizer_config.json": "872b6936be955bc3aea75ed599264d865626d68feede7e58b01e378e6332bd74"
+      "tokenizer/tokenizer_config.json": "4b91f63e0ec01ae5112b4fab0027b301a38d94f6b1fd001abf2236390168b553"
     },
     "tokenizer_payloads_equal": true
   },
   "cpu_timing": {
-    "candidate_mean_seconds_per_case": 1.3131881899989821,
-    "candidate_total_seconds": 252.13213247980457,
+    "candidate_mean_seconds_per_case": 1.3178601198693893,
+    "candidate_total_seconds": 253.02914301492274,
     "note": "CPU FP16 timing is diagnostic only; the deployment backend is WebGPU. Each case includes every consecutive window.",
-    "reference_mean_seconds_per_case": 1.2577322693202102,
-    "reference_total_seconds": 241.48459570948035,
+    "reference_mean_seconds_per_case": 1.2888454483181704,
+    "reference_total_seconds": 247.4583260770887,
     "windows_per_case": 5
   },
+  "format": "ardy-browser-fp16-aggregate",
+  "format_version": 1,
   "method": {
     "candidate": "mixed-FP16 ONNX Runtime CPU with graph optimizations disabled",
     "case_count": 192,
@@ -69,7 +71,8 @@
     ],
     "noise_generator": "browser PortableRandom (Mulberry32 + Marsaglia polar)",
     "prompt_count": 64,
-    "prompt_sha256": "d5236372be39787d93f5bdf3e1129372630538f24e31873bd43bce7a90861258",
+    "prompt_selection": "first-occurrence text deduplication in manifest order, then evenly spaced numpy.linspace integer indices",
+    "prompt_sha256": "be55085c05d4b4c1a228edf5bea501ee77a33420a3d886b6e8ea0b737ad963ef",
     "prompt_split": "test",
     "reference": "FP32 ONNX Runtime CPU with graph optimizations disabled",
     "rollout": "5 consecutive browser windows, 10-step deterministic DDIM per window, 40-frame history, recenter, FSQ requantize, heading, and accumulated world translation",
@@ -83,45 +86,45 @@
   "motion_fidelity": {
     "contact_agreement": {
       "max": 1.0,
-      "mean": 0.99994140625,
+      "mean": 0.99998046875,
       "p95": 1.0
     },
-    "contact_f1": 0.9999618108448715,
-    "contact_iou": 0.9999236246064546,
+    "contact_f1": 0.9999878455411367,
+    "contact_iou": 0.9999756913777317,
     "global_rotation_error_degrees": {
-      "max": 0.10633338242769241,
-      "mean": 0.0793205366935581,
-      "p95": 0.09576009325683113
+      "max": 0.10194642096757889,
+      "mean": 0.07647083381501336,
+      "p95": 0.09021148458123206
     },
     "heading_error_degrees": {
-      "max": 0.009634108282625675,
-      "mean": 0.006927070319458532,
-      "p95": 0.008295179344713688
+      "max": 0.00926036573946476,
+      "mean": 0.006903713561769109,
+      "p95": 0.008434763876721263
     },
     "joint_velocity_error_mps": {
-      "max": 0.004994866321794689,
-      "mean": 0.003285620153595422,
-      "p95": 0.004245545671437866
+      "max": 0.005097570829093456,
+      "mean": 0.0031330614153072625,
+      "p95": 0.003811004789895378
     },
     "local_rotation_error_degrees": {
-      "max": 0.10311786085367203,
-      "mean": 0.07073767229060952,
-      "p95": 0.08359995521605015
+      "max": 0.09130936861038208,
+      "mean": 0.06878133238448451,
+      "p95": 0.08178812451660632
     },
     "mpjpe_m": {
-      "max": 0.0004645706503652036,
-      "mean": 0.0002783119482501206,
-      "p95": 0.00035143343848176295
+      "max": 0.00040933865238912404,
+      "mean": 0.00026524110944592394,
+      "p95": 0.0003497354977298528
     },
     "normalized_motion_cosine": {
-      "max": 0.9999993656706898,
-      "mean": 0.9999955214179544,
-      "p95": 0.9999974631255135
+      "max": 0.999998631978834,
+      "mean": 0.9999957261172812,
+      "p95": 0.9999975190029062
     },
     "normalized_motion_rmse": {
-      "max": 0.007762995082885027,
-      "mean": 0.0028462169830163475,
-      "p95": 0.0040114534785971045
+      "max": 0.0058677298948168755,
+      "mean": 0.0026446143092471175,
+      "p95": 0.0033932944410480555
     },
     "root_ade_m": {
       "max": 0.0,
@@ -129,9 +132,9 @@
       "p95": 0.0
     },
     "root_aligned_mpjpe_m": {
-      "max": 0.00046457070857286453,
-      "mean": 0.00027831194627954875,
-      "p95": 0.00035143348650308316
+      "max": 0.00040933865238912404,
+      "mean": 0.0002652411005783506,
+      "p95": 0.00034973549481946974
     },
     "root_fde_m": {
       "max": 0.0,
@@ -146,45 +149,45 @@
       "motion_fidelity": {
         "contact_agreement": {
           "max": 1.0,
-          "mean": 0.99990234375,
+          "mean": 0.9999674479166667,
           "p95": 1.0
         },
-        "contact_f1": 0.9999348831151917,
-        "contact_iou": 0.9998697747102487,
+        "contact_f1": 0.9999793503624012,
+        "contact_iou": 0.9999587015775997,
         "global_rotation_error_degrees": {
-          "max": 0.22089220583438873,
-          "mean": 0.08430679115311553,
-          "p95": 0.10707916505634785
+          "max": 0.1542610079050064,
+          "mean": 0.08115143185326208,
+          "p95": 0.09792995154857634
         },
         "heading_error_degrees": {
-          "max": 0.014787049032747746,
-          "mean": 0.006962207802037786,
-          "p95": 0.009560265485197304
+          "max": 0.011627002619206905,
+          "mean": 0.00684818510368738,
+          "p95": 0.009582063695415855
         },
         "joint_velocity_error_mps": {
-          "max": 0.012825013836845756,
-          "mean": 0.003457813329532655,
-          "p95": 0.004546912285150028
+          "max": 0.011050221510231495,
+          "mean": 0.0032832376238426755,
+          "p95": 0.004385076943435705
         },
         "local_rotation_error_degrees": {
-          "max": 0.10828008502721786,
-          "mean": 0.07505845241636659,
-          "p95": 0.09202131181955335
+          "max": 0.13925813138484955,
+          "mean": 0.07251732908965398,
+          "p95": 0.08770628459751606
         },
         "mpjpe_m": {
-          "max": 0.0006709671579301357,
-          "mean": 0.0002992407344966826,
-          "p95": 0.0003883922559907658
+          "max": 0.0006877752603031695,
+          "mean": 0.00028308230609278934,
+          "p95": 0.000383828738995362
         },
         "normalized_motion_cosine": {
-          "max": 0.9999994833727835,
-          "mean": 0.99999491368414,
-          "p95": 0.9999978631830293
+          "max": 0.9999989755044695,
+          "mean": 0.9999955959958736,
+          "p95": 0.9999976699565432
         },
         "normalized_motion_rmse": {
-          "max": 0.016719764098525047,
-          "mean": 0.0030284183121693786,
-          "p95": 0.0043522547697648385
+          "max": 0.011462797410786152,
+          "mean": 0.002799639324318074,
+          "p95": 0.0036801897920668114
         },
         "root_ade_m": {
           "max": 0.0,
@@ -192,9 +195,9 @@
           "p95": 0.0
         },
         "root_aligned_mpjpe_m": {
-          "max": 0.0006709670997224748,
-          "mean": 0.0002992407169131184,
-          "p95": 0.00038839190528960877
+          "max": 0.0006877753185108304,
+          "mean": 0.0002830822916166653,
+          "p95": 0.00038382867351174346
         },
         "root_fde_m": {
           "max": 0.0,
@@ -213,42 +216,42 @@
           "mean": 0.9999674479166667,
           "p95": 1.0
         },
-        "contact_f1": 0.9999788489604264,
-        "contact_iou": 0.9999576988155668,
+        "contact_f1": 0.9999801921362781,
+        "contact_iou": 0.9999603850572436,
         "global_rotation_error_degrees": {
-          "max": 0.13706396520137787,
-          "mean": 0.07906406700688724,
-          "p95": 0.09694453105330465
+          "max": 0.11084937304258347,
+          "mean": 0.0757197640875044,
+          "p95": 0.09547545947134492
         },
         "heading_error_degrees": {
-          "max": 0.011482329107820988,
-          "mean": 0.007055350721202558,
-          "p95": 0.009866137057542801
+          "max": 0.014484826475381851,
+          "mean": 0.006939516270601113,
+          "p95": 0.010117053054273127
         },
         "joint_velocity_error_mps": {
-          "max": 0.006109386449679732,
-          "mean": 0.0032645988017065974,
-          "p95": 0.004298658794141373
+          "max": 0.004555481136776507,
+          "mean": 0.003044415858160695,
+          "p95": 0.004036348516819999
         },
         "local_rotation_error_degrees": {
-          "max": 0.11955346167087555,
-          "mean": 0.07069319343039145,
-          "p95": 0.0842582233250141
+          "max": 0.09590752422809601,
+          "mean": 0.06787548580905423,
+          "p95": 0.08357225395739079
         },
         "mpjpe_m": {
-          "max": 0.000547628675121814,
-          "mean": 0.000279229533968343,
-          "p95": 0.0003834437215118669
+          "max": 0.00046821762225590646,
+          "mean": 0.00026081187509892817,
+          "p95": 0.0003520364392898045
         },
         "normalized_motion_cosine": {
-          "max": 0.9999992994538718,
-          "mean": 0.9999957508682845,
-          "p95": 0.9999975754914062
+          "max": 0.9999986234208106,
+          "mean": 0.9999957953630636,
+          "p95": 0.9999976744341992
         },
         "normalized_motion_rmse": {
-          "max": 0.008283191360533237,
-          "mean": 0.0028132162745653964,
-          "p95": 0.00346180071355775
+          "max": 0.004383150488138199,
+          "mean": 0.0025761706213719058,
+          "p95": 0.0032808053190819917
         },
         "root_ade_m": {
           "max": 0.0,
@@ -256,9 +259,9 @@
           "p95": 0.0
         },
         "root_aligned_mpjpe_m": {
-          "max": 0.0005476287333294749,
-          "mean": 0.0002792295467012688,
-          "p95": 0.00038344348431564864
+          "max": 0.00046821770956739783,
+          "mean": 0.0002608118744925984,
+          "p95": 0.0003520363214192912
         },
         "root_fde_m": {
           "max": 0.0,
@@ -274,45 +277,45 @@
       "motion_fidelity": {
         "contact_agreement": {
           "max": 1.0,
-          "mean": 0.9999348958333334,
+          "mean": 1.0,
           "p95": 1.0
         },
-        "contact_f1": 0.9999588324893993,
-        "contact_iou": 0.9999176683681871,
+        "contact_f1": 1.0,
+        "contact_iou": 1.0,
         "global_rotation_error_degrees": {
-          "max": 0.12123407423496246,
-          "mean": 0.07454391871578991,
-          "p95": 0.0942016791552305
+          "max": 0.10496819019317627,
+          "mean": 0.07381617318606004,
+          "p95": 0.09214951433241367
         },
         "heading_error_degrees": {
-          "max": 0.012953488156199455,
-          "mean": 0.00685395621136801,
-          "p95": 0.010051052551716563
+          "max": 0.012519109062850475,
+          "mean": 0.006783440334402258,
+          "p95": 0.009841464878991246
         },
         "joint_velocity_error_mps": {
-          "max": 0.005746542010456324,
-          "mean": 0.0029652431726390205,
-          "p95": 0.004224736214382574
+          "max": 0.004801172763109207,
+          "mean": 0.0029651702508696567,
+          "p95": 0.003973252794821746
         },
         "local_rotation_error_degrees": {
-          "max": 0.1030285432934761,
-          "mean": 0.06583464611321688,
-          "p95": 0.0811836838722229
+          "max": 0.09078813344240189,
+          "mean": 0.06634670447480555,
+          "p95": 0.08243084140121935
         },
         "mpjpe_m": {
-          "max": 0.000494276755489409,
-          "mean": 0.0002534446076272919,
-          "p95": 0.0003468915005214512
+          "max": 0.00038963230326771736,
+          "mean": 0.0002578581997264943,
+          "p95": 0.0003529940586304292
         },
         "normalized_motion_cosine": {
-          "max": 0.9999995555769668,
-          "mean": 0.9999956876492408,
-          "p95": 0.9999976313770822
+          "max": 0.9999986625956077,
+          "mean": 0.9999958393762132,
+          "p95": 0.9999976617489793
         },
         "normalized_motion_rmse": {
-          "max": 0.006996145471930504,
-          "mean": 0.0026064822959597223,
-          "p95": 0.0033925716183148325
+          "max": 0.004302056040614843,
+          "mean": 0.002542274758525309,
+          "p95": 0.0035095547325909135
         },
         "root_ade_m": {
           "max": 0.0,
@@ -320,9 +323,9 @@
           "p95": 0.0
         },
         "root_aligned_mpjpe_m": {
-          "max": 0.0004942768136970699,
-          "mean": 0.0002534445998207957,
-          "p95": 0.0003468914990662597
+          "max": 0.00038963239057920873,
+          "mean": 0.0002578581943453173,
+          "p95": 0.00035299402952659875
         },
         "root_fde_m": {
           "max": 0.0,
@@ -338,45 +341,45 @@
       "motion_fidelity": {
         "contact_agreement": {
           "max": 1.0,
-          "mean": 1.0,
+          "mean": 0.9999674479166667,
           "p95": 1.0
         },
-        "contact_f1": 1.0,
-        "contact_iou": 1.0,
+        "contact_f1": 0.9999794758122448,
+        "contact_iou": 0.9999589524669568,
         "global_rotation_error_degrees": {
-          "max": 0.13086974620819092,
-          "mean": 0.08037874826307718,
-          "p95": 0.10489813536405562
+          "max": 0.10823715478181839,
+          "mean": 0.07608008959020178,
+          "p95": 0.09582429341971872
         },
         "heading_error_degrees": {
-          "max": 0.011240286752581596,
-          "mean": 0.006751634683193212,
-          "p95": 0.009274022700265049
+          "max": 0.01221688836812973,
+          "mean": 0.0068974279044293025,
+          "p95": 0.00953664625994861
         },
         "joint_velocity_error_mps": {
-          "max": 0.005452465848065913,
-          "mean": 0.0032821617999919304,
-          "p95": 0.004517529639997519
+          "max": 0.004709368804469705,
+          "mean": 0.0030876657365297433,
+          "p95": 0.0040596173057565466
         },
         "local_rotation_error_degrees": {
-          "max": 0.10512641817331314,
-          "mean": 0.07147477305261418,
-          "p95": 0.0868205662816763
+          "max": 0.09616772830486298,
+          "mean": 0.06883417316324388,
+          "p95": 0.08628824278712273
         },
         "mpjpe_m": {
-          "max": 0.000451371306553483,
-          "mean": 0.0002808602693373056,
-          "p95": 0.0003602677097660489
+          "max": 0.00043023788020946085,
+          "mean": 0.00026473069290962786,
+          "p95": 0.0003749165509361773
         },
         "normalized_motion_cosine": {
-          "max": 0.9999993769687232,
-          "mean": 0.9999957569872754,
-          "p95": 0.9999977392642546
+          "max": 0.9999986695273096,
+          "mean": 0.9999958637302813,
+          "p95": 0.9999977874028252
         },
         "normalized_motion_rmse": {
-          "max": 0.0057920957915484905,
-          "mean": 0.0028350213021136974,
-          "p95": 0.004056242434307932
+          "max": 0.0042211017571389675,
+          "mean": 0.002629348922710051,
+          "p95": 0.0036556855542585233
         },
         "root_ade_m": {
           "max": 0.0,
@@ -384,9 +387,9 @@
           "p95": 0.0
         },
         "root_aligned_mpjpe_m": {
-          "max": 0.0004513714520726353,
-          "mean": 0.00028086028025124204,
-          "p95": 0.0003602677097660489
+          "max": 0.0004302378511056304,
+          "mean": 0.00026473067805454775,
+          "p95": 0.00037491636758204546
         },
         "root_fde_m": {
           "max": 0.0,
@@ -402,45 +405,45 @@
       "motion_fidelity": {
         "contact_agreement": {
           "max": 1.0,
-          "mean": 0.99990234375,
+          "mean": 1.0,
           "p95": 1.0
         },
-        "contact_f1": 0.9999361090405707,
-        "contact_iou": 0.9998722262447294,
+        "contact_f1": 1.0,
+        "contact_iou": 1.0,
         "global_rotation_error_degrees": {
-          "max": 0.13196493685245514,
-          "mean": 0.07830915943486616,
-          "p95": 0.10016722418367863
+          "max": 0.10978787392377853,
+          "mean": 0.07558671078489472,
+          "p95": 0.09087162539362907
         },
         "heading_error_degrees": {
-          "max": 0.01178419217467308,
-          "mean": 0.007012202449307854,
-          "p95": 0.010180456470698117
+          "max": 0.013133668340742588,
+          "mean": 0.007049998545577789,
+          "p95": 0.010118653997778893
         },
         "joint_velocity_error_mps": {
-          "max": 0.007651040214113891,
-          "mean": 0.00321598158886142,
-          "p95": 0.004017589701106772
+          "max": 0.004520879301708192,
+          "mean": 0.003058643160329666,
+          "p95": 0.0039847704756539315
         },
         "local_rotation_error_degrees": {
-          "max": 0.12314102053642273,
-          "mean": 0.07062729828370114,
-          "p95": 0.08481712378561497
+          "max": 0.09357167035341263,
+          "mean": 0.0683329723154505,
+          "p95": 0.08376629874110221
         },
         "mpjpe_m": {
-          "max": 0.0005989585188217461,
-          "mean": 0.00027878459074296796,
-          "p95": 0.000361915938265156
+          "max": 0.00041242953739129007,
+          "mean": 0.0002597224709006696,
+          "p95": 0.0003502150691929273
         },
         "normalized_motion_cosine": {
-          "max": 0.9999994647153758,
-          "mean": 0.9999959380571123,
-          "p95": 0.9999976395486461
+          "max": 0.9999987097596618,
+          "mean": 0.9999959060855707,
+          "p95": 0.9999978618613875
         },
         "normalized_motion_rmse": {
-          "max": 0.007323876488953829,
-          "mean": 0.002768729370776176,
-          "p95": 0.0035224454011768096
+          "max": 0.004128637723624706,
+          "mean": 0.002588702941769346,
+          "p95": 0.0032814822625368834
         },
         "root_ade_m": {
           "max": 0.0,
@@ -448,9 +451,9 @@
           "p95": 0.0
         },
         "root_aligned_mpjpe_m": {
-          "max": 0.0005989585188217461,
-          "mean": 0.0002787845870291979,
-          "p95": 0.0003619158567744307
+          "max": 0.0004124295082874596,
+          "mean": 0.0002597224641552505,
+          "p95": 0.0003502151652355678
         },
         "root_fde_m": {
           "max": 0.0,
@@ -464,359 +467,121 @@
   "packs": {
     "candidate": {
       "file": "ardy-minilm-core40-browser-v1.tar.gz",
-      "sha256": "145995ff6216076d2ee06d7a62a741c6d9a02434278d645a0446cd357aa95868",
-      "size_bytes": 684835577
+      "sha256": "8641b8fbb94c245866300dcdbb3ad75a634d5427566fc4a8bd2fc8b9fe533a68",
+      "size_bytes": 684776137
     },
     "reference": {
       "file": "ardy-minilm-core40-browser-v1-fp32-reference.tar.gz",
-      "sha256": "4962bc2c3b7135e8181de1229fc816924ebcd60e3d5ff1d9f5cc02b8505e8663",
-      "size_bytes": 718137762
+      "sha256": "a9f5b37a0552e45dd7880fb347d4c3aa1206bc735b87cd2250a61178236074c3",
+      "size_bytes": 718077804
     },
-    "saved_bytes": 33302185,
-    "saved_fraction": 0.0463729757188287
+    "saved_bytes": 33301667,
+    "saved_fraction": 0.046376126395350936
   },
-  "schema_version": 2,
+  "prompt_manifest": {
+    "filename": "prompts-core40-timeline.jsonl",
+    "provenance_sidecar": {
+      "content": {
+        "counts": {
+          "dropped_prompt_too_long": 2,
+          "groups_written": 3702,
+          "missing_propagation_references": 12,
+          "raw_event_descriptions": 352703,
+          "raw_overview_descriptions": 142220,
+          "recording_components": 3702,
+          "recording_families": 4090,
+          "sources": {
+            "events.description": 46538,
+            "overview_description": 17749
+          },
+          "split_groups": {
+            "test": 341,
+            "train": 2977,
+            "val": 384
+          },
+          "splits": {
+            "test": 6095,
+            "train": 51482,
+            "val": 6710
+          },
+          "timeline_rows": 142220,
+          "unique_before_sampling": 64287,
+          "unique_descriptions": 64287,
+          "written": 64287
+        },
+        "dataset": {
+          "filename": "timelines.jsonl",
+          "license": "CC BY 4.0",
+          "owner": "NVIDIA",
+          "repo_id": "nvidia/SEED-Timeline-Annotations",
+          "resolved_from": "hugging_face_hub",
+          "revision": "b2cf916d8ef7a1e49fc4f0ce9e00c1981d3b9d8f",
+          "sha256": "379d6a5b86cea06b7201d485d19ee53512cc58449352b3cf113a95d1d27603d8",
+          "size_bytes": 80373523,
+          "url": "https://huggingface.co/datasets/nvidia/SEED-Timeline-Annotations"
+        },
+        "format": "ardy-minilm-prompt-provenance",
+        "format_version": 1,
+        "manifest": {
+          "filename": "prompts-core40-timeline.jsonl",
+          "sha256": "c80b0656dd04c28da1d665b4b9a9422f975be5c72b0fe9011b976a3672bb1eac"
+        },
+        "preparation": {
+          "deduplication": "global case- and punctuation-insensitive alphanumeric-token match after normalization; overview_description preferred",
+          "grouping": "NFKC/casefold filename; require <take>__A<actor>[_M], remove actor, mirror, and terminal three-digit non-angle take suffixes; union propagated_from_filename families",
+          "max_prompt_characters": 512,
+          "normalization": "Unicode NFKC, trim, collapse whitespace",
+          "sample_size": 0,
+          "seed": 20260726,
+          "sources": [
+            "overview_description",
+            "events.description"
+          ],
+          "split_hash_namespace": "ardy-minilm-nvidia-timeline-split-v3",
+          "split_ratios": {
+            "test": 0.1,
+            "train": 0.8,
+            "val": 0.1
+          }
+        }
+      },
+      "filename": "prompts-core40-timeline.metadata.json",
+      "sha256": "37086140d78b36b5145de36e8c64ac0558c86960c4bbcc96630f6c0556ffff64",
+      "size_bytes": 2047
+    },
+    "sha256": "c80b0656dd04c28da1d665b4b9a9422f975be5c72b0fe9011b976a3672bb1eac",
+    "size_bytes": 12655589
+  },
+  "runtime_environment": {
+    "logical_cpu_count": 20,
+    "onnxruntime": {
+      "execution_provider": "CPUExecutionProvider",
+      "graph_optimizations": "disabled",
+      "intra_op_num_threads": 8
+    },
+    "packages": {
+      "numpy": "1.26.4",
+      "onnx": "1.18.0",
+      "onnxruntime": "1.27.0",
+      "transformers": "5.8.1"
+    },
+    "platform": {
+      "machine": "aarch64",
+      "processor": "aarch64",
+      "release": "6.17.0-1026-nvidia",
+      "system": "Linux"
+    },
+    "python": {
+      "implementation": "CPython",
+      "version": "3.11.15"
+    }
+  },
+  "source_report_schema_version": 2,
   "text_conditions": {
     "cosine_mean": 1.0,
     "cosine_min": 0.9999998807907104,
     "mae": 0.0,
     "max_abs": 0.0,
     "rmse": 0.0
-  },
-  "worst_cases": {
-    "accumulated": {
-      "contact_agreement": {
-        "paired_seed": 8987678,
-        "prompt": "figure crouching and moving backwards diagonally to the left",
-        "prompt_index": 8,
-        "scope": "accumulated",
-        "seed": 987654,
-        "value": 0.99875,
-        "window_count": 5,
-        "window_index": 4
-      },
-      "global_rotation_error_degrees": {
-        "paired_seed": 27012112,
-        "prompt": "person leaps over a 2-meter tall obstacle in a single fluid motion",
-        "prompt_index": 27,
-        "scope": "accumulated",
-        "seed": 12031,
-        "value": 0.10633338242769241,
-        "window_count": 5,
-        "window_index": 4
-      },
-      "heading_error_degrees": {
-        "paired_seed": 56260837,
-        "prompt": "picks up medium big light object with two hands from low right side and puts it away to the right side medium",
-        "prompt_index": 36,
-        "scope": "accumulated",
-        "seed": 20260729,
-        "value": 0.009634108282625675,
-        "window_count": 5,
-        "window_index": 4
-      },
-      "joint_velocity_error_mps": {
-        "paired_seed": 17012082,
-        "prompt": "person fans someone using hand fan",
-        "prompt_index": 17,
-        "scope": "accumulated",
-        "seed": 12031,
-        "value": 0.004994866321794689,
-        "window_count": 5,
-        "window_index": 4
-      },
-      "local_rotation_error_degrees": {
-        "paired_seed": 39260786,
-        "prompt": "stop doing a handstand as you turn to the left",
-        "prompt_index": 19,
-        "scope": "accumulated",
-        "seed": 20260729,
-        "value": 0.10311786085367203,
-        "window_count": 5,
-        "window_index": 4
-      },
-      "mpjpe_m": {
-        "paired_seed": 19987711,
-        "prompt": "stop doing a handstand as you turn to the left",
-        "prompt_index": 19,
-        "scope": "accumulated",
-        "seed": 987654,
-        "value": 0.0004645706503652036,
-        "window_count": 5,
-        "window_index": 4
-      },
-      "normalized_motion_cosine": {
-        "paired_seed": 43012160,
-        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
-        "prompt_index": 43,
-        "scope": "accumulated",
-        "seed": 12031,
-        "value": 0.9999482552481354,
-        "window_count": 5,
-        "window_index": 4
-      },
-      "normalized_motion_rmse": {
-        "paired_seed": 43012160,
-        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
-        "prompt_index": 43,
-        "scope": "accumulated",
-        "seed": 12031,
-        "value": 0.007762995082885027,
-        "window_count": 5,
-        "window_index": 4
-      },
-      "root_ade_m": {
-        "paired_seed": 12031,
-        "prompt": "A person walks forward and dodges to both sides to avoid bumping into someone, then continues walking.",
-        "prompt_index": 0,
-        "scope": "accumulated",
-        "seed": 12031,
-        "value": 0.0,
-        "window_count": 5,
-        "window_index": 4
-      },
-      "root_aligned_mpjpe_m": {
-        "paired_seed": 19987711,
-        "prompt": "stop doing a handstand as you turn to the left",
-        "prompt_index": 19,
-        "scope": "accumulated",
-        "seed": 987654,
-        "value": 0.00046457070857286453,
-        "window_count": 5,
-        "window_index": 4
-      },
-      "root_fde_m": {
-        "paired_seed": 12031,
-        "prompt": "A person walks forward and dodges to both sides to avoid bumping into someone, then continues walking.",
-        "prompt_index": 0,
-        "scope": "accumulated",
-        "seed": 12031,
-        "value": 0.0,
-        "window_count": 5,
-        "window_index": 4
-      }
-    },
-    "per_window": {
-      "contact_agreement": {
-        "candidate_first_heading_angle": 0.35,
-        "candidate_world_translation": [
-          1.4391669034957886,
-          0.20000000298023224,
-          -0.6651365756988525
-        ],
-        "paired_seed": 15012076,
-        "prompt": "step with crossing of feet and throw of the free leg in direction of movement, 120 bpm",
-        "prompt_index": 15,
-        "reference_first_heading_angle": 0.35,
-        "reference_world_translation": [
-          1.4391669034957886,
-          0.20000000298023224,
-          -0.6651365756988525
-        ],
-        "seed": 12031,
-        "value": 0.99375,
-        "window_index": 0
-      },
-      "global_rotation_error_degrees": {
-        "candidate_first_heading_angle": 0.35,
-        "candidate_world_translation": [
-          1.2460267543792725,
-          0.20000000298023224,
-          -0.7494738101959229
-        ],
-        "paired_seed": 43012160,
-        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
-        "prompt_index": 43,
-        "reference_first_heading_angle": 0.35,
-        "reference_world_translation": [
-          1.2460267543792725,
-          0.20000000298023224,
-          -0.7494738101959229
-        ],
-        "seed": 12031,
-        "value": 0.22089220583438873,
-        "window_index": 0
-      },
-      "heading_error_degrees": {
-        "candidate_first_heading_angle": 0.35,
-        "candidate_world_translation": [
-          1.2442917823791504,
-          0.20000000298023224,
-          -0.9189022183418274
-        ],
-        "paired_seed": 38260783,
-        "prompt": "person discovers a lost item",
-        "prompt_index": 18,
-        "reference_first_heading_angle": 0.35,
-        "reference_world_translation": [
-          1.2442917823791504,
-          0.20000000298023224,
-          -0.9189022183418274
-        ],
-        "seed": 20260729,
-        "value": 0.014787049032747746,
-        "window_index": 0
-      },
-      "joint_velocity_error_mps": {
-        "candidate_first_heading_angle": 0.35,
-        "candidate_world_translation": [
-          1.2460267543792725,
-          0.20000000298023224,
-          -0.7494738101959229
-        ],
-        "paired_seed": 43012160,
-        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
-        "prompt_index": 43,
-        "reference_first_heading_angle": 0.35,
-        "reference_world_translation": [
-          1.2460267543792725,
-          0.20000000298023224,
-          -0.7494738101959229
-        ],
-        "seed": 12031,
-        "value": 0.012825013836845756,
-        "window_index": 0
-      },
-      "local_rotation_error_degrees": {
-        "candidate_first_heading_angle": 0.39548301363159677,
-        "candidate_world_translation": [
-          4.59614896774292,
-          0.20000000298023224,
-          5.996219635009766
-        ],
-        "paired_seed": 27012112,
-        "prompt": "person leaps over a 2-meter tall obstacle in a single fluid motion",
-        "prompt_index": 27,
-        "reference_first_heading_angle": 0.39548301363159677,
-        "reference_world_translation": [
-          4.59614896774292,
-          0.20000000298023224,
-          5.996219635009766
-        ],
-        "seed": 12031,
-        "value": 0.12314102053642273,
-        "window_index": 4
-      },
-      "mpjpe_m": {
-        "candidate_first_heading_angle": 0.35,
-        "candidate_world_translation": [
-          1.2460267543792725,
-          0.20000000298023224,
-          -0.7494738101959229
-        ],
-        "paired_seed": 43012160,
-        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
-        "prompt_index": 43,
-        "reference_first_heading_angle": 0.35,
-        "reference_world_translation": [
-          1.2460267543792725,
-          0.20000000298023224,
-          -0.7494738101959229
-        ],
-        "seed": 12031,
-        "value": 0.0006709671579301357,
-        "window_index": 0
-      },
-      "normalized_motion_cosine": {
-        "candidate_first_heading_angle": 0.35,
-        "candidate_world_translation": [
-          1.2460267543792725,
-          0.20000000298023224,
-          -0.7494738101959229
-        ],
-        "paired_seed": 43012160,
-        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
-        "prompt_index": 43,
-        "reference_first_heading_angle": 0.35,
-        "reference_world_translation": [
-          1.2460267543792725,
-          0.20000000298023224,
-          -0.7494738101959229
-        ],
-        "seed": 12031,
-        "value": 0.9997957750089619,
-        "window_index": 0
-      },
-      "normalized_motion_rmse": {
-        "candidate_first_heading_angle": 0.35,
-        "candidate_world_translation": [
-          1.2460267543792725,
-          0.20000000298023224,
-          -0.7494738101959229
-        ],
-        "paired_seed": 43012160,
-        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
-        "prompt_index": 43,
-        "reference_first_heading_angle": 0.35,
-        "reference_world_translation": [
-          1.2460267543792725,
-          0.20000000298023224,
-          -0.7494738101959229
-        ],
-        "seed": 12031,
-        "value": 0.016719764098525047,
-        "window_index": 0
-      },
-      "root_ade_m": {
-        "candidate_first_heading_angle": 0.35,
-        "candidate_world_translation": [
-          1.9300754070281982,
-          0.20000000298023224,
-          1.0900776386260986
-        ],
-        "paired_seed": 12031,
-        "prompt": "A person walks forward and dodges to both sides to avoid bumping into someone, then continues walking.",
-        "prompt_index": 0,
-        "reference_first_heading_angle": 0.35,
-        "reference_world_translation": [
-          1.9300754070281982,
-          0.20000000298023224,
-          1.0900776386260986
-        ],
-        "seed": 12031,
-        "value": 0.0,
-        "window_index": 0
-      },
-      "root_aligned_mpjpe_m": {
-        "candidate_first_heading_angle": 0.35,
-        "candidate_world_translation": [
-          1.2460267543792725,
-          0.20000000298023224,
-          -0.7494738101959229
-        ],
-        "paired_seed": 43012160,
-        "prompt": "A person covers their mouth with both hands to avoid speaking and then lowers their hands, standing upright.",
-        "prompt_index": 43,
-        "reference_first_heading_angle": 0.35,
-        "reference_world_translation": [
-          1.2460267543792725,
-          0.20000000298023224,
-          -0.7494738101959229
-        ],
-        "seed": 12031,
-        "value": 0.0006709670997224748,
-        "window_index": 0
-      },
-      "root_fde_m": {
-        "candidate_first_heading_angle": 0.35,
-        "candidate_world_translation": [
-          1.9300754070281982,
-          0.20000000298023224,
-          1.0900776386260986
-        ],
-        "paired_seed": 12031,
-        "prompt": "A person walks forward and dodges to both sides to avoid bumping into someone, then continues walking.",
-        "prompt_index": 0,
-        "reference_first_heading_angle": 0.35,
-        "reference_world_translation": [
-          1.9300754070281982,
-          0.20000000298023224,
-          1.0900776386260986
-        ],
-        "seed": 12031,
-        "value": 0.0,
-        "window_index": 0
-      }
-    }
   }
 }

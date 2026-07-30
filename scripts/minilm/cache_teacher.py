@@ -43,10 +43,20 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from huggingface_hub import try_to_load_from_cache
+from huggingface_hub import snapshot_download
 from safetensors import safe_open
 from torch import Tensor
 
+from ardy.minilm_teacher_cache import (
+    TEACHER_CACHE_FORMAT_VERSION,
+    TIMELINE_PROMPT_MAX_CHARACTERS,
+    TIMELINE_PROMPT_SOURCES,
+    normalize_timeline_prompt,
+    prompt_provenance_sha256,
+    timeline_prompt_deduplication_key,
+    validate_prompt_provenance,
+    validated_teacher_lineage,
+)
 from ardy.model.llm2vec.llm2vec_wrapper import LLM2VecEncoder
 
 DEFAULT_INPUT = Path("artifacts/minilm/prompts.jsonl")
@@ -54,15 +64,20 @@ DEFAULT_OUTPUT_DIR = Path("artifacts/minilm/teacher")
 DEFAULT_CHECKPOINT = Path("checkpoints/ARDY-Core-RP-20FPS-Horizon40/denoiser.safetensors")
 DEFAULT_BASE_MODEL = "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp"
 DEFAULT_PEFT_MODEL = "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised"
+DEFAULT_FOUNDATION_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+DEFAULT_FOUNDATION_MODEL_REVISION = "8afb486c1db24fe5011ec46dfbe5b5dccdb575c2"
+DEFAULT_BASE_MODEL_REVISION = "31474e395ada192e8ed1586db6be79fb3b70c9c0"
+DEFAULT_PEFT_MODEL_REVISION = "baa8ebf04a1c2500e61288e7dad65e8ae42601a7"
 DEFAULT_ROOT_KEY = "denoiser.backbone.root_model.embed_text.weight"
 DEFAULT_BODY_KEY = "denoiser.backbone.body_model.embed_text.weight"
 METADATA_FILENAME = "metadata.json"
 SHARD_PATTERN = re.compile(r"^teacher-(\d{5})\.pt$")
-FORMAT_VERSION = 1
+FORMAT_VERSION = TEACHER_CACHE_FORMAT_VERSION
 TEACHER_DIM = 4096
 BRANCH_DIM = 1024
 TARGET_DIM = 2 * BRANCH_DIM
 VALID_SPLITS = frozenset(("train", "val", "test"))
+COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 
 def sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
@@ -82,86 +97,49 @@ def _package_version(distribution: str) -> str:
         return "unknown"
 
 
-def _snapshot_revision(path: str | os.PathLike[str]) -> str | None:
-    """Extract a Hugging Face snapshot commit from a cached/local path."""
+def resolve_pinned_snapshot(
+    repo_id: str,
+    revision: str,
+    *,
+    allow_patterns: Sequence[str],
+    local_files_only: bool = False,
+) -> Path:
+    """Resolve an immutable Hub commit and verify the returned snapshot path.
 
-    # Cache files are symlinks into ``blobs/``; inspect the non-resolved path
-    # first or the ``snapshots/<commit>`` component is lost.
-    candidates = (Path(path).absolute(), Path(path).resolve())
-    for candidate in candidates:
-        parts = candidate.parts
-        try:
-            snapshot_index = parts.index("snapshots")
-        except ValueError:
-            continue
-        if snapshot_index + 1 < len(parts):
-            return parts[snapshot_index + 1]
-    return None
+    ``local_files_only`` is used by benchmarks so network acquisition cannot
+    contaminate model-load timing.
+    """
 
-
-def _model_revision_hint(model_name_or_path: str, marker_filename: str) -> str | None:
-    """Best-effort resolved revision for provenance (not a resume identity key)."""
-
-    marker_path = _model_marker_path(model_name_or_path, marker_filename)
-    if marker_path is not None:
-        revision = _snapshot_revision(marker_path)
-        if revision is not None:
-            return revision
-        resolved = marker_path.resolve()
-        if marker_path.is_file():
-            return f"local:{resolved}:{sha256_file(marker_path)}"
-        return f"local:{resolved}"
-    return None
-
-
-def _model_marker_path(
-    model_name_or_path: str,
-    marker_filename: str,
-) -> Path | None:
-    """Locate a local or cached model metadata file without network access."""
-
-    effective_name = model_name_or_path
-    text_encoders_dir = os.environ.get("TEXT_ENCODERS_DIR")
-    if text_encoders_dir:
-        effective_name = str(Path(text_encoders_dir) / model_name_or_path)
-
-    local_path = Path(effective_name)
-    if local_path.exists():
-        marker_path = local_path / marker_filename
-        return marker_path if marker_path.is_file() else local_path
-
-    cached = try_to_load_from_cache(
-        repo_id=model_name_or_path,
-        filename=marker_filename,
-        cache_dir=os.environ.get("HUGGINGFACE_CACHE_DIR"),
-    )
-    if isinstance(cached, str):
-        return Path(cached)
-    return None
-
-
-def _adapter_foundation_model(model_name_or_path: str) -> str | None:
-    """Read the foundation model named by a PEFT adapter, when available."""
-
-    adapter_config = _model_marker_path(model_name_or_path, "adapter_config.json")
-    if adapter_config is None or not adapter_config.is_file():
-        return None
-    try:
-        value = json.loads(adapter_config.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    foundation = value.get("base_model_name_or_path") if isinstance(value, dict) else None
-    return foundation if isinstance(foundation, str) and foundation else None
+    if not isinstance(repo_id, str) or not repo_id.strip():
+        raise ValueError("model repo ID must be a non-empty string")
+    if not isinstance(revision, str) or COMMIT_PATTERN.fullmatch(revision) is None:
+        raise ValueError(f"model revision must be a 40-character lowercase commit SHA, got {revision!r}")
+    path = Path(
+        snapshot_download(
+            repo_id=repo_id,
+            revision=revision,
+            cache_dir=os.environ.get("HUGGINGFACE_CACHE_DIR"),
+            allow_patterns=list(allow_patterns),
+            local_files_only=local_files_only,
+        )
+    ).absolute()
+    if path.parent.name != "snapshots" or path.name != revision:
+        raise RuntimeError(f"{repo_id}@{revision} resolved to unexpected snapshot path {path}")
+    return path
 
 
 def _runtime_provenance(
     *,
     requested_device: str,
+    foundation_model: str,
+    foundation_model_revision: str,
     base_model: str,
+    base_model_revision: str,
     peft_model: str,
+    peft_model_revision: str,
 ) -> dict[str, Any]:
     env_device = os.environ.get("TEXT_ENCODER_DEVICE")
-    effective_device = env_device or requested_device
+    effective_device = env_device if env_device and requested_device in (None, "auto") else requested_device
     if effective_device == "auto":
         resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
     else:
@@ -184,16 +162,13 @@ def _runtime_provenance(
                 "capability": list(torch.cuda.get_device_capability(device_index)),
             }
         )
-    foundation_model = _adapter_foundation_model(base_model)
     return {
         "device": device_details,
         "model_revisions": {
             "foundation_model": foundation_model,
-            "foundation": (
-                _model_revision_hint(foundation_model, "config.json") if foundation_model is not None else None
-            ),
-            "base": _model_revision_hint(base_model, "config.json"),
-            "peft": _model_revision_hint(peft_model, "adapter_config.json"),
+            "foundation": foundation_model_revision,
+            "base": base_model_revision,
+            "peft": peft_model_revision,
         },
         "versions": {
             "torch": torch.__version__,
@@ -201,6 +176,7 @@ def _runtime_provenance(
             "peft": _package_version("peft"),
             "safetensors": _package_version("safetensors"),
         },
+        "provenance_status": "recorded",
     }
 
 
@@ -236,12 +212,7 @@ def _select_resume_provenance(
 
     keys = ("device", "model_revisions", "versions")
     if not all(isinstance(previous_metadata.get(key), dict) for key in keys):
-        # Version-1 caches created before provenance tracking remain usable.
-        # Bind subsequent resumes to this first observed environment, while
-        # disclosing that the attribution of pre-existing shards is inferred.
-        migrated = dict(current)
-        migrated["provenance_status"] = "migrated_from_legacy_unverified"
-        return migrated
+        raise ValueError("existing teacher cache is missing required runtime provenance")
 
     previous_device = previous_metadata["device"]
     current_device = current["device"]
@@ -285,13 +256,7 @@ def _select_resume_provenance(
         )
 
     # Preserve the provenance attributed when the first shard was written.
-    # Newly introduced fields remain explicitly unknown for an older cache.
     preserved_revisions = dict(previous_revisions)
-    preserved_revisions.setdefault(
-        "foundation_model",
-        current_revisions.get("foundation_model"),
-    )
-    preserved_revisions.setdefault("foundation", None)
     return {
         "device": dict(previous_device),
         "model_revisions": preserved_revisions,
@@ -305,27 +270,94 @@ def read_prompts(path: Path) -> tuple[list[str], list[str]]:
 
     texts: list[str] = []
     splits: list[str] = []
+    seen_prompt_keys: set[str] = set()
+    group_splits: dict[str, str] = {}
     with path.open("r", encoding="utf-8") as input_file:
         for line_number, line in enumerate(input_file, start=1):
             if not line.strip():
-                continue
+                raise ValueError(f"{path}:{line_number}: blank JSONL row")
             try:
                 record = json.loads(line)
             except json.JSONDecodeError as error:
                 raise ValueError(f"{path}:{line_number}: invalid JSON: {error}") from error
             if not isinstance(record, dict):
                 raise TypeError(f"{path}:{line_number}: expected a JSON object")
+            expected_keys = {"text", "split", "group", "source"}
+            if set(record) != expected_keys:
+                raise ValueError(
+                    f"{path}:{line_number}: expected exactly {sorted(expected_keys)}, got {sorted(record)}"
+                )
             text = record.get("text")
             split = record.get("split")
+            group = record.get("group")
+            source = record.get("source")
             if not isinstance(text, str) or not text.strip():
                 raise ValueError(f"{path}:{line_number}: 'text' must be a non-empty string")
-            if split not in VALID_SPLITS:
+            if text != normalize_timeline_prompt(text):
+                raise ValueError(f"{path}:{line_number}: 'text' is not in canonical NFKC/whitespace form")
+            if len(text) > TIMELINE_PROMPT_MAX_CHARACTERS:
+                raise ValueError(f"{path}:{line_number}: 'text' exceeds {TIMELINE_PROMPT_MAX_CHARACTERS} characters")
+            if not isinstance(split, str) or split not in VALID_SPLITS:
                 raise ValueError(f"{path}:{line_number}: 'split' must be one of {sorted(VALID_SPLITS)}")
+            if not isinstance(group, str) or not group.strip():
+                raise ValueError(f"{path}:{line_number}: 'group' must be a non-empty string")
+            if group != normalize_timeline_prompt(group).casefold():
+                raise ValueError(f"{path}:{line_number}: 'group' is not in canonical NFKC/casefold/whitespace form")
+            if not isinstance(source, str) or source not in TIMELINE_PROMPT_SOURCES:
+                raise ValueError(f"{path}:{line_number}: 'source' must be one of {list(TIMELINE_PROMPT_SOURCES)}")
+
+            prompt_key = timeline_prompt_deduplication_key(text)
+            if prompt_key in seen_prompt_keys:
+                raise ValueError(f"{path}:{line_number}: duplicate canonical prompt text {text!r}")
+            seen_prompt_keys.add(prompt_key)
+            previous_split = group_splits.setdefault(group, split)
+            if previous_split != split:
+                raise ValueError(
+                    f"{path}:{line_number}: group {group!r} appears in both {previous_split!r} and {split!r}"
+                )
             texts.append(text)
             splits.append(split)
     if not texts:
         raise ValueError(f"{path} contains no prompts")
     return texts, splits
+
+
+def read_prompt_provenance(
+    path: Path,
+    *,
+    input_path: Path,
+    input_sha256: str,
+    count: int,
+    split_counts: Mapping[str, int],
+) -> tuple[dict[str, Any], str]:
+    """Read and validate the provenance sidecar bound to a prompt manifest."""
+
+    try:
+        encoded = path.read_bytes()
+    except FileNotFoundError as error:
+        raise FileNotFoundError(
+            f"prompt provenance sidecar not found: {path}; generate it with prepare_prompts.py or pass --input-metadata"
+        ) from error
+    input_metadata_sha256 = hashlib.sha256(encoded).hexdigest()
+    try:
+        value = json.loads(encoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{path}: invalid prompt provenance JSON") from error
+    validate_prompt_provenance(
+        value,
+        expected_manifest_sha256=input_sha256,
+        expected_manifest_filename=input_path.name,
+        expected_count=count,
+        expected_split_counts=split_counts,
+    )
+    canonical_sha256 = prompt_provenance_sha256(value)
+    if input_metadata_sha256 != canonical_sha256:
+        raise ValueError(
+            f"{path}: prompt provenance JSON is not in the canonical encoding "
+            f"emitted by prepare_prompts.py (canonical SHA-256 {canonical_sha256}, "
+            f"actual {input_metadata_sha256})"
+        )
+    return value, input_metadata_sha256
 
 
 def inspect_projection_shapes(
@@ -367,10 +399,16 @@ def _metadata_identity(
     *,
     input_path: Path,
     input_sha256: str,
+    input_metadata_sha256: str,
+    corpus_provenance: Mapping[str, Any],
     count: int,
     split_counts: Mapping[str, int],
+    foundation_model: str,
+    foundation_model_revision: str,
     base_model: str,
+    base_model_revision: str,
     peft_model: str,
+    peft_model_revision: str,
     checkpoint: Path,
     checkpoint_sha256: str,
     root_key: str,
@@ -382,9 +420,15 @@ def _metadata_identity(
         "format_version": FORMAT_VERSION,
         "input_path": str(input_path.resolve()),
         "input_sha256": input_sha256,
+        "input_metadata_sha256": input_metadata_sha256,
+        "corpus_provenance": dict(corpus_provenance),
         "model_name": model_name,
+        "foundation_model_name_or_path": foundation_model,
+        "foundation_model_revision": foundation_model_revision,
         "base_model_name_or_path": base_model,
+        "base_model_revision": base_model_revision,
         "peft_model_name_or_path": peft_model,
+        "peft_model_revision": peft_model_revision,
         "checkpoint_path": str(checkpoint.resolve()),
         "checkpoint_sha256": checkpoint_sha256,
         "target_keys": [root_key, body_key],
@@ -541,6 +585,12 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="prepared prompt JSONL")
+    parser.add_argument(
+        "--input-metadata",
+        type=Path,
+        default=None,
+        help="prompt provenance sidecar; defaults to INPUT with .metadata.json suffix",
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="cache directory")
     parser.add_argument(
         "--checkpoint",
@@ -550,8 +600,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--base-model", default=DEFAULT_BASE_MODEL, help="LLM2Vec base model")
     parser.add_argument("--peft-model", default=DEFAULT_PEFT_MODEL, help="LLM2Vec PEFT model")
-    parser.add_argument("--root-key", default=DEFAULT_ROOT_KEY, help="root projection tensor key")
-    parser.add_argument("--body-key", default=DEFAULT_BODY_KEY, help="body projection tensor key")
+    parser.add_argument(
+        "--foundation-model",
+        default=DEFAULT_FOUNDATION_MODEL,
+        help="LLM2Vec foundation model Hub repository",
+    )
+    parser.add_argument(
+        "--foundation-model-revision",
+        default=DEFAULT_FOUNDATION_MODEL_REVISION,
+        help="immutable foundation-model commit",
+    )
+    parser.add_argument(
+        "--base-model-revision",
+        default=DEFAULT_BASE_MODEL_REVISION,
+        help="immutable MNTP-adapter commit",
+    )
+    parser.add_argument(
+        "--peft-model-revision",
+        default=DEFAULT_PEFT_MODEL_REVISION,
+        help="immutable supervised-adapter commit",
+    )
     parser.add_argument("--device", default="auto", help="teacher/projection device")
     parser.add_argument("--shard-size", type=int, default=256, help="prompts per .pt shard")
     parser.add_argument(
@@ -571,30 +639,56 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     try:
+        model_ids = {
+            "--foundation-model": args.foundation_model,
+            "--base-model": args.base_model,
+            "--peft-model": args.peft_model,
+        }
+        for flag, repo_id in model_ids.items():
+            if not isinstance(repo_id, str) or not repo_id.strip():
+                raise ValueError(f"{flag} must be a non-empty Hub repository ID")
+        revisions = {
+            "--foundation-model-revision": args.foundation_model_revision,
+            "--base-model-revision": args.base_model_revision,
+            "--peft-model-revision": args.peft_model_revision,
+        }
+        for flag, revision in revisions.items():
+            if not isinstance(revision, str) or COMMIT_PATTERN.fullmatch(revision) is None:
+                raise ValueError(f"{flag} must be a 40-character lowercase commit SHA")
+
         texts, splits = read_prompts(args.input)
         input_sha256 = sha256_file(args.input)
-        checkpoint_sha256 = sha256_file(args.checkpoint)
-        inspect_projection_shapes(args.checkpoint, args.root_key, args.body_key)
         split_counts = Counter(splits)
-        identity = _metadata_identity(
+        validated_split_counts = {split: split_counts.get(split, 0) for split in sorted(VALID_SPLITS)}
+        input_metadata_path = args.input_metadata or args.input.with_suffix(".metadata.json")
+        corpus_provenance, input_metadata_sha256 = read_prompt_provenance(
+            input_metadata_path,
             input_path=args.input,
             input_sha256=input_sha256,
             count=len(texts),
-            split_counts={split: split_counts.get(split, 0) for split in sorted(VALID_SPLITS)},
+            split_counts=validated_split_counts,
+        )
+        checkpoint_sha256 = sha256_file(args.checkpoint)
+        inspect_projection_shapes(args.checkpoint, DEFAULT_ROOT_KEY, DEFAULT_BODY_KEY)
+        identity = _metadata_identity(
+            input_path=args.input,
+            input_sha256=input_sha256,
+            input_metadata_sha256=input_metadata_sha256,
+            corpus_provenance=corpus_provenance,
+            count=len(texts),
+            split_counts=validated_split_counts,
+            foundation_model=args.foundation_model,
+            foundation_model_revision=args.foundation_model_revision,
             base_model=args.base_model,
+            base_model_revision=args.base_model_revision,
             peft_model=args.peft_model,
+            peft_model_revision=args.peft_model_revision,
             checkpoint=args.checkpoint,
             checkpoint_sha256=checkpoint_sha256,
-            root_key=args.root_key,
-            body_key=args.body_key,
+            root_key=DEFAULT_ROOT_KEY,
+            body_key=DEFAULT_BODY_KEY,
             shard_size=args.shard_size,
         )
-        current_provenance = _runtime_provenance(
-            requested_device=args.device,
-            base_model=args.base_model,
-            peft_model=args.peft_model,
-        )
-
         args.output_dir.mkdir(parents=True, exist_ok=True)
         metadata_path = args.output_dir / METADATA_FILENAME
         previous_metadata = _read_metadata(metadata_path)
@@ -609,8 +703,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "--output-dir"
             )
 
-        # Writing an initial manifest closes the tiny crash window between the
-        # first atomic shard and the first metadata update.
         prior_elapsed = float(previous_metadata.get("elapsed_seconds", 0.0)) if previous_metadata is not None else 0.0
         shard_names = discover_and_validate_shards(
             args.output_dir,
@@ -619,11 +711,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             shard_size=args.shard_size,
         )
         shard_sha256 = {name: sha256_file(args.output_dir / name) for name in shard_names}
-        runtime_provenance = _select_resume_provenance(
-            previous_metadata,
-            current_provenance,
-            has_shards=bool(shard_names),
-        )
         if previous_metadata is not None:
             declared_shards = previous_metadata.get("shards", [])
             if not isinstance(declared_shards, list) or not all(isinstance(name, str) for name in declared_shards):
@@ -643,6 +730,46 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise ValueError(f"{metadata_path}: shard SHA-256 mismatch for {hash_mismatches}")
 
         completed_count = min(len(shard_names) * args.shard_size, len(texts))
+        if previous_metadata is not None and previous_metadata.get("status") == "complete":
+            # A complete cache is immutable output, not a resumable generation
+            # session. Validate its recorded lineage and files without comparing
+            # them with, or rewriting them from, this machine's runtime.
+            validated_teacher_lineage(previous_metadata)
+            if completed_count != len(texts):
+                raise ValueError(
+                    f"{metadata_path}: teacher cache is marked complete but only "
+                    f"{completed_count}/{len(texts)} examples are present"
+                )
+            print(
+                json.dumps(
+                    {
+                        "status": "complete",
+                        "count": len(texts),
+                        "shards": len(shard_names),
+                        "output_dir": str(args.output_dir),
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+
+        current_provenance = _runtime_provenance(
+            requested_device=args.device,
+            foundation_model=args.foundation_model,
+            foundation_model_revision=args.foundation_model_revision,
+            base_model=args.base_model,
+            base_model_revision=args.base_model_revision,
+            peft_model=args.peft_model,
+            peft_model_revision=args.peft_model_revision,
+        )
+        runtime_provenance = _select_resume_provenance(
+            previous_metadata,
+            current_provenance,
+            has_shards=bool(shard_names),
+        )
+
+        # Writing an initial manifest closes the tiny crash window between the
+        # first atomic shard and the first metadata update.
         metadata = {
             **identity,
             **runtime_provenance,
@@ -668,20 +795,48 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
 
+        foundation_snapshot = resolve_pinned_snapshot(
+            args.foundation_model,
+            args.foundation_model_revision,
+            allow_patterns=(
+                "config.json",
+                "model*.safetensors",
+                "model.safetensors.index.json",
+            ),
+        )
+        base_snapshot = resolve_pinned_snapshot(
+            args.base_model,
+            args.base_model_revision,
+            allow_patterns=(
+                "adapter_config.json",
+                "adapter_model.safetensors",
+                "config.json",
+                "special_tokens_map.json",
+                "tokenizer.json",
+                "tokenizer_config.json",
+            ),
+        )
+        peft_snapshot = resolve_pinned_snapshot(
+            args.peft_model,
+            args.peft_model_revision,
+            allow_patterns=("adapter_config.json", "adapter_model.safetensors"),
+        )
         encoder = LLM2VecEncoder(
-            base_model_name_or_path=args.base_model,
-            peft_model_name_or_path=args.peft_model,
+            base_model_name_or_path=str(base_snapshot),
+            peft_model_name_or_path=str(peft_snapshot),
+            foundation_model_name_or_path=str(foundation_snapshot),
             dtype="bfloat16",
             llm_dim=TEACHER_DIM,
             device=args.device,
         )
-        # A clean Hugging Face cache has no revision hints until model loading
-        # resolves/downloads the snapshots. Refresh now and validate again
-        # before mixing any new teacher output with resumed shards.
         refreshed_provenance = _runtime_provenance(
             requested_device=args.device,
+            foundation_model=args.foundation_model,
+            foundation_model_revision=args.foundation_model_revision,
             base_model=args.base_model,
+            base_model_revision=args.base_model_revision,
             peft_model=args.peft_model,
+            peft_model_revision=args.peft_model_revision,
         )
         runtime_provenance = _select_resume_provenance(
             previous_metadata,
@@ -702,8 +857,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         projection_device = torch.device(encoder.get_device())
         root_weight, body_weight = load_projection_weights(
             args.checkpoint,
-            args.root_key,
-            args.body_key,
+            DEFAULT_ROOT_KEY,
+            DEFAULT_BODY_KEY,
             projection_device,
         )
 

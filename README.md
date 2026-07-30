@@ -98,18 +98,10 @@ ARDY checkpoints are available trained on various skeletons with differing FPS a
 
 ### [Optional] Dataset
 
-Downloading data is required only for the kinematically constrained
-generation demos and for reproducing the specialized MiniLM training.
+Downloading data is only required for running the kinematically constrained generation demos.
 
 **Bones SEED motion data**:
 The kinematically constrained generation demo samples constraints from motion sequences in the [Bones SEED](https://huggingface.co/datasets/bones-studio/seed) dataset. The motion data are provided in CSV format for G1. Corresponding text descriptions are retrieved from the metadata CSV during sampling.
-
-The dataset is not included in this repository. Users must independently
-qualify for access and comply with the
-[BONES Motion Capture Dataset License Agreement](https://bones.studio/info/seed-license).
-Training data includes [Motion Data by Bones Studio](https://bones.studio/).
-Use of the underlying dataset is subject to the BONES Motion Capture Dataset
-License Agreement.
 
 Please download the Bones SEED dataset and put them under the `datasets/bones-seed/` directory in the root of the repo. The directory structure should be as follows:
 ```
@@ -118,6 +110,8 @@ datasets/bones-seed/
   metadata/
     seed_metadata_v004.csv
 ```
+
+---
 
 ### Distilled MiniLM text encoder
 
@@ -141,9 +135,11 @@ uv run python scripts/generate.py "A person walks forward." --model core
 ```
 
 An artifact produced by the documented recipe is compatible only with
-`ARDY-Core-RP-20FPS-Horizon40`. The adopted recipe uses 40,433 unique training
-prompts while preserving the original validation and test sets. It uses no
-external motion-caption dataset. See
+`ARDY-Core-RP-20FPS-Horizon40`. The documented recipe uses normalized, deduplicated
+English motion descriptions from the pinned
+[`nvidia/SEED-Timeline-Annotations`](https://huggingface.co/datasets/nvidia/SEED-Timeline-Annotations/tree/b2cf916d8ef7a1e49fc4f0ce9e00c1981d3b9d8f)
+revision under CC BY 4.0. Its group-disjoint split contains 51,482 training,
+6,710 validation, and 6,095 test prompts (64,287 total). See
 [the MiniLM encoder guide](docs/minilm_encoder.md) for the design, complete
 `uv` training/evaluation pipeline, and local result layout. Aggregate
 measurements from the completed run are in
@@ -212,13 +208,12 @@ Choose `artifacts/browser/ardy-minilm-core40-browser-v1.tar.gz` with the demo's
 **Choose model pack** button. The browser accepts this single `.tar.gz` format
 only; it streams the archive through gzip/ustar validation before creating
 three ONNX sessions. The verified mixed-FP16 export in this environment is
-684,835,577 bytes (653.11 MiB); its three ONNX graphs total 739,313,806 bytes.
-That is 33,302,185 bytes (4.64%) smaller than the corresponding
-718,137,762-byte FP32 gzip export. Continuation-rollout ablation keeps both the
-text encoder and autoregressive denoiser byte-identical to FP32 and converts
-only the structured decoder selectively. The decoder itself is 49.50%
-smaller. The precision boundaries and paired motion-fidelity results are
-documented in the
+684,776,137 bytes (653.05 MiB). That is 33,301,667 bytes (4.64%) smaller than
+the corresponding 718,077,804-byte FP32 gzip export. Continuation-rollout
+validation on NVIDIA SEED Timeline Annotations test prompts keeps both the text
+encoder and autoregressive denoiser byte-identical to FP32 and converts only
+the structured decoder selectively. The precision boundaries and paired
+motion-fidelity results are documented in the
 [browser mixed-FP16 report](docs/browser_fp16.md). The static web build
 contains no model weights, and inference does not send prompts, model-pack
 files, VRM files, generation state, or motion to a server.
@@ -446,8 +441,8 @@ The source code in this repository is licensed under
 [Apache-2.0](LICENSE), subject to the retained upstream notices and
 [attributions](ATTRIBUTIONS.MD). The Apache-2.0 source license does not grant
 rights to ARDY checkpoints, Meta Llama 3, LLM2Vec model adapters, MiniLM model
-weights, BONES-SEED, locally trained student weights, or generated training and
-evaluation artifacts.
+weights, separately obtained datasets, locally trained student weights, or
+generated training and evaluation artifacts.
 
 Those resources have separate terms and are not distributed here. Review
 [THIRD_PARTY_MODELS_AND_DATA.md](THIRD_PARTY_MODELS_AND_DATA.md) before use or
