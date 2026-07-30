@@ -153,14 +153,6 @@ function createSliderControl(
   )
 }
 
-export const durationControl = createSliderControl("duration", {
-  value: 4,
-  min: 2,
-  max: 10,
-  step: 2,
-  ariaValueText: "4 seconds",
-})
-
 export const targetBufferControl = createSliderControl("target-buffer", {
   value: 80,
   min: 40,
@@ -177,11 +169,6 @@ export const timelineControl = createSliderControl("timeline", {
   disabled: true,
   ariaValueText: "00:00.00 of 00:00.00",
 })
-
-export const continuousGenerationControl = createCheckedControl(
-  "stream-generation",
-  true
-)
 
 export const showVrmControl = createCheckedControl(
   "show-vrm",
@@ -207,15 +194,6 @@ export const showOrientationsControl = createCheckedControl(
 export const showTrajectoryControl = createCheckedControl(
   "show-trajectory",
   true
-)
-
-export const loopControl = createExternalControl<
-  PressedControlState,
-  boolean
->(
-  "loop-toggle",
-  { pressed: true, disabled: true },
-  (pressed) => ({ pressed })
 )
 
 export const playPauseControl = createExternalControl<

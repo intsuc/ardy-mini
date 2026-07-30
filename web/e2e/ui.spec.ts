@@ -121,6 +121,37 @@ async function waitForAnimationFrames(page: Page, count: number): Promise<void> 
   }, count);
 }
 
+async function openMotionControls(page: Page): Promise<void> {
+  const trigger = page.getByRole("button", {
+    name: "Motion controls",
+    exact: true,
+  });
+  await expect(trigger).toBeVisible();
+  await trigger.click();
+  await expect(
+    page.getByRole("dialog", {
+      name: "Motion controls",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(page.locator("#generator-panel")).toBeVisible();
+}
+
+async function openPromptExamples(page: Page): Promise<void> {
+  const trigger = page.getByRole("combobox", {
+    name: "Choose an example prompt",
+    exact: true,
+  });
+  await expect(trigger).toBeVisible();
+  await trigger.click();
+  await expect(
+    page.getByRole("combobox", {
+      name: "Search example prompts",
+      exact: true,
+    }),
+  ).toBeVisible();
+}
+
 test("renders the two-pane technical workspace without motion parameters", async ({
   page,
 }) => {
@@ -151,7 +182,12 @@ test("renders the two-pane technical workspace without motion parameters", async
   expect(panePositions[0]!.height).toBeCloseTo(900, 1);
   expect(panePositions[1]!.height).toBeCloseTo(900, 1);
 
-  await expect(page.getByLabel("Motion description")).toBeEditable();
+  await expect(
+    page.getByRole("textbox", {
+      name: "Motion description",
+      exact: true,
+    }),
+  ).toBeEditable();
   await expect(page.locator("header")).toHaveCount(0);
   for (const removedText of [
     "ARDY Mini",
@@ -197,13 +233,16 @@ test("renders the two-pane technical workspace without motion parameters", async
 
   for (const selector of [
     "#generate",
-    "#apply-prompt",
     "#restart-generation",
     "#restart-from-now",
   ]) {
     await expect(page.locator(selector)).toBeDisabled();
   }
   for (const selector of [
+    "#apply-prompt",
+    "#stream-generation",
+    "#duration",
+    "#loop-toggle",
     "#new-session",
     "#import-session",
     "#export-session",
@@ -265,11 +304,7 @@ test("renders the two-pane technical workspace without motion parameters", async
     "data-slot",
     "popover-content",
   );
-  await expect(page.locator("#stream-generation")).toHaveAttribute(
-    "data-slot",
-    "switch",
-  );
-  await expect(page.locator("#duration")).toHaveAttribute(
+  await expect(page.locator("#target-buffer")).toHaveAttribute(
     "data-slot",
     "slider",
   );
@@ -407,7 +442,7 @@ test("retains the square Lyra treatment on standard shadcn surfaces", async ({
       "#model-card",
       "#generate",
       "#prompt",
-      "#prompt-example",
+      '[data-slot="combobox-trigger"]',
       "#seed",
       "#playback-speed",
     ].map((selector) => {
@@ -951,7 +986,10 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
 }) => {
   await page.goto("/");
 
-  const prompt = page.getByLabel("Motion description");
+  const prompt = page.getByRole("textbox", {
+    name: "Motion description",
+    exact: true,
+  });
   await expect(prompt.locator("xpath=..")).toHaveAttribute(
     "data-slot",
     "input-group",
@@ -967,10 +1005,8 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
   await page.locator("#prompt-count").click();
   await expect(prompt).toBeFocused();
 
-  await setSliderValue(page, "#duration", 8);
-  await expect(page.locator("#duration-output")).toHaveText("8 seconds");
   await setSliderValue(page, "#target-buffer", 120);
-  await expect(page.locator("#target-buffer-output")).toHaveText("120 frames");
+  await expect(page.locator("#target-buffer-output")).toHaveText("6 seconds");
   await expect(page.getByRole("spinbutton", { name: "Seed" })).toHaveValue("2");
 
   const randomizeSeed = page.locator("#randomize-seed");
@@ -998,17 +1034,15 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
     ),
   ).toBeLessThanOrEqual(0.5);
 
+  await openPromptExamples(page);
   const promptExample = page.getByRole("combobox", {
-    name: "Example prompt",
+    name: "Search example prompts",
+    exact: true,
   });
   await expect(promptExample).toHaveAttribute(
     "placeholder",
     "Search examples",
   );
-  await expect(
-    page.getByRole("button", { name: "Open example prompts" }),
-  ).toBeVisible();
-  await promptExample.click();
   const promptExampleContent = page.locator(
     '[data-slot="combobox-content"]',
   );
@@ -1025,20 +1059,17 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
   await expect(promptOptions).toHaveText("Joyful dance");
   await promptExample.press("ArrowDown");
   await promptExample.press("Enter");
-  await expect(promptExample).toHaveValue("Joyful dance");
   await expect(prompt).toHaveValue("A person performs a joyful dance.");
 
   const validation = await page.evaluate(async () => {
     const { validateGenerationForm } = await import("/src/main.ts");
     return {
-      empty: validateGenerationForm("", "2", "2").promptError,
-      multilingual: validateGenerationForm("人物が歩く。", "2", "2").values,
-      long: validateGenerationForm("a".repeat(281), "2", "2").promptError,
-      seed: validateGenerationForm("A person walks.", "2", "-1").seedError,
-      duration: validateGenerationForm("A person walks.", "3", "2").promptError,
+      empty: validateGenerationForm("", "2").promptError,
+      multilingual: validateGenerationForm("人物が歩く。", "2").values,
+      long: validateGenerationForm("a".repeat(281), "2").promptError,
+      seed: validateGenerationForm("A person walks.", "-1").seedError,
       valid: validateGenerationForm(
         "A person walks forward.",
-        "10",
         "4294967295",
       ).values,
     };
@@ -1046,15 +1077,12 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
   expect(validation.empty).toContain("Describe the motion");
   expect(validation.multilingual).toEqual({
     prompt: "人物が歩く。",
-    durationSeconds: 2,
     seed: 2,
   });
   expect(validation.long).toContain("280 characters");
   expect(validation.seed).toContain("whole-number seed");
-  expect(validation.duration).toContain("2 to 10 seconds");
   expect(validation.valid).toEqual({
     prompt: "A person walks forward.",
-    durationSeconds: 10,
     seed: 4_294_967_295,
   });
 });
@@ -1187,14 +1215,17 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   await expect(previewSettingsContent).toBeHidden();
   await expect(previewSettingsTrigger).toBeFocused();
 
-  for (const label of [
-    "Motion description",
-    "Seed",
-  ]) {
-    await expect(page.getByLabel(label, { exact: true })).toHaveCount(1);
-  }
   await expect(
-    page.getByRole("slider", { name: "Duration", exact: true }),
+    page.getByRole("textbox", {
+      name: "Motion description",
+      exact: true,
+    }),
+  ).toHaveCount(1);
+  await expect(
+    page.getByRole("spinbutton", { name: "Seed", exact: true }),
+  ).toHaveCount(1);
+  await expect(
+    page.getByRole("slider", { name: "Buffer ahead", exact: true }),
   ).toHaveCount(1);
 
   await expect(page.locator("#model-state")).toHaveText("Not loaded");
@@ -1237,28 +1268,20 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   await page.keyboard.press("=");
   await page.keyboard.press("Home");
 
-  const loopToggle = page.locator("#loop-toggle");
-  await expect(loopToggle).toBeDisabled();
-  await expect(loopToggle).toHaveAttribute("aria-pressed", "true");
-  await expect(loopToggle).toHaveClass(/\bborder-input\b/);
+  await expect(page.locator("#loop-toggle")).toHaveCount(0);
   const resetCamera = page.locator("#reset-camera");
   await expect(resetCamera).toHaveAttribute(
     "data-variant",
     "outline",
   );
-  const [loopBorder, resetBorder] = await Promise.all(
-    [loopToggle, resetCamera].map((control) =>
-      control.evaluate((element) => {
-        const style = getComputedStyle(element);
-        return {
-          style: style.borderStyle,
-          width: style.borderWidth,
-        };
-      }),
-    ),
-  );
-  expect(loopBorder).toEqual({ style: "solid", width: "1px" });
-  expect(resetBorder).toEqual(loopBorder);
+  const resetBorder = await resetCamera.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      style: style.borderStyle,
+      width: style.borderWidth,
+    };
+  });
+  expect(resetBorder).toEqual({ style: "solid", width: "1px" });
 });
 
 test("labels every icon button in the playback bar with a tooltip", async ({
@@ -1309,11 +1332,10 @@ test("labels every icon button in the playback bar with a tooltip", async ({
     );
   });
   await expect(page.locator("#play-pause")).toBeEnabled();
-  await expect(page.locator("#loop-toggle")).toBeEnabled();
+  await expect(page.locator("#loop-toggle")).toHaveCount(0);
 
   for (const [selector, label] of [
     ["#play-pause", "Play motion"],
-    ["#loop-toggle", "Loop playback"],
     ["#reset-camera", "Reset camera"],
   ] as const) {
     const trigger = page.locator(selector);
@@ -1630,29 +1652,48 @@ test("toggles the motion-control sidebar only in the side-by-side layout", async
   expect(await viewportPanel.boundingBox()).toEqual(viewportPanelBefore);
 });
 
-test("stacks the workspace before the two-pane layout can overflow", async ({
+test("uses a viewport-centered workspace and motion drawer on narrow screens", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 800, height: 900 });
   await page.goto("/");
 
-  const panes = await Promise.all(
-    ["#generator-panel", "#viewport-panel"].map((selector) =>
-      page.locator(selector).boundingBox(),
-    ),
-  );
-  expect(panes.every(Boolean)).toBe(true);
-  expect(panes[0]!.y).toBeLessThan(panes[1]!.y);
-  await expect(page.locator("#generator-panel")).toBeVisible();
-  await expect(page.locator("#sidebar-toggle")).toBeHidden();
-  await expect(page.locator(".sidebar-toggle-anchor")).toBeHidden();
+  const viewportPanel = page.locator("#viewport-panel");
+  const viewportPanelBox = await viewportPanel.boundingBox();
+  expect(viewportPanelBox).not.toBeNull();
+  expect(viewportPanelBox!.x).toBe(0);
+  expect(viewportPanelBox!.y).toBe(0);
+  expect(viewportPanelBox!.width).toBeCloseTo(800, 1);
+  expect(viewportPanelBox!.height).toBeCloseTo(900, 1);
+  await expect(page.locator("#generator-panel")).toBeHidden();
+  await expect(page.locator("#sidebar-toggle")).toHaveCount(0);
+  await expect(page.locator(".sidebar-toggle-anchor")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", {
+      name: "Motion controls",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("textbox", {
+      name: "Motion description",
+      exact: true,
+    }),
+  ).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(
-        () => document.documentElement.scrollWidth <= window.innerWidth,
+        () =>
+          document.documentElement.scrollWidth <= window.innerWidth &&
+          document.documentElement.scrollHeight <= window.innerHeight,
       ),
     )
     .toBe(true);
+
+  await openMotionControls(page);
+  await expect(
+    page.getByRole("slider", { name: "Buffer ahead", exact: true }),
+  ).toBeVisible();
 });
 
 test("honors reduced motion and keeps shadcn controls usable on mobile", async ({
@@ -1676,7 +1717,7 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
         .evaluate((element) => getComputedStyle(element).transitionDuration),
     )
     .toBe("0s");
-  await page.locator("#prompt-example").click();
+  await openPromptExamples(page);
   await expect
     .poll(() =>
       page
@@ -1684,21 +1725,14 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
         .evaluate((element) => getComputedStyle(element).animationName),
     )
     .toBe("none");
-  await page.keyboard.press("Escape");
-  const importModel = page.locator("#import-model");
-  const importModelBox = await importModel.boundingBox();
-  expect(importModelBox).not.toBeNull();
-  await page.mouse.move(
-    importModelBox!.x + importModelBox!.width / 2,
-    importModelBox!.y + importModelBox!.height / 2,
-  );
-  await page.mouse.down();
   await expect
     .poll(() =>
-      importModel.evaluate((element) => getComputedStyle(element).translate),
+      page
+        .locator("#prompt-example")
+        .evaluate((element) => getComputedStyle(element).fontSize),
     )
-    .toBe("none");
-  await page.mouse.up();
+    .toBe("16px");
+  await page.keyboard.press("Escape");
 
   await expect(page.locator("#generation-progress")).toBeVisible();
   await expect(page.locator("#generation-progress")).not.toHaveAttribute(
@@ -1713,6 +1747,70 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
   const activeGenerationStatus =
     await page.locator("#generation-progress").boundingBox();
   expect(activeGenerationStatus).toEqual(idleGenerationStatus);
+
+  const [viewportPanel, viewport, promptComposer, playbackBar] =
+    await Promise.all(
+      [
+        "#viewport-panel",
+        "#viewport",
+        ".prompt-composer",
+        "#playback-bar",
+      ].map((selector) => page.locator(selector).boundingBox()),
+    );
+  expect(viewportPanel).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect(promptComposer).not.toBeNull();
+  expect(playbackBar).not.toBeNull();
+  expect(viewportPanel!.y).toBe(0);
+  expect(viewportPanel!.height).toBeCloseTo(844, 1);
+  expect(viewport!.y + viewport!.height).toBeCloseTo(promptComposer!.y, 1);
+  expect(promptComposer!.y + promptComposer!.height).toBeCloseTo(
+    playbackBar!.y,
+    1,
+  );
+
+  await expect(page.locator("#generator-panel")).toBeHidden();
+  await openMotionControls(page);
+
+  // Regression: the initial mobile drawer placement must make the slider
+  // thumb measurable and interactive.
+  const targetBuffer = page.locator("#target-buffer");
+  const targetBufferThumb = targetBuffer.locator(
+    '[data-slot="slider-thumb"]',
+  );
+  const targetBufferTrack = targetBuffer.locator(
+    '[data-slot="slider-track"]',
+  );
+  await expect(targetBufferThumb).toBeVisible();
+  const [targetBufferThumbBox, targetBufferTrackBox] = await Promise.all([
+    targetBufferThumb.boundingBox(),
+    targetBufferTrack.boundingBox(),
+  ]);
+  expect(targetBufferThumbBox).not.toBeNull();
+  expect(targetBufferTrackBox).not.toBeNull();
+  expect(targetBufferThumbBox!.width).toBeGreaterThan(0);
+  expect(targetBufferThumbBox!.height).toBeGreaterThan(0);
+  const thumbCenterX =
+    targetBufferThumbBox!.x + targetBufferThumbBox!.width / 2;
+  expect(thumbCenterX).toBeGreaterThanOrEqual(targetBufferTrackBox!.x - 1);
+  expect(thumbCenterX).toBeLessThanOrEqual(
+    targetBufferTrackBox!.x + targetBufferTrackBox!.width + 1,
+  );
+
+  const importModel = page.locator("#import-model");
+  const importModelBox = await importModel.boundingBox();
+  expect(importModelBox).not.toBeNull();
+  await page.mouse.move(
+    importModelBox!.x + importModelBox!.width / 2,
+    importModelBox!.y + importModelBox!.height / 2,
+  );
+  await page.mouse.down();
+  await expect
+    .poll(() =>
+      importModel.evaluate((element) => getComputedStyle(element).translate),
+    )
+    .toBe("none");
+  await page.mouse.up();
 
   await page.locator("#remove-model").evaluate((element) => {
     (element as HTMLButtonElement).hidden = false;
@@ -1736,40 +1834,40 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
     )
     .toBe(true);
 
-  const panes = await Promise.all(
-    ["#generator-panel", "#viewport-panel"].map((selector) =>
-      page.locator(selector).boundingBox(),
-    ),
-  );
-  expect(panes.every(Boolean)).toBe(true);
-  expect(panes[0]!.y).toBeLessThan(panes[1]!.y);
   await expect(page.locator(".inspector-panel")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page
+        .locator("#seed")
+        .evaluate((element) => getComputedStyle(element).fontSize),
+    )
+    .toBe("16px");
+  await page.keyboard.press("Escape");
+  await expect(
+    page.getByRole("button", {
+      name: "Motion controls",
+      exact: true,
+    }),
+  ).toBeFocused();
 
   await openPreviewSettings(page);
   const preview = await page.locator("#viewport").boundingBox();
   expect(preview).not.toBeNull();
-  expect(preview!.height).toBeGreaterThanOrEqual(384);
-
-  const mobileFormFontSizes = await page.evaluate(() =>
-    ["#prompt", "#seed", "#prompt-example"].map((selector) => {
-      const element = document.querySelector(selector);
-      if (!(element instanceof HTMLElement)) {
-        throw new Error(`Missing mobile form control: ${selector}`);
-      }
-      return getComputedStyle(element).fontSize;
-    }),
-  );
-  expect(mobileFormFontSizes).toEqual(["16px", "16px", "16px"]);
+  expect(preview!.height).toBeGreaterThan(0);
+  await expect
+    .poll(() =>
+      page
+        .locator("#prompt")
+        .evaluate((element) => getComputedStyle(element).fontSize),
+    )
+    .toBe("16px");
 
   const controlSelectors = [
-    "#import-model",
-    "#prompt-example",
-    "#apply-prompt",
     "#generate",
     "#play-pause",
     "#playback-speed",
-    "#loop-toggle",
     "#reset-camera",
+    "#preview-settings-trigger",
     "#import-vrm",
   ];
   const boxes = await Promise.all(
@@ -1782,7 +1880,7 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
   }
 
   const playbackBoxes = await Promise.all(
-    ["#play-pause", "#playback-speed", "#loop-toggle", "#reset-camera"].map(
+    ["#play-pause", "#playback-speed", "#reset-camera"].map(
       (selector) => page.locator(selector).boundingBox(),
     ),
   );
@@ -1794,6 +1892,13 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
     .poll(() =>
       page.evaluate(
         () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    )
+    .toBe(true);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => document.documentElement.scrollHeight <= window.innerHeight,
       ),
     )
     .toBe(true);
@@ -1811,47 +1916,71 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
   });
 
   await page.goto("/");
-  await openPreviewSettings(page);
   await expect
     .poll(() =>
       page.evaluate(() => matchMedia("(any-pointer: coarse)").matches),
     )
     .toBe(true);
 
-  const selectors = [
-    "#import-model",
-    '[data-slot="input-group"]:has(#prompt-example)',
-    "[data-combobox-trigger]",
-    "#apply-prompt",
-    "#randomize-seed",
-    "#generate",
-    "#preview-settings-trigger",
-    "#play-pause",
-    "#playback-speed",
-    "#loop-toggle",
-    "#reset-camera",
-    "#import-vrm",
-    "#duration",
-    "#target-buffer",
-    "#timeline",
+  const alwaysVisibleControls = [
+    page.locator('[data-slot="input-group"]:has(#prompt)'),
+    page.locator('[data-slot="combobox-trigger"]'),
+    page.locator("#generate"),
+    page.getByRole("button", {
+      name: "Motion controls",
+      exact: true,
+    }),
+    page.locator("#preview-settings-trigger"),
+    page.locator("#play-pause"),
+    page.locator("#playback-speed"),
+    page.locator("#reset-camera"),
+    page.locator("#timeline"),
   ];
   const boxes = await Promise.all(
-    selectors.map((selector) => page.locator(selector).boundingBox()),
+    alwaysVisibleControls.map((control) => control.boundingBox()),
   );
   for (const [index, box] of boxes.entries()) {
     expect(box).not.toBeNull();
     expect(
       box!.width,
-      `${selectors[index]} tap-target width`,
+      `always-visible control ${index} tap-target width`,
     ).toBeGreaterThanOrEqual(43.5);
     expect(
       box!.height,
-      `${selectors[index]} tap-target height`,
+      `always-visible control ${index} tap-target height`,
     ).toBeGreaterThanOrEqual(43.5);
   }
 
+  await openMotionControls(page);
+  const drawerControls = [
+    page.locator("#import-model"),
+    page.locator("#randomize-seed"),
+    page.locator("#target-buffer"),
+    page.locator("#restart-generation"),
+    page.locator("#restart-from-now"),
+  ];
+  for (const [index, control] of drawerControls.entries()) {
+    await control.scrollIntoViewIfNeeded();
+    const box = await control.boundingBox();
+    expect(box).not.toBeNull();
+    expect(
+      box!.width,
+      `drawer control ${index} tap-target width`,
+    ).toBeGreaterThanOrEqual(43.5);
+    expect(
+      box!.height,
+      `drawer control ${index} tap-target height`,
+    ).toBeGreaterThanOrEqual(43.5);
+  }
+  const targetBufferThumb = page.locator(
+    '#target-buffer [data-slot="slider-thumb"]',
+  );
+  await expect(targetBufferThumb).toBeVisible();
+  expect(await targetBufferThumb.boundingBox()).not.toBeNull();
+  await page.keyboard.press("Escape");
+
   const promptExamples = page.locator('[data-slot="combobox-item"]');
-  await page.locator("#prompt-example").click();
+  await openPromptExamples(page);
   await expect(promptExamples).toHaveCount(100);
   for (const index of [0, 49, 99]) {
     const item = promptExamples.nth(index);
@@ -1862,10 +1991,14 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
   }
   await page.keyboard.press("Escape");
   await openPreviewSettings(page);
-  await page.waitForTimeout(150);
+  const importVrm = page.locator("#import-vrm");
+  await expect(importVrm).toBeVisible();
+  const importVrmBox = await importVrm.boundingBox();
+  expect(importVrmBox).not.toBeNull();
+  expect(importVrmBox!.width).toBeGreaterThanOrEqual(43.5);
+  expect(importVrmBox!.height).toBeGreaterThanOrEqual(43.5);
 
   const displayControlIds = [
-    "stream-generation",
     "show-vrm",
     "show-skeleton",
     "show-contacts",
@@ -1881,23 +2014,7 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
       `${controlId} label tap-target height`,
     ).toBeGreaterThanOrEqual(43.5);
   }
-
-  const continuousGeneration = page.locator("#stream-generation");
-  const continuousLabel = page.locator(
-    'label[for="stream-generation"]',
-  );
-  await continuousLabel.scrollIntoViewIfNeeded();
-  const continuousLabelBox = await continuousLabel.boundingBox();
-  expect(continuousLabelBox).not.toBeNull();
-  await page.mouse.click(
-    continuousLabelBox!.x + continuousLabelBox!.width - 2,
-    continuousLabelBox!.y + 2,
-  );
-  await expect(continuousGeneration).toHaveAttribute(
-    "aria-checked",
-    "false",
-  );
-  await openPreviewSettings(page);
+  await expect(page.locator("#stream-generation")).toHaveCount(0);
 
   const orientations = page.locator("#show-orientations");
   await expect(orientations).toHaveAttribute("aria-checked", "true");

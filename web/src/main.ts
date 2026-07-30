@@ -37,10 +37,7 @@ import {
 } from "./viewer";
 import { PROMPT_EXAMPLE_EVENT } from "./prompt-examples";
 import {
-  continuousGenerationControl,
-  durationControl,
   generationProgressControl,
-  loopControl,
   modelProgressControl,
   playbackSpeedControl,
   playPauseControl,
@@ -53,12 +50,10 @@ import {
   showVrmControl,
   targetBufferControl,
   timelineControl,
-  type PressedControlState,
   unsupportedDeviceControl,
 } from "./ui-control-store";
 
 const UINT32_MAX = 0xffff_ffff;
-const ALLOWED_DURATIONS = new Set([2, 4, 6, 8, 10]);
 const CACHE_ROOT = "ardy-mini-model-cache";
 const CACHE_ARCHIVE = "active-pack.tar.gz";
 const DEFAULT_TEXT_CFG_WEIGHT = 3.5;
@@ -68,7 +63,6 @@ const DEFAULT_REPLAN_THRESHOLD_FRAMES = 10;
 
 interface FormValues {
   prompt: string;
-  durationSeconds: number;
   seed: number;
 }
 
@@ -125,11 +119,9 @@ interface ActiveGeneration {
 
 export function validateGenerationForm(
   promptValue: string,
-  durationValue: string,
   seedValue: string,
 ): FormValidation {
   const prompt = promptValue.trim();
-  const durationSeconds = Number(durationValue);
   const seed = Number(seedValue);
   const validation: FormValidation = {};
 
@@ -143,14 +135,47 @@ export function validateGenerationForm(
     validation.seedError = `Enter a whole-number seed from 0 to ${UINT32_MAX}.`;
   }
 
-  if (!ALLOWED_DURATIONS.has(durationSeconds)) {
-    validation.promptError ??= "Choose a duration from 2 to 10 seconds in 2-second steps.";
-  }
-
   if (!validation.promptError && !validation.seedError) {
-    validation.values = { prompt, durationSeconds, seed };
+    validation.values = { prompt, seed };
   }
   return validation;
+}
+
+export interface PromptActionState {
+  label: "Start motion" | "Update motion";
+  dirty: boolean;
+  canSubmit: boolean;
+}
+
+/**
+ * The textarea is a draft. A live session keeps using its active prompt until
+ * the user explicitly submits a different non-empty draft.
+ */
+export function resolvePromptActionState(
+  hasMotion: boolean,
+  hasContinuation: boolean,
+  draftPrompt: string,
+  activePrompt: string | null,
+): PromptActionState {
+  const draft = draftPrompt.trim();
+  const dirty = activePrompt === null || draft !== activePrompt;
+  return {
+    label: hasMotion ? "Update motion" : "Start motion",
+    dirty,
+    canSubmit:
+      draft.length > 0 &&
+      draft.length <= 280 &&
+      (!hasMotion || (hasContinuation && dirty)),
+  };
+}
+
+export function livePromptBranchFrame(
+  playhead: number,
+  frameCount: number,
+): number {
+  const safeFrameCount = Math.max(0, Math.floor(frameCount));
+  const safePlayhead = Math.max(0, Math.floor(playhead));
+  return Math.min(safeFrameCount, safePlayhead + DEFAULT_REPLAN_BUFFER_FRAMES);
 }
 
 export function formatTime(seconds: number): string {
@@ -671,7 +696,6 @@ export function bootstrap(): () => void {
   const prompt = requiredElement<HTMLTextAreaElement>("prompt");
   const promptCount = requiredElement<HTMLElement>("prompt-count");
   const promptError = requiredElement<HTMLElement>("prompt-error");
-  const durationOutput = requiredElement<HTMLOutputElement>("duration-output");
   const seed = requiredElement<HTMLInputElement>("seed");
   const seedError = requiredElement<HTMLElement>("seed-error");
   const randomizeSeed = requiredElement<HTMLButtonElement>("randomize-seed");
@@ -700,7 +724,6 @@ export function bootstrap(): () => void {
     requiredElement<HTMLButtonElement>("restart-generation");
   const restartFromNow =
     requiredElement<HTMLButtonElement>("restart-from-now");
-  const applyPrompt = requiredElement<HTMLButtonElement>("apply-prompt");
   const cancelGeneration =
     requiredElement<HTMLButtonElement>("cancel-generation");
   const targetBufferOutput =
@@ -715,8 +738,6 @@ export function bootstrap(): () => void {
   const totalTime = requiredElement<HTMLElement>("total-time");
   const resetCamera = requiredElement<HTMLButtonElement>("reset-camera");
   const appStatus = requiredElement<HTMLElement>("app-status");
-  const viewportPanel = requiredElement<HTMLElement>("viewport-panel");
-  const viewport = requiredElement<HTMLElement>("viewport");
 
   const vrmCard = requiredElement<HTMLElement>("vrm-card");
   const vrmName = requiredElement<HTMLElement>("vrm-name");
@@ -780,6 +801,8 @@ export function bootstrap(): () => void {
   let generationReturnFocus: HTMLElement | null = null;
   let currentMotion: StructuredMotionResult | null = null;
   let currentContinuation: RuntimeContinuationState | null = null;
+  let activePrompt: string | null = null;
+  let playbackIntent = false;
   let playbackOnlyStatus = false;
   let currentProvenance: MotionSessionProvenance = {};
   let editorState = cloneEditorState(DEFAULT_EDITOR_STATE);
@@ -796,10 +819,6 @@ export function bootstrap(): () => void {
     window.requestAnimationFrame(() => {
       appStatus.textContent = message;
     });
-  }
-
-  function updateLoopControl(next: Partial<PressedControlState>): void {
-    loopControl.setState(next);
   }
 
   function setProgress(
@@ -828,27 +847,6 @@ export function bootstrap(): () => void {
     } else {
       field.removeAttribute("data-invalid");
     }
-  }
-
-  function finiteInput(
-    input: HTMLInputElement,
-    fallback: number,
-    minimum = -Number.MAX_VALUE,
-    maximum = Number.MAX_VALUE,
-  ): number {
-    const value = Number(input.value);
-    return Number.isFinite(value)
-      ? Math.max(minimum, Math.min(maximum, value))
-      : fallback;
-  }
-
-  function integerInput(
-    input: HTMLInputElement,
-    fallback: number,
-    minimum: number,
-    maximum: number,
-  ): number {
-    return Math.round(finiteInput(input, fallback, minimum, maximum));
   }
 
   function integerValue(
@@ -1011,31 +1009,16 @@ export function bootstrap(): () => void {
   function updatePrompt(): void {
     promptCount.textContent = `${prompt.value.length} / 280`;
     if (prompt.dataset.validated === "true") {
-      const validation = validateGenerationForm(
-        prompt.value,
-        String(durationControl.getSnapshot().value),
-        seed.value,
-      );
+      const validation = validateGenerationForm(prompt.value, seed.value);
       promptError.textContent = validation.promptError ?? "";
       setFieldInvalid(prompt, Boolean(validation.promptError));
     }
     updateGenerateAvailability();
   }
 
-  function updateDuration(): void {
-    const value = durationControl.getSnapshot().value;
-    const valueText = `${value} seconds`;
-    durationOutput.value = valueText;
-    durationControl.setState({ ariaValueText: valueText });
-  }
-
   function updateSeed(): void {
     if (seed.dataset.validated === "true") {
-      const validation = validateGenerationForm(
-        prompt.value,
-        String(durationControl.getSnapshot().value),
-        seed.value,
-      );
+      const validation = validateGenerationForm(prompt.value, seed.value);
       seedError.textContent = validation.seedError ?? "";
       setFieldInvalid(seed, Boolean(validation.seedError));
     }
@@ -1043,40 +1026,55 @@ export function bootstrap(): () => void {
 
   function updateTargetBuffer(): void {
     const value = targetBufferControl.getSnapshot().value;
-    const valueText = `${value} frames`;
+    const seconds = value / (modelInfo?.fps ?? 20);
+    const valueText = `${seconds} ${seconds === 1 ? "second" : "seconds"}`;
     targetBufferOutput.value = valueText;
     targetBufferControl.setState({ ariaValueText: valueText });
   }
 
+  function targetFrameCount(): number {
+    return integerValue(targetBufferControl.getSnapshot().value, 80, 1, 1000);
+  }
+
   function updateGenerateAvailability(): void {
     const generating = activeGeneration !== null;
-    const generationBusy =
-      generating || activeRestoreRequest !== null;
+    const generationBusy = generating || activeRestoreRequest !== null;
+    const promptAction = resolvePromptActionState(
+      currentMotion !== null,
+      currentContinuation !== null,
+      prompt.value,
+      activePrompt,
+    );
     const continuationAvailable = canContinueGeneration(
       modelReady,
       generationBusy,
       currentMotion !== null,
       currentContinuation !== null,
     );
-    generate.disabled = !canAttemptGeneration(
-      prompt.value,
-      workerReady,
-      modelReady,
-      modelLoading || modelCaching,
-      generationBusy,
-    );
-    applyPrompt.disabled =
-      !modelReady ||
-      generationBusy ||
-      prompt.value.trim().length === 0 ||
-      (currentMotion !== null && currentContinuation === null);
-    restartGeneration.disabled = !modelReady || generationBusy;
+    generate.disabled =
+      !canAttemptGeneration(
+        prompt.value,
+        workerReady,
+        modelReady,
+        modelLoading || modelCaching,
+        generationBusy,
+      ) || !promptAction.canSubmit;
+    generate.dataset.dirty = String(promptAction.dirty);
+    form.dataset.promptAction =
+      promptAction.label === "Start motion" ? "start" : "update";
+    if (!generationBusy) {
+      generateLabel.textContent = promptAction.label;
+    }
+    restartGeneration.disabled =
+      currentMotion === null ||
+      !canAttemptGeneration(
+        prompt.value,
+        workerReady,
+        modelReady,
+        modelLoading || modelCaching,
+        generationBusy,
+      );
     restartFromNow.disabled = !continuationAvailable;
-    continuousGenerationControl.setState({
-      disabled:
-        generationBusy ||
-        (currentMotion !== null && currentContinuation === null),
-    });
     importModel.disabled =
       webGpuState !== "ready" || modelLoading || modelCaching;
     fileInput.disabled = importModel.disabled;
@@ -1098,9 +1096,14 @@ export function bootstrap(): () => void {
       generateHelp.textContent = "Describe a motion to enable generation.";
     } else if (currentMotion !== null && currentContinuation === null) {
       generateHelp.textContent =
-        "Restart to create a new continuable motion session.";
+        "Start a new motion to create a continuable session.";
+    } else if (currentMotion !== null && !promptAction.dirty) {
+      generateHelp.textContent =
+        "Edit the motion description to update the live session.";
     } else {
-      generateHelp.textContent = "Ready to generate entirely in this browser.";
+      generateHelp.textContent = currentMotion
+        ? "Ready to update the live motion."
+        : "Ready to start motion in this browser.";
     }
 
     if (
@@ -1115,7 +1118,7 @@ export function bootstrap(): () => void {
           ? "Checking WebGPU"
           : modelLoading || modelCaching
             ? "Preparing model"
-            : "Waiting for model";
+            : "Load a model to start";
       generationPercent.textContent = "—";
     }
   }
@@ -1124,7 +1127,6 @@ export function bootstrap(): () => void {
     currentContinuation = null;
     playbackOnlyStatus = currentMotion !== null;
     if (currentMotion) {
-      continuousGenerationControl.setState({ checked: false });
       generationProgressElement.dataset.state = "playback-only";
       generationStage.textContent =
         `${currentMotion.frameCount} frames · playback only`;
@@ -1152,10 +1154,14 @@ export function bootstrap(): () => void {
     cancelGeneration.tabIndex = active ? 0 : -1;
     cancelGeneration.textContent = "Cancel";
     generateLabel.textContent = active
-      ? background
-        ? "Extending motion"
-        : "Generating motion"
-      : "Generate motion";
+      ? activeGeneration?.mode === "branch"
+        ? "Updating motion"
+        : background
+          ? "Extending motion"
+          : "Starting motion"
+      : currentMotion
+        ? "Update motion"
+        : "Start motion";
     generateSpinner.classList.toggle("hidden", !active);
     generate.setAttribute("aria-busy", String(active));
     updateGenerateAvailability();
@@ -1200,14 +1206,13 @@ export function bootstrap(): () => void {
   function updatePlayback(state: PlaybackState): void {
     const maxFrame = Math.max(0, state.frameCount - 1);
     playPauseControl.setState({
-      pressed: state.playing,
+      pressed: playbackIntent,
       disabled: state.frameCount < 2,
     });
     playbackSpeedControl.setState({
       value: String(state.speed),
       disabled: state.frameCount === 0,
     });
-    updateLoopControl({ disabled: state.frameCount < 2 });
     const elapsed = formatTime(state.frame / state.fps);
     const total = formatTime(maxFrame / state.fps);
     currentTime.textContent = elapsed;
@@ -1234,6 +1239,7 @@ export function bootstrap(): () => void {
       viewer.onPlaybackChange = updatePlayback;
       viewer.applyEditorState(editorState);
       viewer.setOutputVisibility(outputVisibilityFromControls());
+      viewer.setLoop(false);
       setVrmLoading(false);
     }
     return true;
@@ -1374,7 +1380,7 @@ export function bootstrap(): () => void {
     postCommand({
       type: "resetSession",
       requestId: requestId("reset"),
-      seed: integerInput(seed, 2, 0, UINT32_MAX),
+      seed: 2,
       initialTranslation: new Float32Array(
         DEFAULT_EDITOR_STATE.initialTransform.position,
       ),
@@ -1447,13 +1453,7 @@ export function bootstrap(): () => void {
     );
     setEditor(editorState);
     syncOutputVisibility();
-    if (resetPresentation) {
-      const loop =
-        !continuousGenerationControl.getSnapshot().checked &&
-        !reducedMotion.matches;
-      viewer.setLoop(loop);
-      updateLoopControl({ pressed: loop });
-    }
+    viewer.setLoop(false);
     updateGenerateAvailability();
   }
 
@@ -1477,8 +1477,11 @@ export function bootstrap(): () => void {
         : (previousPlayback?.frame ?? 0);
     const preservePlaying =
       active.mode === "replace"
-        ? shouldAutoplayMotion(reducedMotion.matches)
+        ? active.resumePlayback
         : Boolean(previousPlayback?.playing || active.resumePlayback);
+    if (active.mode === "replace") {
+      playbackIntent = preservePlaying;
+    }
     const resetPresentation = shouldResetMotionPresentation(
       active.mode,
       chunk.startFrame === 0,
@@ -1529,15 +1532,6 @@ export function bootstrap(): () => void {
         `Generation complete. The session contains ${event.sessionFrameCount} frames.`,
       );
       updateGenerateAvailability();
-      if (
-        window.matchMedia("(max-width: 760px)").matches &&
-        active.mode === "replace"
-      ) {
-        viewportPanel.scrollIntoView({
-          behavior: reducedMotion.matches ? "auto" : "smooth",
-          block: "start",
-        });
-      }
     } catch (error) {
       activeGeneration = null;
       setGenerationBusy(false);
@@ -1545,22 +1539,30 @@ export function bootstrap(): () => void {
     }
   }
 
-  function validateFormForGeneration(): FormValues | null {
+  function validateFormForGeneration(
+    mode: GenerationMode,
+    promptValue: string,
+  ): FormValues | null {
+    const continuationSeed =
+      currentContinuation?.random.seed ?? currentProvenance.seed ?? 0;
     const validation = validateGenerationForm(
-      prompt.value,
-      String(durationControl.getSnapshot().value),
-      seed.value,
+      promptValue,
+      mode === "replace" ? seed.value : String(continuationSeed),
     );
+    if (mode === "append") {
+      return validation.values ?? null;
+    }
     promptError.textContent = validation.promptError ?? "";
-    seedError.textContent = validation.seedError ?? "";
+    seedError.textContent =
+      mode === "replace" ? (validation.seedError ?? "") : "";
     prompt.dataset.validated = "true";
-    seed.dataset.validated = "true";
+    if (mode === "replace") seed.dataset.validated = "true";
     setFieldInvalid(prompt, Boolean(validation.promptError));
-    setFieldInvalid(seed, Boolean(validation.seedError));
+    setFieldInvalid(seed, mode === "replace" && Boolean(validation.seedError));
     if (!validation.values) {
       if (validation.promptError) {
         prompt.focus();
-      } else if (validation.seedError) {
+      } else if (mode === "replace" && validation.seedError) {
         window.requestAnimationFrame(() => seed.focus());
       }
       return null;
@@ -1572,9 +1574,9 @@ export function bootstrap(): () => void {
     mode: GenerationMode,
     options: {
       durationFrames?: number;
-      durationSeconds?: number;
       branchFrame?: number;
       background?: boolean;
+      promptValue?: string;
       returnFocus?: HTMLElement;
     } = {},
   ): void {
@@ -1601,8 +1603,14 @@ export function bootstrap(): () => void {
       );
       return;
     }
-    const values = validateFormForGeneration();
+    const promptValue =
+      options.promptValue ?? (mode === "append" ? activePrompt : prompt.value);
+    if (!promptValue) return;
+    const values = validateFormForGeneration(mode, promptValue);
     if (!values) return;
+    if (mode !== "append") {
+      activePrompt = values.prompt;
+    }
     playbackOnlyStatus = false;
     const background = Boolean(options.background);
     const id = requestId(mode);
@@ -1612,9 +1620,10 @@ export function bootstrap(): () => void {
       mode,
       background,
       receivedChunk: false,
-      resumePlayback: Boolean(
-        playback?.playing || (background && mode === "append"),
-      ),
+      resumePlayback:
+        mode === "replace"
+          ? shouldAutoplayMotion(reducedMotion.matches)
+          : playbackIntent,
     };
     generationProgressValue = 0;
     setProgress(generationProgressControl, 0);
@@ -1656,13 +1665,13 @@ export function bootstrap(): () => void {
           }
         : {}),
       prompt: values.prompt,
-      seed: values.seed,
-      ...(options.durationFrames !== undefined
-        ? { durationFrames: options.durationFrames }
-        : {
-            durationSeconds:
-              options.durationSeconds ?? values.durationSeconds,
-          }),
+      // The protocol keeps this field required, but append and branch retain
+      // the continuation RNG rather than reading the replace-only seed input.
+      seed:
+        mode === "replace"
+          ? values.seed
+          : (currentContinuation?.random.seed ?? currentProvenance.seed ?? 0),
+      durationFrames: options.durationFrames ?? targetFrameCount(),
       cfgWeight: DEFAULT_TEXT_CFG_WEIGHT,
       historyFrames: Math.min(
         DEFAULT_HISTORY_FRAMES,
@@ -1690,13 +1699,13 @@ export function bootstrap(): () => void {
 
   function maybeAutoReplan(state: PlaybackState): void {
     if (
-      !continuousGenerationControl.getSnapshot().checked ||
+      !playbackIntent ||
       !modelReady ||
       activeGeneration ||
       !currentMotion ||
       !currentContinuation ||
-      state.frameCount === 0 ||
-      (!state.playing && state.frame < state.frameCount - 1)
+      !activePrompt ||
+      state.frameCount === 0
     ) {
       return;
     }
@@ -1706,20 +1715,21 @@ export function bootstrap(): () => void {
       Math.max(1, targetBufferControl.getSnapshot().value),
     );
     if (remaining > threshold) return;
-    const desired = integerValue(
-      targetBufferControl.getSnapshot().value,
-      80,
-      1,
-      1000,
-    );
-    const needed = Math.max(
-      modelInfo?.generationFrames ?? 40,
-      desired - remaining,
-    );
     startGeneration("append", {
-      durationFrames: needed,
+      durationFrames: targetFrameCount(),
       background: true,
+      promptValue: activePrompt,
     });
+  }
+
+  function setPlaybackIntent(playing: boolean): void {
+    playbackIntent = playing;
+    if (activeGeneration) {
+      activeGeneration.resumePlayback = playing;
+    }
+    viewer?.setPlaying(playing);
+    const state = viewer?.getPlaybackState();
+    if (playing && state) maybeAutoReplan(state);
   }
 
   worker.addEventListener(
@@ -1887,12 +1897,28 @@ export function bootstrap(): () => void {
             document.activeElement !== document.body
           ? document.activeElement
           : generate;
-    startGeneration("replace", { returnFocus: submitter });
+    if (!currentMotion) {
+      startGeneration("replace", { returnFocus: submitter });
+      return;
+    }
+    if (!currentContinuation) {
+      updateGenerateAvailability();
+      return;
+    }
+    const playback = viewer?.getPlaybackState();
+    startGeneration("branch", {
+      returnFocus: submitter,
+      branchFrame: livePromptBranchFrame(
+        playback?.frame ?? 0,
+        currentMotion.frameCount,
+      ),
+      durationFrames: targetFrameCount(),
+      background: playbackIntent,
+    });
   });
 
   prompt.addEventListener("input", updatePrompt);
   seed.addEventListener("input", updateSeed);
-  durationControl.onCommit(updateDuration, lifecycle.signal);
   targetBufferControl.onCommit(updateTargetBuffer, lifecycle.signal);
 
   document.addEventListener(PROMPT_EXAMPLE_EVENT, (event) => {
@@ -1974,35 +2000,7 @@ export function bootstrap(): () => void {
     startGeneration("branch", {
       returnFocus: restartFromNow,
       branchFrame: frame,
-      durationFrames: integerValue(
-        targetBufferControl.getSnapshot().value,
-        80,
-        1,
-        1000,
-      ),
-    });
-  });
-  applyPrompt.addEventListener("click", () => {
-    if (!currentMotion) {
-      startGeneration("replace", { returnFocus: applyPrompt });
-      return;
-    }
-    const playback = viewer?.getPlaybackState();
-    const buffer = DEFAULT_REPLAN_BUFFER_FRAMES;
-    const branchFrame = Math.min(
-      currentMotion.frameCount,
-      (playback?.frame ?? 0) + buffer,
-    );
-    startGeneration("branch", {
-      returnFocus: applyPrompt,
-      branchFrame,
-      durationFrames: integerValue(
-        targetBufferControl.getSnapshot().value,
-        80,
-        1,
-        1000,
-      ),
-      background: Boolean(playback?.playing),
+      durationFrames: targetFrameCount(),
     });
   });
 
@@ -2106,32 +2104,22 @@ export function bootstrap(): () => void {
 
   dismissModelError.addEventListener("click", () => clearModelError(true));
   dismissVrmError.addEventListener("click", () => clearVrmError(true));
-  playPause.addEventListener("click", () => viewer?.togglePlaying());
+  playPause.addEventListener("click", () => {
+    setPlaybackIntent(!playbackIntent);
+  });
   timelineControl.onCommit((value) => viewer?.seek(value), lifecycle.signal);
   playbackSpeedControl.onCommit(
     (value) => viewer?.setSpeed(Number(value)),
     lifecycle.signal,
   );
-  loopControl.onCommit((pressed) => viewer?.setLoop(pressed), lifecycle.signal);
   resetCamera.addEventListener("click", () => viewer?.resetCamera());
-  continuousGenerationControl.onCommit((checked) => {
-    if (checked) {
-      viewer?.setLoop(false);
-      updateLoopControl({ pressed: false });
-      const state = viewer?.getPlaybackState();
-      if (state) maybeAutoReplan(state);
-    }
-  }, lifecycle.signal);
 
   const handleReducedMotionChange = (event: MediaQueryListEvent): void => {
     viewer?.setReducedMotion(event.matches);
     if (event.matches) {
-      viewer?.setPlaying(false);
+      setPlaybackIntent(false);
       viewer?.setLoop(false);
-      updateLoopControl({ pressed: false });
-      announce(
-        "Reduced motion enabled. Playback is paused and looping is off.",
-      );
+      announce("Reduced motion enabled. Playback is paused.");
     }
   };
   reducedMotion.addEventListener("change", handleReducedMotionChange, {
@@ -2198,7 +2186,7 @@ export function bootstrap(): () => void {
       }
       if (event.key === " ") {
         event.preventDefault();
-        viewer?.togglePlaying();
+        setPlaybackIntent(!playbackIntent);
       } else if (event.key === "ArrowLeft") {
         event.preventDefault();
         const state = viewer?.getPlaybackState();
@@ -2325,7 +2313,6 @@ export function bootstrap(): () => void {
   }
 
   updatePrompt();
-  updateDuration();
   updateSeed();
   updateTargetBuffer();
   syncOutputVisibility();

@@ -1,14 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useRef, useState } from "react"
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react"
+import { createPortal } from "react-dom"
 import {
   IconLayoutSidebar,
   IconCameraRotate,
   IconPlayerPause,
   IconPlayerPlay,
   IconRefresh,
-  IconRepeat,
   IconSettings,
   IconUpload,
   IconX,
@@ -36,7 +41,6 @@ import { Button, ButtonLink } from "@/components/ui/button"
 import {
   Card,
   CardAction,
-  CardContent,
   CardDescription,
   CardFooter,
   CardHeader,
@@ -44,7 +48,6 @@ import {
 } from "@/components/ui/card"
 import {
   Field,
-  FieldDescription,
   FieldError,
   FieldGroup,
   FieldLabel,
@@ -66,7 +69,16 @@ import {
   ComboboxInput,
   ComboboxItem,
   ComboboxList,
+  ComboboxTrigger,
 } from "@/components/ui/combobox"
+import {
+  Drawer,
+  DrawerContent,
+  DrawerDescription,
+  DrawerHeader,
+  DrawerTitle,
+  DrawerTrigger,
+} from "@/components/ui/drawer"
 import {
   Popover,
   PopoverContent,
@@ -84,7 +96,6 @@ import {
 } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
-import { Toggle } from "@/components/ui/toggle"
 import {
   Tooltip,
   TooltipContent,
@@ -95,7 +106,6 @@ import {
   BoundCheckbox,
   BoundProgress,
   BoundSlider,
-  BoundSwitch,
 } from "@/components/control-bindings"
 import {
   DEFAULT_PROMPT,
@@ -105,10 +115,7 @@ import {
 } from "@/prompt-examples"
 import { bootstrap } from "@/main"
 import {
-  continuousGenerationControl,
-  durationControl,
   generationProgressControl,
-  loopControl,
   modelProgressControl,
   playbackSpeedControl,
   playPauseControl,
@@ -151,41 +158,74 @@ const PLAYBACK_SPEED_OPTIONS = [
   { label: "2×", value: "2" },
 ]
 
+const MOBILE_LAYOUT_QUERY = "(max-width: 840px)"
+
+function useStablePortal(
+  host: HTMLElement | null,
+  className: string
+) {
+  const [container] = useState(() => {
+    const element = document.createElement("div")
+    element.className = className
+    return element
+  })
+
+  useLayoutEffect(() => {
+    if (host && container.parentElement !== host) {
+      host.append(container)
+    }
+  }, [container, host])
+
+  useEffect(
+    () => () => {
+      container.remove()
+    },
+    [container]
+  )
+
+  return container
+}
+
 function PromptExampleCombobox() {
   return (
-    <Field className="min-w-0">
-      <FieldLabel htmlFor="prompt-example">
-        Example prompt
-      </FieldLabel>
-      <Combobox
-        items={PROMPT_EXAMPLES}
-        itemToStringLabel={(example) => example.label}
-        itemToStringValue={(example) => example.prompt}
-        filter={matchesPromptExample}
-        autoHighlight
-        onValueChange={(value) => {
-          if (value) selectPrompt(value.prompt)
-        }}
+    <Combobox
+      items={PROMPT_EXAMPLES}
+      itemToStringLabel={(example) => example.label}
+      itemToStringValue={(example) => example.prompt}
+      filter={matchesPromptExample}
+      autoHighlight
+      onValueChange={(value) => {
+        if (value) selectPrompt(value.prompt)
+      }}
+    >
+      <ComboboxTrigger
+        render={
+          <InputGroupButton
+            type="button"
+            aria-label="Choose an example prompt"
+          />
+        }
       >
+        Examples
+      </ComboboxTrigger>
+      <ComboboxContent>
         <ComboboxInput
           id="prompt-example"
-          className="w-full min-w-0"
           placeholder="Search examples"
           autoComplete="off"
-          triggerAriaLabel="Open example prompts"
+          aria-label="Search example prompts"
+          showTrigger={false}
         />
-        <ComboboxContent>
-          <ComboboxEmpty>No examples found.</ComboboxEmpty>
-          <ComboboxList>
-            {(example) => (
-              <ComboboxItem key={example.prompt} value={example}>
-                {example.label}
-              </ComboboxItem>
-            )}
-          </ComboboxList>
-        </ComboboxContent>
-      </Combobox>
-    </Field>
+        <ComboboxEmpty>No examples found.</ComboboxEmpty>
+        <ComboboxList>
+          {(example) => (
+            <ComboboxItem key={example.prompt} value={example}>
+              {example.label}
+            </ComboboxItem>
+          )}
+        </ComboboxList>
+      </ComboboxContent>
+    </Combobox>
   )
 }
 
@@ -409,154 +449,158 @@ function ModelSection() {
   )
 }
 
-function PromptSection() {
+function PromptComposer() {
   return (
-    <section
-      className="flex flex-col gap-3 border-b p-3"
-      aria-labelledby="prompt-step-title"
-    >
-      <div className="flex items-center justify-between gap-3">
-        <h3
-          className="text-xs font-medium text-muted-foreground"
-          id="prompt-step-title"
-        >
-          Prompt
-        </h3>
-      </div>
+    <section className="prompt-composer border-t bg-background p-2">
+      <Field>
+        <InputGroup>
+          <InputGroupTextarea
+            id="prompt"
+            name="prompt"
+            form="generation-form"
+            defaultValue={DEFAULT_PROMPT}
+            rows={2}
+            maxLength={280}
+            spellCheck
+            autoComplete="off"
+            placeholder="A person walks forward, then waves with their right hand."
+            aria-describedby="prompt-count prompt-error generate-help"
+            required
+          />
+          <InputGroupAddon align="block-start" className="border-b">
+            <FieldLabel id="prompt-label" htmlFor="prompt">
+              Motion description
+            </FieldLabel>
+            <InputGroupText className="ml-auto" id="prompt-count">
+              {DEFAULT_PROMPT.length} / 280
+            </InputGroupText>
+          </InputGroupAddon>
+          <InputGroupAddon align="block-end" className="border-t">
+            <PromptExampleCombobox />
+            <InputGroupButton
+              id="generate"
+              className="ml-auto"
+              variant="default"
+              size="sm"
+              type="submit"
+              form="generation-form"
+              aria-describedby="generate-help"
+              aria-keyshortcuts="Control+Enter Meta+Enter"
+              disabled
+            >
+              <Spinner
+                id="generate-spinner"
+                className="hidden"
+                data-icon="inline-start"
+                aria-hidden="true"
+              />
+              <span id="generate-label">Start motion</span>
+            </InputGroupButton>
+          </InputGroupAddon>
+        </InputGroup>
+        <EmptyFieldError id="prompt-error" />
+      </Field>
 
-      <FieldGroup>
-        <Field>
-          <FieldLabel htmlFor="prompt">
-            Motion description
-          </FieldLabel>
-          <InputGroup>
-            <InputGroupTextarea
-              id="prompt"
-              name="prompt"
-              defaultValue={DEFAULT_PROMPT}
-              rows={3}
-              maxLength={280}
-              spellCheck
-              autoComplete="off"
-              placeholder="A person walks forward, then waves with their right hand."
-              aria-describedby="prompt-count prompt-error"
-              required
-            />
-            <InputGroupAddon align="block-end">
-              <InputGroupText id="prompt-count">
-                {DEFAULT_PROMPT.length} / 280
-              </InputGroupText>
-            </InputGroupAddon>
-          </InputGroup>
-          <EmptyFieldError id="prompt-error" />
-        </Field>
-      </FieldGroup>
-
-      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-end gap-1.5">
-        <PromptExampleCombobox />
+      <div
+        className="generation-status mt-1.5 grid min-h-9 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2"
+        id="generation-progress"
+        data-state="idle"
+        aria-busy="false"
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <span
+            className="truncate text-xs text-muted-foreground"
+            id="generation-stage"
+          >
+            Load a model to start
+          </span>
+          <span
+            className="shrink-0 text-xs text-muted-foreground tabular-nums"
+            id="generation-percent"
+          >
+            —
+          </span>
+        </div>
         <Button
-          id="apply-prompt"
-          variant="secondary"
+          id="cancel-generation"
+          className="invisible data-[state=active]:visible"
+          variant="destructive"
+          size="xs"
           type="button"
+          data-state="idle"
+          aria-hidden="true"
+          tabIndex={-1}
+          disabled
         >
-          Apply live
+          Cancel
         </Button>
+        <BoundProgress
+          control={generationProgressControl}
+          className="col-span-full"
+          aria-label="Generation progress"
+        />
+        <span className="sr-only" id="generate-help">
+          Load a model pack to enable generation.
+        </span>
       </div>
     </section>
   )
 }
 
-function ClipSection() {
-  const continuousGeneration = useControlState(
-    continuousGenerationControl
-  )
-
+function MotionSettingsSection() {
   return (
     <section
       className="flex flex-col gap-3 border-b p-3"
-      aria-labelledby="basic-settings-title"
+      aria-labelledby="new-motion-settings-title"
     >
       <div className="flex items-center justify-between gap-3">
         <h3
           className="text-xs font-medium text-muted-foreground"
-          id="basic-settings-title"
+          id="new-motion-settings-title"
         >
-          Clip
+          New motion
         </h3>
-        <output
-          id="duration-output"
-          className="text-xs text-muted-foreground"
-        >
-          4 seconds
-        </output>
       </div>
 
       <FieldGroup>
         <Field>
-          <FieldLabel id="duration-label">Duration</FieldLabel>
-          <BoundSlider
-            control={durationControl}
-            aria-labelledby="duration-label"
-          />
-          <div
-            className="flex justify-between text-xs text-muted-foreground"
-            aria-hidden="true"
-          >
-            <span>2s</span>
-            <span>10s</span>
-          </div>
-        </Field>
-
-        <FieldGroup>
-          <Field>
-            <FieldLabel htmlFor="seed">Seed</FieldLabel>
-            <InputGroup>
-              <InputGroupInput
-                id="seed"
-                name="seed"
-                type="number"
-                min="0"
-                max="4294967295"
-                step="1"
-                inputMode="numeric"
-                defaultValue="2"
-                aria-describedby="seed-error"
-              />
-              <InputGroupAddon align="inline-end">
-                <InputGroupButton
-                  id="randomize-seed"
-                  size="icon-xs"
-                  aria-label="Choose a random seed"
-                  title="Random seed"
-                >
-                  <IconRefresh aria-hidden="true" />
-                </InputGroupButton>
-              </InputGroupAddon>
-            </InputGroup>
-            <EmptyFieldError id="seed-error" />
-          </Field>
-        </FieldGroup>
-
-        <Field
-          data-disabled={continuousGeneration.disabled || undefined}
-          orientation="horizontal"
-        >
-          <FieldLabel htmlFor={continuousGenerationControl.id}>
-            Continuous generation
-          </FieldLabel>
-          <BoundSwitch control={continuousGenerationControl} />
+          <FieldLabel htmlFor="seed">Seed</FieldLabel>
+          <InputGroup>
+            <InputGroupInput
+              id="seed"
+              name="seed"
+              type="number"
+              min="0"
+              max="4294967295"
+              step="1"
+              inputMode="numeric"
+              defaultValue="2"
+              aria-describedby="seed-error"
+            />
+            <InputGroupAddon align="inline-end">
+              <InputGroupButton
+                id="randomize-seed"
+                size="icon-xs"
+                aria-label="Choose a random seed"
+                title="Random seed"
+              >
+                <IconRefresh aria-hidden="true" />
+              </InputGroupButton>
+            </InputGroupAddon>
+          </InputGroup>
+          <EmptyFieldError id="seed-error" />
         </Field>
 
         <Field>
           <div className="flex items-center justify-between gap-3">
             <FieldLabel id="target-buffer-label">
-              Target buffer
+              Buffer ahead
             </FieldLabel>
             <output
               className="text-xs text-muted-foreground"
               id="target-buffer-output"
             >
-              80 frames
+              4 seconds
             </output>
           </div>
           <BoundSlider
@@ -567,8 +611,8 @@ function ClipSection() {
             className="flex justify-between text-xs text-muted-foreground"
             aria-hidden="true"
           >
-            <span>40</span>
-            <span>200 frames</span>
+            <span>2s</span>
+            <span>10s</span>
           </div>
         </Field>
       </FieldGroup>
@@ -576,120 +620,33 @@ function ClipSection() {
   )
 }
 
-function GenerationActionsSection() {
+function SessionActionsSection() {
   return (
     <section
-      className="sticky bottom-0 z-10 flex flex-col gap-3 border-b bg-background p-3 max-[760px]:static"
-      aria-label="Generation actions"
+      className="flex flex-col gap-3 border-b p-3"
+      aria-labelledby="session-actions-title"
     >
-      <Card
-        id="generation-progress"
-        size="sm"
-        data-state="idle"
+      <h3
+        className="text-xs font-medium text-muted-foreground"
+        id="session-actions-title"
       >
-        <CardHeader>
-          <CardTitle className="truncate" id="generation-stage">
-            Waiting for model
-          </CardTitle>
-          <CardAction>
-            <span
-              className="text-xs text-muted-foreground tabular-nums"
-              id="generation-percent"
-            >
-              —
-            </span>
-          </CardAction>
-          <CardDescription
-            className="sr-only"
-            id="generate-help"
-          >
-            Load a model pack to enable generation.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <BoundProgress
-            control={generationProgressControl}
-            aria-label="Generation progress"
-          />
-          <span className="sr-only" id="generation-note">
-            The first run may compile GPU pipelines.
-          </span>
-        </CardContent>
-      </Card>
-
+        Session
+      </h3>
       <Button
-        id="generate"
-        size="lg"
-        type="submit"
-        aria-describedby="generate-help"
-        aria-keyshortcuts="Control+Enter Meta+Enter"
-        disabled
+        id="restart-generation"
+        variant="secondary"
+        type="button"
       >
-        <Spinner
-          id="generate-spinner"
-          className="hidden"
-          data-icon="inline-start"
-          aria-hidden="true"
-        />
-        <span id="generate-label">
-          Generate motion
-        </span>
+        Start new motion
       </Button>
-
-      <div className="flex flex-wrap items-center gap-1.5 [&>*]:flex-auto">
-        <Button
-          id="restart-generation"
-          variant="secondary"
-          type="button"
-        >
-          Restart
-        </Button>
-        <Button
-          id="restart-from-now"
-          variant="secondary"
-          type="button"
-        >
-          Restart from now
-        </Button>
-        <Button
-          id="cancel-generation"
-          className="invisible data-[state=active]:visible"
-          variant="destructive"
-          type="button"
-          data-state="idle"
-          aria-hidden="true"
-          tabIndex={-1}
-          disabled
-        >
-          Cancel
-        </Button>
-      </div>
-    </section>
-  )
-}
-
-function LoopToggle() {
-  const state = useControlState(loopControl)
-
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        render={<span className="inline-flex" />}
+      <Button
+        id="restart-from-now"
+        variant="outline"
+        type="button"
       >
-        <Toggle
-          id="loop-toggle"
-          variant="outline"
-          size="lg"
-          pressed={state.pressed}
-          disabled={state.disabled}
-          onPressedChange={loopControl.commit}
-          aria-label="Loop playback"
-        >
-          <IconRepeat aria-hidden="true" />
-        </Toggle>
-      </TooltipTrigger>
-      <TooltipContent>Loop playback</TooltipContent>
-    </Tooltip>
+        Regenerate from here
+      </Button>
+    </section>
   )
 }
 
@@ -797,12 +754,70 @@ function SidebarToggle({
   )
 }
 
+function MotionControlsDrawer({
+  open,
+  onOpenChange,
+  hostRef,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  hostRef: (element: HTMLDivElement | null) => void
+}) {
+  const contentRef = useRef<HTMLDivElement>(null)
+
+  return (
+    <Drawer
+      open={open}
+      onOpenChange={onOpenChange}
+      swipeDirection="down"
+      showSwipeHandle
+    >
+      <DrawerTrigger
+        render={
+          <Button
+            variant="outline"
+            size="icon-lg"
+            type="button"
+            aria-label="Motion controls"
+          />
+        }
+      >
+        <IconLayoutSidebar aria-hidden="true" />
+      </DrawerTrigger>
+      <DrawerContent
+        ref={contentRef}
+        initialFocus={contentRef}
+        tabIndex={-1}
+      >
+        <DrawerHeader>
+          <DrawerTitle>Motion controls</DrawerTitle>
+          <DrawerDescription>
+            Model, buffer, seed, and session actions.
+          </DrawerDescription>
+        </DrawerHeader>
+        <div
+          ref={hostRef}
+          className="motion-controls-drawer-body flex-1 overflow-y-auto"
+        />
+      </DrawerContent>
+    </Drawer>
+  )
+}
+
 function ViewportPanel({
+  isMobile,
   sidebarExpanded,
   onSidebarExpandedChange,
+  motionDrawerOpen,
+  onMotionDrawerOpenChange,
+  motionDrawerHostRef,
 }: {
+  isMobile: boolean
   sidebarExpanded: boolean
   onSidebarExpandedChange: (expanded: boolean) => void
+  motionDrawerOpen: boolean
+  onMotionDrawerOpenChange: (open: boolean) => void
+  motionDrawerHostRef: (element: HTMLDivElement | null) => void
 }) {
   return (
     <section
@@ -831,13 +846,26 @@ function ViewportPanel({
           to orbit, Plus or Minus to zoom, and Home to reset the camera.
         </p>
         <div className="preview-overlay-controls">
-          <SidebarToggle
-            expanded={sidebarExpanded}
-            onExpandedChange={onSidebarExpandedChange}
+          {isMobile ? (
+            <MotionControlsDrawer
+              open={motionDrawerOpen}
+              onOpenChange={onMotionDrawerOpenChange}
+              hostRef={motionDrawerHostRef}
+            />
+          ) : (
+            <SidebarToggle
+              expanded={sidebarExpanded}
+              onExpandedChange={onSidebarExpandedChange}
+            />
+          )}
+          <PreviewSettingsSection
+            isMobile={isMobile}
+            onMobileOpen={() => onMotionDrawerOpenChange(false)}
           />
-          <PreviewSettingsSection />
         </div>
       </div>
+
+      <PromptComposer />
 
       <div
         className="playback-bar"
@@ -864,7 +892,6 @@ function ViewportPanel({
           00:00.00
         </span>
         <PlaybackSpeedSelect />
-        <LoopToggle />
         <Tooltip>
           <TooltipTrigger
             render={<span className="inline-flex" />}
@@ -997,44 +1024,118 @@ function DisplayControls() {
   )
 }
 
-function PreviewSettingsSection() {
+function ViewSettingsFields() {
+  return (
+    <div className="grid gap-3">
+      <VrmAvatarSection />
+      <Separator />
+      <DisplayControls />
+    </div>
+  )
+}
+
+function PreviewSettingsSection({
+  isMobile,
+  onMobileOpen,
+}: {
+  isMobile: boolean
+  onMobileOpen: () => void
+}) {
   const state = useControlState(previewSettingsControl)
+  const [stagingHost, setStagingHost] = useState<HTMLDivElement | null>(null)
+  const drawerContentRef = useRef<HTMLDivElement>(null)
+  const [popoverHost, setPopoverHost] = useState<HTMLDivElement | null>(null)
+  const [drawerHost, setDrawerHost] = useState<HTMLDivElement | null>(null)
+  const portalContainer = useStablePortal(
+    (isMobile ? drawerHost : popoverHost) ?? stagingHost,
+    "view-settings-portal"
+  )
+
+  const handleOpenChange = (open: boolean) => {
+    if (isMobile && open) onMobileOpen()
+    previewSettingsControl.commit(open)
+  }
 
   return (
-    <Popover
-      open={state.open}
-      onOpenChange={previewSettingsControl.commit}
-      triggerId="preview-settings-trigger"
-    >
-      <PopoverTrigger
-        id="preview-settings-trigger"
-        render={
-          <Button
-            variant="outline"
-            size="icon-lg"
-            type="button"
-            aria-label="View settings"
-          />
-        }
-      >
-        <IconSettings aria-hidden="true" />
-      </PopoverTrigger>
-      <PopoverContent
-        id={previewSettingsControl.id}
-        align="end"
-        side="bottom"
-        keepMounted
-      >
-        <PopoverHeader>
-          <PopoverTitle>View settings</PopoverTitle>
-        </PopoverHeader>
-        <div className="grid gap-3">
-          <VrmAvatarSection />
-          <Separator />
-          <DisplayControls />
-        </div>
-      </PopoverContent>
-    </Popover>
+    <>
+      <div
+        ref={setStagingHost}
+        className="portal-staging"
+        aria-hidden="true"
+        inert
+      />
+      {isMobile ? (
+        <Drawer
+          open={state.open}
+          onOpenChange={handleOpenChange}
+          swipeDirection="down"
+          showSwipeHandle
+        >
+          <DrawerTrigger
+            id="preview-settings-trigger"
+            render={
+              <Button
+                variant="outline"
+                size="icon-lg"
+                type="button"
+                aria-label="View settings"
+              />
+            }
+          >
+            <IconSettings aria-hidden="true" />
+          </DrawerTrigger>
+          <DrawerContent
+            ref={drawerContentRef}
+            id={previewSettingsControl.id}
+            initialFocus={drawerContentRef}
+            tabIndex={-1}
+          >
+            <DrawerHeader>
+              <DrawerTitle>View settings</DrawerTitle>
+              <DrawerDescription>
+                Avatar and preview display options.
+              </DrawerDescription>
+            </DrawerHeader>
+            <div
+              ref={setDrawerHost}
+              className="flex-1 overflow-y-auto p-4"
+            />
+          </DrawerContent>
+        </Drawer>
+      ) : (
+        <Popover
+          open={state.open}
+          onOpenChange={handleOpenChange}
+          triggerId="preview-settings-trigger"
+        >
+          <PopoverTrigger
+            id="preview-settings-trigger"
+            render={
+              <Button
+                variant="outline"
+                size="icon-lg"
+                type="button"
+                aria-label="View settings"
+              />
+            }
+          >
+            <IconSettings aria-hidden="true" />
+          </PopoverTrigger>
+          <PopoverContent
+            id={previewSettingsControl.id}
+            align="end"
+            side="bottom"
+            keepMounted
+          >
+            <PopoverHeader>
+              <PopoverTitle>View settings</PopoverTitle>
+            </PopoverHeader>
+            <div ref={setPopoverHost} />
+          </PopoverContent>
+        </Popover>
+      )}
+      {createPortal(<ViewSettingsFields />, portalContainer)}
+    </>
   )
 }
 
@@ -1053,18 +1154,46 @@ function GenerationPanel() {
       <form id="generation-form" noValidate>
         <ModelSection />
 
-        <PromptSection />
+        <MotionSettingsSection />
 
-        <ClipSection />
-
-        <GenerationActionsSection />
+        <SessionActionsSection />
       </form>
     </aside>
   )
 }
 
 export function App() {
+  const [isMobile, setIsMobile] = useState(
+    () => window.matchMedia(MOBILE_LAYOUT_QUERY).matches
+  )
   const [sidebarExpanded, setSidebarExpanded] = useState(true)
+  const [motionDrawerOpen, setMotionDrawerOpen] = useState(false)
+  const [desktopMotionHost, setDesktopMotionHost] =
+    useState<HTMLDivElement | null>(null)
+  const [drawerMotionHost, setDrawerMotionHost] =
+    useState<HTMLDivElement | null>(null)
+  const [stagingMotionHost, setStagingMotionHost] =
+    useState<HTMLDivElement | null>(null)
+  const motionControlsPortal = useStablePortal(
+    (isMobile ? drawerMotionHost : desktopMotionHost) ??
+      stagingMotionHost,
+    "generation-panel-portal"
+  )
+
+  const handleMotionDrawerOpenChange = (open: boolean) => {
+    if (open) previewSettingsControl.commit(false)
+    setMotionDrawerOpen(open)
+  }
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia(MOBILE_LAYOUT_QUERY)
+    const updateLayout = () => {
+      setIsMobile(mediaQuery.matches)
+      if (!mediaQuery.matches) setMotionDrawerOpen(false)
+    }
+    mediaQuery.addEventListener("change", updateLayout)
+    return () => mediaQuery.removeEventListener("change", updateLayout)
+  }, [])
 
   useEffect(() => {
     let cleanup: (() => void) | undefined
@@ -1101,13 +1230,28 @@ export function App() {
         >
           <h1 className="sr-only">ARDY browser motion workspace</h1>
 
-          <GenerationPanel />
+          <div
+            ref={setDesktopMotionHost}
+            className="generation-panel-host"
+          />
 
           <ViewportPanel
+            isMobile={isMobile}
             sidebarExpanded={sidebarExpanded}
             onSidebarExpandedChange={setSidebarExpanded}
+            motionDrawerOpen={motionDrawerOpen}
+            onMotionDrawerOpenChange={handleMotionDrawerOpenChange}
+            motionDrawerHostRef={setDrawerMotionHost}
           />
         </main>
+
+        <div
+          ref={setStagingMotionHost}
+          className="portal-staging"
+          aria-hidden="true"
+          inert
+        />
+        {createPortal(<GenerationPanel />, motionControlsPortal)}
       </div>
     </TooltipProvider>
   )

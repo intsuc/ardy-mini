@@ -12,7 +12,9 @@ import {
   formatTime,
   isModelPackArchive,
   isVrmFile,
+  livePromptBranchFrame,
   resolveGenerationProgressState,
+  resolvePromptActionState,
   shouldAutoplayMotion,
   shouldResetMotionPresentation,
   shouldShowIdleGenerationStatus,
@@ -20,31 +22,34 @@ import {
 } from "./main";
 
 describe("generation form validation", () => {
-  it("accepts the supported prompt, duration, and uint32 seed domain", () => {
-    expect(validateGenerationForm("  A person walks forward.  ", "4", "4294967295")).toEqual({
+  it("accepts the supported prompt and uint32 seed domain", () => {
+    expect(
+      validateGenerationForm("  A person walks forward.  ", "4294967295"),
+    ).toEqual({
       values: {
         prompt: "A person walks forward.",
-        durationSeconds: 4,
         seed: 4294967295,
       },
     });
   });
 
   it("accepts multilingual prompts without changing their contents", () => {
-    expect(validateGenerationForm("人物が歩く。", "4", "2")).toEqual({
+    expect(validateGenerationForm("人物が歩く。", "2")).toEqual({
       values: {
         prompt: "人物が歩く。",
-        durationSeconds: 4,
         seed: 2,
       },
     });
   });
 
-  it("rejects blank and overlong prompts, invalid windows, and invalid seeds", () => {
-    expect(validateGenerationForm("", "4", "2").promptError).toMatch(/Describe/);
-    expect(validateGenerationForm("a".repeat(281), "4", "2").promptError).toMatch(/280/);
-    expect(validateGenerationForm("A person walks.", "3", "2").promptError).toMatch(/2 to 10/);
-    expect(validateGenerationForm("A person walks.", "4", "-1").seedError).toMatch(/whole-number/);
+  it("rejects blank and overlong prompts and invalid seeds", () => {
+    expect(validateGenerationForm("", "2").promptError).toMatch(/Describe/);
+    expect(validateGenerationForm("a".repeat(281), "2").promptError).toMatch(
+      /280/,
+    );
+    expect(validateGenerationForm("A person walks.", "-1").seedError).toMatch(
+      /whole-number/,
+    );
   });
 
   it("keeps non-empty multilingual input submittable", () => {
@@ -58,6 +63,48 @@ describe("generation form validation", () => {
     expect(canContinueGeneration(true, false, true, false)).toBe(false);
     expect(canContinueGeneration(true, true, true, true)).toBe(false);
     expect(canContinueGeneration(false, false, true, true)).toBe(false);
+  });
+});
+
+describe("continuous prompt actions", () => {
+  it("starts without motion and updates only a dirty live prompt", () => {
+    expect(
+      resolvePromptActionState(false, false, "  Walk forward. ", null),
+    ).toEqual({
+      label: "Start motion",
+      dirty: true,
+      canSubmit: true,
+    });
+    expect(
+      resolvePromptActionState(true, true, "Walk forward.", "Walk forward."),
+    ).toEqual({
+      label: "Update motion",
+      dirty: false,
+      canSubmit: false,
+    });
+    expect(
+      resolvePromptActionState(true, true, "Turn left.", "Walk forward."),
+    ).toEqual({
+      label: "Update motion",
+      dirty: true,
+      canSubmit: true,
+    });
+  });
+
+  it("does not update a playback-only motion", () => {
+    expect(
+      resolvePromptActionState(true, false, "Turn left.", "Walk forward.")
+        .canSubmit,
+    ).toBe(false);
+    expect(
+      resolvePromptActionState(false, false, "a".repeat(281), null).canSubmit,
+    ).toBe(false);
+  });
+
+  it("branches a live prompt after a short lookahead without passing the end", () => {
+    expect(livePromptBranchFrame(12.9, 80)).toBe(32);
+    expect(livePromptBranchFrame(75, 80)).toBe(80);
+    expect(livePromptBranchFrame(-5, 80)).toBe(20);
   });
 });
 
