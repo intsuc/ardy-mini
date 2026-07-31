@@ -4,6 +4,8 @@
 import type { VRM } from "@pixiv/three-vrm";
 import type { Mesh } from "three";
 
+import { yieldToMainThread } from "./yield-to-main";
+
 const MAX_VRM_FILE_BYTES = 512 * 1024 * 1024;
 
 type ThreeVrmModule = typeof import("@pixiv/three-vrm");
@@ -85,9 +87,13 @@ export async function loadVrmAvatar(file: File): Promise<LoadedVrmAvatar> {
       throw new TypeError("The selected file does not contain VRM humanoid data.");
     }
     try {
+      await yieldToMainThread();
       vrmModule.VRMUtils.removeUnnecessaryVertices(gltf.scene);
+      await yieldToMainThread();
       vrmModule.VRMUtils.combineSkeletons(gltf.scene);
+      await yieldToMainThread();
       vrmModule.VRMUtils.combineMorphs(vrm);
+      await yieldToMainThread();
       vrmModule.VRMUtils.rotateVRM0(vrm);
       vrm.scene.traverse((object) => {
         object.frustumCulled = false;

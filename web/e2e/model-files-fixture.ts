@@ -442,6 +442,8 @@ export async function installMockModelWorker(
   await page.addInitScript(
     ({ model, protocolVersion }) => {
       class MockModelWorker extends EventTarget {
+        private sessionFrameCount = 0;
+
         constructor() {
           super();
           queueMicrotask(() => {
@@ -469,6 +471,13 @@ export async function installMockModelWorker(
             type: string;
             requestId: string;
             baseUrl?: unknown;
+            mode?: "replace" | "append" | "branch";
+            prompt?: unknown;
+            seed?: unknown;
+            durationFrames?: unknown;
+            branchFrame?: unknown;
+            initialTranslation?: unknown;
+            initialHeading?: unknown;
           };
           if (command.type === "getWebGpuCapabilities") {
             queueMicrotask(() => {
@@ -587,12 +596,85 @@ export async function installMockModelWorker(
             return;
           }
           if (command.type === "resetSession") {
+            this.sessionFrameCount = 0;
             queueMicrotask(() => {
               this.emit({
                 type: "sessionReset",
                 requestId: command.requestId,
                 seed: 2,
                 frameCount: 0,
+              });
+            });
+            return;
+          }
+          if (command.type === "generate") {
+            const mode = command.mode ?? "replace";
+            const frameCount = Number(command.durationFrames);
+            if (!Number.isSafeInteger(frameCount) || frameCount <= 0) {
+              throw new RangeError("Mock generation requires frame count");
+            }
+            const startFrame =
+              mode === "replace"
+                ? 0
+                : mode === "branch"
+                  ? Number(command.branchFrame)
+                  : this.sessionFrameCount;
+            this.sessionFrameCount = startFrame + frameCount;
+            const seed = Number(command.seed);
+            const initialTranslation =
+              command.initialTranslation instanceof Float32Array ||
+              Array.isArray(command.initialTranslation)
+                ? Array.from(command.initialTranslation)
+                : [0, 0, 0];
+            const result = {
+              seed,
+              prompt: String(command.prompt ?? ""),
+              fps: model.dimensions.fps,
+              startFrame,
+              frameCount,
+              chunks: Math.ceil(
+                frameCount / model.dimensions.generation_frames,
+              ),
+              motion: new Float32Array(
+                frameCount * model.dimensions.motion_dim,
+              ),
+              motionShape: [
+                1,
+                frameCount,
+                model.dimensions.motion_dim,
+              ],
+              joints: new Float32Array(
+                frameCount * model.dimensions.num_joints * 3,
+              ),
+              jointsShape: [
+                1,
+                frameCount,
+                model.dimensions.num_joints,
+                3,
+              ],
+              continuation: {
+                frameCount: this.sessionFrameCount,
+                hybridTokens: new Float32Array(0),
+                hybridDim: model.dimensions.hybrid_dim,
+                random: { seed, state: seed },
+                initialTranslation,
+                initialHeading: Number(command.initialHeading ?? 0),
+              },
+              timingsMs: {
+                total: mode === "append" ? 222 : 111,
+                text: 1,
+                denoising: mode === "append" ? 210 : 100,
+                decoding: 10,
+              },
+            };
+            queueMicrotask(() => {
+              this.emit({
+                type: "generationComplete",
+                requestId: command.requestId,
+                mode,
+                generatedFrameCount: frameCount,
+                sessionFrameCount: this.sessionFrameCount,
+                result,
               });
             });
             return;

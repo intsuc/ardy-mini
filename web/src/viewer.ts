@@ -766,6 +766,14 @@ export class SkeletonViewer {
       }
       loaded.vrm.springBoneManager?.reset();
       loaded.vrm.update(0);
+      await this.renderer.compileAsync(
+        loaded.vrm.scene,
+        this.camera,
+        this.scene,
+      );
+      if (revision !== this.vrmLoadRevision) {
+        throw new DOMException("VRM loading was superseded.", "AbortError");
+      }
     } catch (error) {
       loaded.utils.deepDispose(loaded.vrm.scene);
       throw error;

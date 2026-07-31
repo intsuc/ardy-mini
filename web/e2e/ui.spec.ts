@@ -199,6 +199,170 @@ async function openPromptExamples(page: Page): Promise<void> {
   ).toBeVisible();
 }
 
+test("keeps Composer actions visually consistent when More actions is disabled", async ({
+  page,
+}) => {
+  await gotoReadyApp(page);
+
+  const composerInputGroup = page.locator(
+    '[data-slot="input-group"]:has(#prompt)',
+  );
+  const startMotion = page.locator("#generate");
+  const moreActions = page.locator("#generation-actions-menu");
+  const playMotion = page.locator("#play-pause");
+
+  await expect(startMotion).toHaveText("Start motion");
+  await expect(moreActions).toBeDisabled();
+  await expect(composerInputGroup).toHaveCSS("opacity", "1");
+
+  await page.evaluate(async () => {
+    const { playPauseControl } = await import("/src/ui-control-store.ts");
+    playPauseControl.setState({ disabled: false, pressed: false });
+  });
+  await expect(playMotion).toBeEnabled();
+
+  const [startMotionBackground, playMotionBackground] = await Promise.all([
+    startMotion.evaluate(
+      (element) => getComputedStyle(element).backgroundColor,
+    ),
+    playMotion.evaluate((element) => getComputedStyle(element).backgroundColor),
+  ]);
+  expect(startMotionBackground).toBe(playMotionBackground);
+});
+
+test("registers passive Base UI touch dismissal and dismisses on an outside tap", async ({
+  context,
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const client = await context.newCDPSession(page);
+  await client.send("Emulation.setTouchEmulationEnabled", {
+    enabled: true,
+    maxTouchPoints: 5,
+  });
+  await page.addInitScript(() => {
+    interface TouchStartListenerRegistration {
+      passive: boolean;
+      target: string;
+    }
+    const registrations: TouchStartListenerRegistration[] = [];
+    const global = globalThis as typeof globalThis & {
+      __touchStartListenerRegistrations?: TouchStartListenerRegistration[];
+    };
+    global.__touchStartListenerRegistrations = registrations;
+
+    const eventTargetPrototype = EventTarget.prototype as unknown as {
+      addEventListener(
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions,
+      ): void;
+    };
+    const originalAddEventListener = eventTargetPrototype.addEventListener;
+    eventTargetPrototype.addEventListener = function (type, listener, options) {
+      if (type === "touchstart") {
+        const passive =
+          typeof options === "object" &&
+          options !== null &&
+          options.passive === true;
+        const target =
+          this instanceof Element
+            ? `${this.tagName.toLowerCase()}#${this.id}`
+            : this === document
+              ? "document"
+              : this === window
+                ? "window"
+                : this.constructor.name;
+        registrations.push({ passive, target });
+      }
+      originalAddEventListener.call(this, type, listener, options);
+    };
+  });
+
+  await gotoReadyApp(page);
+  await page.evaluate(() => {
+    const global = globalThis as typeof globalThis & {
+      __touchStartListenerRegistrations?: unknown[];
+    };
+    global.__touchStartListenerRegistrations?.splice(0);
+    const trigger = document.querySelector<HTMLButtonElement>(
+      "#settings-trigger",
+    );
+    if (!trigger) throw new Error("Settings trigger is unavailable.");
+    trigger.click();
+  });
+  await expect(page.locator('[data-slot="drawer-popup"]')).toBeVisible();
+  const documentRegistrations = await page.evaluate(() => {
+    const global = globalThis as typeof globalThis & {
+      __touchStartListenerRegistrations?: Array<{
+        passive: boolean;
+        target: string;
+      }>;
+    };
+    return (global.__touchStartListenerRegistrations ?? []).filter(
+      (registration) => registration.target === "document",
+    );
+  });
+  expect(documentRegistrations.length).toBeGreaterThan(0);
+  expect(documentRegistrations.every(({ passive }) => passive)).toBe(true);
+  await page.evaluate(() => {
+    const global = globalThis as typeof globalThis & {
+      __touchStartListenerRegistrations?: unknown[];
+    };
+    global.__touchStartListenerRegistrations?.splice(0);
+  });
+
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x: 8, y: 8 }],
+  });
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchEnd",
+    touchPoints: [],
+  });
+
+  await expect(page.locator("#settings-trigger")).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
+  await expect(page.locator("#preview-settings")).toBeHidden();
+  const touchStartRegistrations = await page.evaluate(() => {
+    const global = globalThis as typeof globalThis & {
+      __touchStartListenerRegistrations?: Array<{
+        passive: boolean;
+        target: string;
+      }>;
+    };
+    return global.__touchStartListenerRegistrations ?? [];
+  });
+  expect(touchStartRegistrations.length).toBeGreaterThan(0);
+  expect(touchStartRegistrations).toEqual(
+    touchStartRegistrations.map((registration) => ({
+      ...registration,
+      passive: true,
+    })),
+  );
+});
+
+test("shows the duration of the latest automatic buffer generation", async ({
+  page,
+}) => {
+  await gotoReadyApp(page);
+
+  await page.locator("#generate").click();
+  const diagnostics = page.locator("#preview-diagnostics");
+  await expect(diagnostics).toHaveText("80 frames · 111 ms");
+  const playPause = page.locator("#play-pause");
+  await playPause.click();
+  await expect(playPause).toHaveAttribute("data-playing", "true");
+
+  await page.evaluate(async () => {
+    const { timelineControl } = await import("/src/ui-control-store.ts");
+    timelineControl.commit(79);
+  });
+  await expect(diagnostics).toHaveText("160 frames · 222 ms");
+});
+
 test("renders one preview-first workspace with responsive settings", async ({
   page,
 }) => {
@@ -1975,7 +2139,10 @@ test("uses a viewport-centered workspace and settings drawer on narrow screens",
     )
     .toBe(true);
 
-  await openSettings(page);
+  const settingsTrigger = page.locator("#settings-trigger");
+  await settingsTrigger.click();
+  await expect(settingsTrigger).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator("#preview-settings")).toBeVisible();
   await expect(page.locator("#preview-settings")).toHaveAttribute(
     "data-slot",
     "drawer-popup",
@@ -1989,10 +2156,24 @@ test("uses a viewport-centered workspace and settings drawer on narrow screens",
   await expect(
     page.locator("#preview-settings [data-slot='drawer-description']"),
   ).toHaveCount(0);
-  await expect(page.getByRole("tab", { name: "Motion" })).toHaveAttribute(
+  await expect(page.locator("#preview-settings [role='tab']")).toHaveText([
+    "View",
+    "Motion",
+  ]);
+  await expect(page.getByRole("tab", { name: "View" })).toHaveAttribute(
     "aria-selected",
     "true",
   );
+  await expect(page.locator("#import-vrm")).toBeVisible();
+  await expect
+    .poll(async () => {
+      const box = await page
+        .locator('[data-slot="tabs-list"]')
+        .boundingBox();
+      return box ? 900 - (box.y + box.height) : Number.NaN;
+    })
+    .toBeCloseTo(16, 0);
+  await page.getByRole("tab", { name: "Motion" }).click();
   await expect(
     page.getByRole("slider", { name: "Buffer ahead", exact: true }),
   ).toBeVisible();
@@ -2007,16 +2188,6 @@ test("uses a viewport-centered workspace and settings drawer on narrow screens",
   expect(
     900 - (motionTabsBox!.y + motionTabsBox!.height),
   ).toBeCloseTo(16, 0);
-  await page.getByRole("tab", { name: "View" }).click();
-  await expect(page.locator("#import-vrm")).toBeVisible();
-  await expect
-    .poll(async () => {
-      const box = await page
-        .locator('[data-slot="tabs-list"]')
-        .boundingBox();
-      return box ? 900 - (box.y + box.height) : Number.NaN;
-    })
-    .toBeCloseTo(16, 0);
 });
 
 test("honors reduced motion and keeps shadcn controls usable on mobile", async ({

@@ -341,6 +341,82 @@ test("loads MToon VRM materials as WebGPU-compatible node materials", async ({
   ]);
 });
 
+test("shows the selected VRM loading state until the avatar is ready", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await waitForPreviewReady(page);
+  await openViewSettings(page);
+
+  await page.evaluate(async () => {
+    const { SkeletonViewer } = await import("/src/viewer.ts");
+    const prototype = SkeletonViewer.prototype;
+    const originalLoadVrm = prototype.loadVrm;
+    let releaseLoad!: () => void;
+    const loadGate = new Promise<void>((resolve) => {
+      releaseLoad = resolve;
+    });
+    (
+      globalThis as typeof globalThis & {
+        __releaseVrmLoad?: () => void;
+      }
+    ).__releaseVrmLoad = releaseLoad;
+    prototype.loadVrm = async function (file: File) {
+      await loadGate;
+      prototype.loadVrm = originalLoadVrm;
+      return originalLoadVrm.call(this, file);
+    };
+  });
+
+  const fileName = "loading-state-avatar.vrm";
+  await page.locator("#vrm-file-input").setInputFiles({
+    name: fileName,
+    mimeType: "model/gltf-binary",
+    buffer: createTestVrm({
+      name: "Loading State Avatar",
+      version: "1.0",
+      author: "ARDY Test",
+    }),
+  });
+
+  const loadingStatus = page.locator("#vrm-loading-status");
+  const viewport = page.locator("#viewport");
+  const card = page.locator("#vrm-card");
+  const importVrm = page.locator("#import-vrm");
+  const removeVrm = page.locator("#remove-vrm");
+
+  await expect(loadingStatus).toBeVisible();
+  await expect(loadingStatus).toContainText("Loading VRM avatar");
+  await expect(page.locator("#vrm-loading-file")).toHaveText(fileName);
+  await expect(viewport).toHaveAttribute("aria-busy", "true");
+  await expect(card).toHaveAttribute("aria-busy", "true");
+  await expect(importVrm).toBeDisabled();
+  await expect(removeVrm).toBeDisabled();
+
+  await page.evaluate(() => {
+    const testWindow = globalThis as typeof globalThis & {
+      __releaseVrmLoad?: () => void;
+    };
+    if (!testWindow.__releaseVrmLoad) {
+      throw new Error("VRM load gate is unavailable.");
+    }
+    testWindow.__releaseVrmLoad();
+    delete testWindow.__releaseVrmLoad;
+  });
+
+  await expect(card).toHaveAttribute("data-state", "ready");
+  await expect(page.locator("#vrm-name")).toHaveText(
+    "Loading State Avatar",
+  );
+  await expect(loadingStatus).toBeHidden();
+  await expect(page.locator("#vrm-loading-file")).toHaveText("");
+  await expect(viewport).not.toHaveAttribute("aria-busy", "true");
+  await expect(card).not.toHaveAttribute("aria-busy", "true");
+  await expect(importVrm).toBeEnabled();
+  await expect(removeVrm).toBeEnabled();
+  await expect(page.locator("#import-vrm-label")).toHaveText("Replace VRM");
+});
+
 test("loads, hides, replaces, and removes a local VRM avatar", async ({
   page,
 }) => {

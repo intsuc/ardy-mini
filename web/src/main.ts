@@ -49,6 +49,7 @@ import {
   type VrmModelInfo,
 } from "./viewer";
 import { PROMPT_EXAMPLE_EVENT } from "./prompt-examples";
+import { yieldToMainThread } from "./yield-to-main";
 import {
   clearModelCacheAction,
   generationActionsControl,
@@ -627,6 +628,11 @@ export function bootstrap(): () => void {
   const dismissVrmError =
     requiredElement<HTMLButtonElement>("dismiss-vrm-error");
   const vrmDropTarget = requiredElement<HTMLElement>("vrm-drop-target");
+  const viewport = requiredElement<HTMLElement>("viewport");
+  const vrmLoadingStatus =
+    requiredElement<HTMLElement>("vrm-loading-status");
+  const vrmLoadingFile =
+    requiredElement<HTMLElement>("vrm-loading-file");
 
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
@@ -672,7 +678,7 @@ export function bootstrap(): () => void {
   let activeManifest: BrowserModelManifest | null = null;
   let modelProgressFiles = new Set<string>();
   let tokenizerPreparationSteps = 0;
-  let lastUserGenerationMs: number | null = null;
+  let lastGenerationMs: number | null = null;
   let currentMotion: StructuredMotionResult | null = null;
   let currentContinuation: RuntimeContinuationState | null = null;
   let activePrompt: string | null = null;
@@ -778,9 +784,17 @@ export function bootstrap(): () => void {
     showVrmControl.setState({ disabled: !info });
   }
 
-  function setVrmLoading(loading: boolean): void {
+  function setVrmLoading(loading: boolean, fileName = ""): void {
     vrmLoading = loading;
-    vrmCard.toggleAttribute("aria-busy", loading);
+    for (const element of [vrmCard, viewport]) {
+      if (loading) {
+        element.setAttribute("aria-busy", "true");
+      } else {
+        element.removeAttribute("aria-busy");
+      }
+    }
+    vrmLoadingStatus.hidden = !loading;
+    vrmLoadingFile.textContent = loading ? fileName : "";
     importVrm.disabled = loading || viewer === null;
     removeVrm.disabled = loading || currentVrmInfo === null;
     showVrmControl.setState({
@@ -826,11 +840,15 @@ export function bootstrap(): () => void {
 
     const request = ++activeVrmLoad;
     clearVrmError();
-    setVrmLoading(true);
+    setVrmLoading(true, file.name);
     try {
       if (!viewer) {
         throw new Error("The 3D preview is unavailable in this browser.");
       }
+      // Commit the visible loading state before cached imports or synchronous
+      // GLTF parsing can occupy the main thread.
+      await yieldToMainThread();
+      if (request !== activeVrmLoad) return;
       const info = await viewer.loadVrm(file);
       if (request !== activeVrmLoad) return;
       clearVrmError();
@@ -1350,14 +1368,12 @@ export function bootstrap(): () => void {
         Boolean(playback?.playing || active.resumePlayback),
         resetPresentation,
       );
-      if (active.action !== "extend") {
-        lastUserGenerationMs = Math.round(event.result.timingsMs.total);
-      }
+      lastGenerationMs = Math.round(event.result.timingsMs.total);
       previewDiagnostics.textContent =
         `${event.sessionFrameCount} frames` +
-        (lastUserGenerationMs === null
+        (lastGenerationMs === null
           ? ""
-          : ` · ${lastUserGenerationMs} ms`);
+          : ` · ${lastGenerationMs} ms`);
       activeGeneration = null;
       setGenerationBusy();
       announce(
@@ -2113,6 +2129,7 @@ export function bootstrap(): () => void {
       request.reject(new DOMException("Application disposed", "AbortError"));
     }
     activeVrmLoad += 1;
+    setVrmLoading(false);
     resetVrmDropTarget();
     clearCameraMovement();
     try {

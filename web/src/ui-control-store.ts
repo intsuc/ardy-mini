@@ -580,7 +580,7 @@ export const previewSettingsTabControl = createExternalControl<
   PreviewSettingsTab
 >(
   "preview-settings-tab",
-  { value: "motion" },
+  { value: "view" },
   (value) => ({ value })
 )
 

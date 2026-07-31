@@ -272,6 +272,23 @@ function VrmDropTarget() {
   )
 }
 
+function VrmLoadingStatus() {
+  return (
+    <Alert
+      className="pointer-events-none absolute bottom-3 left-1/2 w-[min(20rem,calc(100%_-_1.5rem))] -translate-x-1/2 shadow-lg"
+      id="vrm-loading-status"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      hidden
+    >
+      <Spinner role="presentation" aria-hidden="true" />
+      <AlertTitle>Loading VRM avatar</AlertTitle>
+      <AlertDescription className="truncate" id="vrm-loading-file" />
+    </Alert>
+  )
+}
+
 function UnsupportedDeviceDialog() {
   const state = useControlState(unsupportedDeviceControl)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -869,6 +886,7 @@ function ViewportPanel({
           Arrow to seek, W A S D to move the camera, Shift plus Arrow keys
           to orbit, Plus or Minus to zoom, and Home to reset the camera.
         </p>
+        <VrmLoadingStatus />
         <div className="preview-overlay-controls">
           <p
             className="preview-diagnostics bg-background/80 px-2 py-1 text-xs text-muted-foreground shadow-sm ring-1 ring-border/50 tabular-nums backdrop-blur-sm"
@@ -1049,9 +1067,9 @@ function ViewSettingsFields() {
 }
 
 const SETTINGS_TABS_LIST = (
-  <TabsList className="grid w-full grid-cols-2">
-    <TabsTrigger value="motion">Motion</TabsTrigger>
+  <TabsList className="grid w-full shrink-0 grid-cols-2">
     <TabsTrigger value="view">View</TabsTrigger>
+    <TabsTrigger value="motion">Motion</TabsTrigger>
   </TabsList>
 )
 
@@ -1063,9 +1081,15 @@ function SettingsFields({
   const activeTab = useControlState(previewSettingsTabControl)
 
   return (
-    <div className="flex flex-col gap-3">
+    <div
+      className={
+        tabsAtBottom
+          ? "flex min-h-0 flex-1 flex-col"
+          : "flex flex-col gap-3"
+      }
+    >
       <Tabs
-        className={tabsAtBottom ? "gap-3" : undefined}
+        className={tabsAtBottom ? "min-h-0 flex-1 gap-3" : undefined}
         value={activeTab.value}
         onValueChange={(value) => {
           if (value === "motion" || value === "view") {
@@ -1074,11 +1098,19 @@ function SettingsFields({
         }}
       >
         {tabsAtBottom ? null : SETTINGS_TABS_LIST}
-        <TabsContent value="motion" keepMounted>
-          <MotionSettingsSection />
-        </TabsContent>
-        <TabsContent value="view" keepMounted>
+        <TabsContent
+          className={tabsAtBottom ? "min-h-0 overflow-y-auto" : undefined}
+          value="view"
+          keepMounted
+        >
           <ViewSettingsFields />
+        </TabsContent>
+        <TabsContent
+          className={tabsAtBottom ? "min-h-0 overflow-y-auto" : undefined}
+          value="motion"
+          keepMounted
+        >
+          <MotionSettingsSection />
         </TabsContent>
         {tabsAtBottom ? (
           <>
@@ -1155,7 +1187,7 @@ function SettingsSection({
             <DrawerTitle className="sr-only">Settings</DrawerTitle>
             <div
               ref={setDrawerHost}
-              className="flex-1 overflow-y-auto p-4"
+              className="flex min-h-0 flex-1 flex-col p-4"
             />
           </DrawerContent>
         </Drawer>

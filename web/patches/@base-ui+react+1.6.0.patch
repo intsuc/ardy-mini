@@ -1,0 +1,74 @@
+diff --git a/node_modules/@base-ui/react/floating-ui-react/hooks/useDismiss.js b/node_modules/@base-ui/react/floating-ui-react/hooks/useDismiss.js
+index 1e2c68d..dbd1ca1 100644
+--- a/node_modules/@base-ui/react/floating-ui-react/hooks/useDismiss.js
++++ b/node_modules/@base-ui/react/floating-ui-react/hooks/useDismiss.js
+@@ -318,10 +318,13 @@ function useDismiss(context, props = {}) {
+       if (!target) {
+         return;
+       }
++      const options = event.type.startsWith('touch') ? {
++        passive: true
++      } : undefined;
+       const unsubscribe = (0, _addEventListener.addEventListener)(target, event.type, () => {
+         listener(event);
+         unsubscribe();
+-      });
++      }, options);
+     }
+     function handleTouchStartCapture(event) {
+       currentPointerTypeRef.current = 'touch';
+@@ -416,7 +419,16 @@ function useDismiss(context, props = {}) {
+       addTargetEventListenerOnce(event, handleTouchEnd);
+     }
+     const doc = (0, _owner.ownerDocument)(floatingElement);
+-    const unsubscribe = (0, _mergeCleanups.mergeCleanups)(escapeKey && (0, _mergeCleanups.mergeCleanups)((0, _addEventListener.addEventListener)(doc, 'keydown', closeOnEscapeKeyDown), (0, _addEventListener.addEventListener)(doc, 'compositionstart', handleCompositionStart), (0, _addEventListener.addEventListener)(doc, 'compositionend', handleCompositionEnd)), outsidePressEnabled && (0, _mergeCleanups.mergeCleanups)((0, _addEventListener.addEventListener)(doc, 'click', closeOnPressOutsideCapture, true), (0, _addEventListener.addEventListener)(doc, 'pointerdown', closeOnPressOutsideCapture, true), (0, _addEventListener.addEventListener)(doc, 'pointerup', handlePressEndCapture, true), (0, _addEventListener.addEventListener)(doc, 'pointercancel', handlePressEndCapture, true), (0, _addEventListener.addEventListener)(doc, 'mousedown', closeOnPressOutsideCapture, true), (0, _addEventListener.addEventListener)(doc, 'mouseup', handlePressEndCapture, true), (0, _addEventListener.addEventListener)(doc, 'touchstart', handleTouchStartCapture, true), (0, _addEventListener.addEventListener)(doc, 'touchmove', handleTouchMoveCapture, true), (0, _addEventListener.addEventListener)(doc, 'touchend', handleTouchEndCapture, true)));
++    const unsubscribe = (0, _mergeCleanups.mergeCleanups)(escapeKey && (0, _mergeCleanups.mergeCleanups)((0, _addEventListener.addEventListener)(doc, 'keydown', closeOnEscapeKeyDown), (0, _addEventListener.addEventListener)(doc, 'compositionstart', handleCompositionStart), (0, _addEventListener.addEventListener)(doc, 'compositionend', handleCompositionEnd)), outsidePressEnabled && (0, _mergeCleanups.mergeCleanups)((0, _addEventListener.addEventListener)(doc, 'click', closeOnPressOutsideCapture, true), (0, _addEventListener.addEventListener)(doc, 'pointerdown', closeOnPressOutsideCapture, true), (0, _addEventListener.addEventListener)(doc, 'pointerup', handlePressEndCapture, true), (0, _addEventListener.addEventListener)(doc, 'pointercancel', handlePressEndCapture, true), (0, _addEventListener.addEventListener)(doc, 'mousedown', closeOnPressOutsideCapture, true), (0, _addEventListener.addEventListener)(doc, 'mouseup', handlePressEndCapture, true), (0, _addEventListener.addEventListener)(doc, 'touchstart', handleTouchStartCapture, {
++      capture: true,
++      passive: true
++    }), (0, _addEventListener.addEventListener)(doc, 'touchmove', handleTouchMoveCapture, {
++      capture: true,
++      passive: true
++    }), (0, _addEventListener.addEventListener)(doc, 'touchend', handleTouchEndCapture, {
++      capture: true,
++      passive: true
++    })));
+     return () => {
+       unsubscribe();
+       compositionTimeout.clear();
+diff --git a/node_modules/@base-ui/react/floating-ui-react/hooks/useDismiss.mjs b/node_modules/@base-ui/react/floating-ui-react/hooks/useDismiss.mjs
+index 7261049..1ad063a 100644
+--- a/node_modules/@base-ui/react/floating-ui-react/hooks/useDismiss.mjs
++++ b/node_modules/@base-ui/react/floating-ui-react/hooks/useDismiss.mjs
+@@ -311,10 +311,13 @@ export function useDismiss(context, props = {}) {
+       if (!target) {
+         return;
+       }
++      const options = event.type.startsWith('touch') ? {
++        passive: true
++      } : undefined;
+       const unsubscribe = addEventListener(target, event.type, () => {
+         listener(event);
+         unsubscribe();
+-      });
++      }, options);
+     }
+     function handleTouchStartCapture(event) {
+       currentPointerTypeRef.current = 'touch';
+@@ -409,7 +412,16 @@ export function useDismiss(context, props = {}) {
+       addTargetEventListenerOnce(event, handleTouchEnd);
+     }
+     const doc = ownerDocument(floatingElement);
+-    const unsubscribe = mergeCleanups(escapeKey && mergeCleanups(addEventListener(doc, 'keydown', closeOnEscapeKeyDown), addEventListener(doc, 'compositionstart', handleCompositionStart), addEventListener(doc, 'compositionend', handleCompositionEnd)), outsidePressEnabled && mergeCleanups(addEventListener(doc, 'click', closeOnPressOutsideCapture, true), addEventListener(doc, 'pointerdown', closeOnPressOutsideCapture, true), addEventListener(doc, 'pointerup', handlePressEndCapture, true), addEventListener(doc, 'pointercancel', handlePressEndCapture, true), addEventListener(doc, 'mousedown', closeOnPressOutsideCapture, true), addEventListener(doc, 'mouseup', handlePressEndCapture, true), addEventListener(doc, 'touchstart', handleTouchStartCapture, true), addEventListener(doc, 'touchmove', handleTouchMoveCapture, true), addEventListener(doc, 'touchend', handleTouchEndCapture, true)));
++    const unsubscribe = mergeCleanups(escapeKey && mergeCleanups(addEventListener(doc, 'keydown', closeOnEscapeKeyDown), addEventListener(doc, 'compositionstart', handleCompositionStart), addEventListener(doc, 'compositionend', handleCompositionEnd)), outsidePressEnabled && mergeCleanups(addEventListener(doc, 'click', closeOnPressOutsideCapture, true), addEventListener(doc, 'pointerdown', closeOnPressOutsideCapture, true), addEventListener(doc, 'pointerup', handlePressEndCapture, true), addEventListener(doc, 'pointercancel', handlePressEndCapture, true), addEventListener(doc, 'mousedown', closeOnPressOutsideCapture, true), addEventListener(doc, 'mouseup', handlePressEndCapture, true), addEventListener(doc, 'touchstart', handleTouchStartCapture, {
++      capture: true,
++      passive: true
++    }), addEventListener(doc, 'touchmove', handleTouchMoveCapture, {
++      capture: true,
++      passive: true
++    }), addEventListener(doc, 'touchend', handleTouchEndCapture, {
++      capture: true,
++      passive: true
++    })));
+     return () => {
+       unsubscribe();
+       compositionTimeout.clear();
