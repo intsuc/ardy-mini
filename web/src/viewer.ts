@@ -111,6 +111,9 @@ const GROUND_MAJOR_SPACING = 5;
 const GROUND_Y = -0.006;
 const CAMERA_MOVE_STEPS_PER_SECOND = 12;
 const CAMERA_MOVE_MAX_ELAPSED_SECONDS = 0.05;
+const CAMERA_RESET_MIN_DURATION_MS = 360;
+const CAMERA_RESET_MAX_DURATION_MS = 700;
+const CAMERA_RESET_MS_PER_WORLD_UNIT = 48;
 
 export interface PlaybackState {
   frame: number;
@@ -128,6 +131,11 @@ export type ViewerOutputKey = keyof ViewerOutputVisibility;
 export interface SkeletonInstanceCounts {
   joints: number;
   bones: number;
+}
+
+export interface ResetCameraOptions {
+  /** Smoothly restore the composed view. Reduced-motion mode always jumps. */
+  animated?: boolean;
 }
 
 interface SetMotionBaseOptions {
@@ -202,6 +210,29 @@ export function cameraMovementDistance(
     CAMERA_MOVE_STEPS_PER_SECOND *
     Math.min(elapsedSeconds, CAMERA_MOVE_MAX_ELAPSED_SECONDS)
   );
+}
+
+function cameraResetDuration(distance: number): number {
+  return THREE.MathUtils.clamp(
+    CAMERA_RESET_MIN_DURATION_MS +
+      distance * CAMERA_RESET_MS_PER_WORLD_UNIT,
+    CAMERA_RESET_MIN_DURATION_MS,
+    CAMERA_RESET_MAX_DURATION_MS,
+  );
+}
+
+function cameraResetProgress(progress: number): number {
+  const normalized = THREE.MathUtils.clamp(progress, 0, 1);
+  return normalized < 0.5
+    ? 4 * normalized * normalized * normalized
+    : 1 - Math.pow(-2 * normalized + 2, 3) / 2;
+}
+
+function shortestAngleDelta(from: number, to: number): number {
+  return THREE.MathUtils.euclideanModulo(
+    to - from + Math.PI,
+    Math.PI * 2,
+  ) - Math.PI;
 }
 
 export function isWebGpuRendererBackend(renderer: {
@@ -310,6 +341,18 @@ function normalizeTrajectoryPoints(input: unknown): Float32Array {
   return values;
 }
 
+interface CameraResetTransition {
+  readonly startedAt: number;
+  readonly duration: number;
+  readonly startTarget: THREE.Vector3;
+  readonly endTarget: THREE.Vector3;
+  readonly startOffset: THREE.Spherical;
+  readonly endOffset: THREE.Spherical;
+  readonly azimuthDelta: number;
+  readonly finalNear: number;
+  readonly finalFar: number;
+}
+
 export class SkeletonViewer {
   private readonly canvas: HTMLCanvasElement;
   private readonly scene: THREE.Scene;
@@ -364,6 +407,8 @@ export class SkeletonViewer {
   private readonly cameraForward = new THREE.Vector3();
   private readonly cameraRight = new THREE.Vector3();
   private readonly cameraOffset = new THREE.Vector3();
+  private readonly cameraResetTarget = new THREE.Vector3();
+  private readonly cameraResetOffset = new THREE.Vector3();
 
   private skeleton: SkeletonMetadata = CORE27_SKELETON;
   private contactChannelByJoint = new Int32Array();
@@ -400,6 +445,7 @@ export class SkeletonViewer {
   private cameraMovementForward = 0;
   private cameraMovementRight = 0;
   private lastCameraMovementTime: number | null = null;
+  private cameraResetTransition: CameraResetTransition | null = null;
   private rendererInitialized = false;
   private rendererReady = false;
   private disposed = false;
@@ -420,6 +466,10 @@ export class SkeletonViewer {
   private readonly invalidate = (): void => {
     this.needsRender = true;
     this.scheduleFrame();
+  };
+
+  private readonly handleCameraInteractionStart = (): void => {
+    this.cancelCameraReset();
   };
 
   private readonly handleVisibilityChange = (): void => {
@@ -551,6 +601,7 @@ export class SkeletonViewer {
     this.controls.maxDistance = 12;
     this.controls.update();
     this.controls.addEventListener("change", this.invalidate);
+    this.controls.addEventListener("start", this.handleCameraInteractionStart);
     this.canvas.addEventListener("pointerdown", this.handleGroundPointerDown);
     this.canvas.addEventListener("pointermove", this.handleGroundPointerMove);
     this.canvas.addEventListener("pointerup", this.handleGroundPointerUp);
@@ -811,6 +862,7 @@ export class SkeletonViewer {
   }
 
   clearMotion(): void {
+    this.cancelCameraReset();
     this.clip = null;
     this.playing = false;
     this.frameCursor = 0;
@@ -860,8 +912,10 @@ export class SkeletonViewer {
   }
 
   setReducedMotion(reduced: boolean): void {
+    if (reduced) this.stopCameraInertia();
     this.reducedMotion = reduced;
     this.controls.enableDamping = !reduced;
+    if (reduced) this.finishCameraReset();
     if (reduced && this.playing) {
       this.playing = false;
       this.emitPlaybackState(true);
@@ -872,6 +926,7 @@ export class SkeletonViewer {
   }
 
   orbit(horizontalSteps: number, verticalSteps: number): void {
+    this.cancelCameraReset();
     const increment = Math.PI / 24;
     if (horizontalSteps) this.controls.rotateLeft(horizontalSteps * increment);
     if (verticalSteps) this.controls.rotateUp(verticalSteps * increment);
@@ -879,6 +934,7 @@ export class SkeletonViewer {
   }
 
   zoom(direction: "in" | "out"): void {
+    this.cancelCameraReset();
     const scale = 0.85;
     if (direction === "in") {
       this.controls.dollyIn(scale);
@@ -893,6 +949,7 @@ export class SkeletonViewer {
       throw new RangeError("Camera movement steps must be finite.");
     }
     if (forwardSteps === 0 && rightSteps === 0) return;
+    this.cancelCameraReset();
     this.controls.update();
     const step = THREE.MathUtils.clamp(
       this.controls.getDistance() * 0.05,
@@ -919,6 +976,7 @@ export class SkeletonViewer {
     ) {
       return;
     }
+    if (forward !== 0 || right !== 0) this.cancelCameraReset();
     const wasMoving =
       this.cameraMovementForward !== 0 || this.cameraMovementRight !== 0;
     this.cameraMovementForward = forward;
@@ -1133,54 +1191,146 @@ export class SkeletonViewer {
     );
   }
 
-  resetCamera(): void {
+  resetCamera({ animated = true }: ResetCameraOptions = {}): void {
+    const target = new THREE.Vector3();
+    const position = new THREE.Vector3();
+    let near = this.camera.near;
+    let far = this.camera.far;
+
     if (!this.clip) {
-      this.camera.position.set(3.1, 2.15, 3.4);
-      this.controls.target.set(0, 0.85, 0);
+      position.set(3.1, 2.15, 3.4);
+      target.set(0, 0.85, 0);
       this.hasCameraFollowAnchor = false;
+    } else {
+      const box = new THREE.Box3();
+      const point = new THREE.Vector3();
+      const frame0 = Math.min(
+        Math.floor(this.frameCursor),
+        this.clip.frameCount - 1,
+      );
+      const frame1 = Math.min(frame0 + 1, this.clip.frameCount - 1);
+      const alpha =
+        frame1 === frame0 ? 0 : this.frameCursor - frame0;
+      this.pointAt(
+        point,
+        this.skeleton.rootJointIndex,
+        frame0,
+        frame1,
+        alpha,
+      );
+      const rootX = point.x;
+      const rootZ = point.z;
+      for (let joint = 0; joint < this.skeleton.jointNames.length; joint += 1) {
+        this.pointAt(point, joint, frame0, frame1, alpha);
+        box.expandByPoint(point);
+      }
+      if (box.isEmpty()) return;
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      const distance = Math.max(
+        2.5,
+        Math.max(size.x, size.y, size.z) * 1.85,
+      );
+      const targetY = Math.max(0.7, center.y);
+      target.set(rootX, targetY, rootZ);
+      position.set(
+        rootX + distance * 0.78,
+        targetY + distance * 0.48,
+        rootZ + distance,
+      );
+      this.cameraFollowX = rootX;
+      this.cameraFollowZ = rootZ;
+      this.hasCameraFollowAnchor = true;
+      near = Math.max(0.01, distance / 200);
+      far = Math.max(100, distance * 20);
+    }
+
+    this.applyCameraReset(position, target, near, far, animated);
+  }
+
+  private applyCameraReset(
+    position: THREE.Vector3,
+    target: THREE.Vector3,
+    near: number,
+    far: number,
+    animated: boolean,
+  ): void {
+    this.cancelCameraReset();
+    this.stopCameraInertia();
+    const positionDistance = this.camera.position.distanceTo(position);
+    const targetDistance = this.controls.target.distanceTo(target);
+    const travelDistance = Math.max(positionDistance, targetDistance);
+    if (
+      !animated ||
+      this.reducedMotion ||
+      travelDistance <= Number.EPSILON
+    ) {
+      this.camera.position.copy(position);
+      this.controls.target.copy(target);
+      this.camera.near = near;
+      this.camera.far = far;
+      this.camera.updateProjectionMatrix();
       this.controls.update();
       this.invalidate();
       return;
     }
 
-    const box = new THREE.Box3();
-    const point = new THREE.Vector3();
-    const frame0 = Math.min(
-      Math.floor(this.frameCursor),
-      this.clip.frameCount - 1,
+    const startOffset = new THREE.Spherical().setFromVector3(
+      this.camera.position.clone().sub(this.controls.target),
     );
-    const frame1 = Math.min(frame0 + 1, this.clip.frameCount - 1);
-    const alpha =
-      frame1 === frame0 ? 0 : this.frameCursor - frame0;
-    this.pointAt(
-      point,
-      this.skeleton.rootJointIndex,
-      frame0,
-      frame1,
-      alpha,
+    // OrbitControls retains the last meaningful heading at the polar axis.
+    startOffset.theta = this.controls.getAzimuthalAngle();
+    const endOffset = new THREE.Spherical().setFromVector3(
+      position.clone().sub(target),
     );
-    const rootX = point.x;
-    const rootZ = point.z;
-    for (let joint = 0; joint < this.skeleton.jointNames.length; joint += 1) {
-      this.pointAt(point, joint, frame0, frame1, alpha);
-      box.expandByPoint(point);
-    }
-    if (box.isEmpty()) return;
-    const center = box.getCenter(new THREE.Vector3());
-    const size = box.getSize(new THREE.Vector3());
-    const distance = Math.max(2.5, Math.max(size.x, size.y, size.z) * 1.85);
-    const targetY = Math.max(0.7, center.y);
-    this.controls.target.set(rootX, targetY, rootZ);
-    this.camera.position.set(
-      rootX + distance * 0.78,
-      targetY + distance * 0.48,
-      rootZ + distance,
-    );
-    this.cameraFollowX = rootX;
-    this.cameraFollowZ = rootZ;
-    this.hasCameraFollowAnchor = true;
-    this.camera.near = Math.max(0.01, distance / 200);
-    this.camera.far = Math.max(100, distance * 20);
+    this.camera.near = Math.min(this.camera.near, near);
+    this.camera.far = Math.max(this.camera.far, far);
+    this.camera.updateProjectionMatrix();
+    this.cameraResetTransition = {
+      startedAt: performance.now(),
+      duration: cameraResetDuration(travelDistance),
+      startTarget: this.controls.target.clone(),
+      endTarget: target.clone(),
+      startOffset,
+      endOffset,
+      azimuthDelta: shortestAngleDelta(startOffset.theta, endOffset.theta),
+      finalNear: near,
+      finalFar: far,
+    };
+    this.invalidate();
+  }
+
+  private cancelCameraReset(): void {
+    this.cameraResetTransition = null;
+  }
+
+  /**
+   * Clear OrbitControls' pending damping without exposing its private deltas
+   * or rendering the fully-applied inertial pose for a frame.
+   */
+  private stopCameraInertia(): void {
+    if (!this.controls.enableDamping) return;
+    const position = this.camera.position.clone();
+    const target = this.controls.target.clone();
+    this.controls.enableDamping = false;
+    this.controls.update();
+    this.camera.position.copy(position);
+    this.controls.target.copy(target);
+    this.controls.update();
+    this.controls.enableDamping = true;
+  }
+
+  private finishCameraReset(): void {
+    const transition = this.cameraResetTransition;
+    if (!transition) return;
+    this.cameraResetTransition = null;
+    this.controls.target.copy(transition.endTarget);
+    this.cameraResetOffset.setFromSpherical(transition.endOffset);
+    this.camera.position
+      .copy(transition.endTarget)
+      .add(this.cameraResetOffset);
+    this.camera.near = transition.finalNear;
+    this.camera.far = transition.finalFar;
     this.camera.updateProjectionMatrix();
     this.controls.update();
     this.invalidate();
@@ -1209,6 +1359,10 @@ export class SkeletonViewer {
     this.canvas.removeEventListener("pointerup", this.handleGroundPointerUp);
     this.canvas.removeEventListener("pointercancel", this.handleGroundPointerCancel);
     this.controls.removeEventListener("change", this.invalidate);
+    this.controls.removeEventListener(
+      "start",
+      this.handleCameraInteractionStart,
+    );
     this.controls.dispose();
     this.vrmLoadRevision += 1;
     this.disposeVrmAvatar();
@@ -1257,6 +1411,7 @@ export class SkeletonViewer {
       this.lastAnimationTime = null;
     }
 
+    const cameraResetChanged = this.updateCameraReset(time);
     const controlsChanged = this.controls.update();
     const cameraMoved = this.updateCameraMovement(time);
     if (
@@ -1266,15 +1421,70 @@ export class SkeletonViewer {
     ) {
       this.vrm.update(elapsedSeconds);
     }
-    if (this.needsRender || poseChanged || controlsChanged || cameraMoved) {
+    if (
+      this.needsRender ||
+      poseChanged ||
+      controlsChanged ||
+      cameraMoved ||
+      cameraResetChanged
+    ) {
       this.updateGroundSurfaceLayout();
       this.renderPipeline.render();
       this.needsRender = false;
     }
-    if (this.playing || controlsChanged || this.hasCameraMovement()) {
+    if (
+      this.playing ||
+      controlsChanged ||
+      this.hasCameraMovement() ||
+      this.cameraResetTransition
+    ) {
       this.scheduleFrame();
     }
   };
+
+  private updateCameraReset(time: number): boolean {
+    const transition = this.cameraResetTransition;
+    if (!transition) return false;
+    const rawProgress =
+      (time - transition.startedAt) / transition.duration;
+    const progress = THREE.MathUtils.clamp(rawProgress, 0, 1);
+    const eased = cameraResetProgress(progress);
+    this.cameraResetTarget.lerpVectors(
+      transition.startTarget,
+      transition.endTarget,
+      eased,
+    );
+    const radius = THREE.MathUtils.lerp(
+      transition.startOffset.radius,
+      transition.endOffset.radius,
+      eased,
+    );
+    const phi = THREE.MathUtils.lerp(
+      transition.startOffset.phi,
+      transition.endOffset.phi,
+      eased,
+    );
+    const theta =
+      transition.startOffset.theta + transition.azimuthDelta * eased;
+    this.cameraResetOffset.setFromSphericalCoords(radius, phi, theta);
+    this.controls.target.copy(this.cameraResetTarget);
+    this.camera.position
+      .copy(this.cameraResetTarget)
+      .add(this.cameraResetOffset);
+
+    if (progress >= 1) {
+      this.cameraResetTransition = null;
+      this.controls.target.copy(transition.endTarget);
+      this.cameraResetOffset.setFromSpherical(transition.endOffset);
+      this.camera.position
+        .copy(transition.endTarget)
+        .add(this.cameraResetOffset);
+      this.camera.near = transition.finalNear;
+      this.camera.far = transition.finalFar;
+      this.camera.updateProjectionMatrix();
+    }
+    return true;
+  }
 
   private hasCameraMovement(): boolean {
     return (
@@ -1548,6 +1758,13 @@ export class SkeletonViewer {
     this.cameraFollowX = x;
     this.cameraFollowZ = z;
     if (deltaX === 0 && deltaZ === 0) return;
+    const transition = this.cameraResetTransition;
+    if (transition) {
+      transition.startTarget.x += deltaX;
+      transition.startTarget.z += deltaZ;
+      transition.endTarget.x += deltaX;
+      transition.endTarget.z += deltaZ;
+    }
     this.camera.position.x += deltaX;
     this.camera.position.z += deltaZ;
     this.controls.target.x += deltaX;

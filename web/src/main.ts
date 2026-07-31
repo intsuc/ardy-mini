@@ -1912,7 +1912,9 @@ export function bootstrap(): () => void {
     (value) => viewer?.setSpeed(Number(value)),
     lifecycle.signal,
   );
-  resetCamera.addEventListener("click", () => viewer?.resetCamera());
+  resetCamera.addEventListener("click", (event) =>
+    viewer?.resetCamera({ animated: event.detail !== 0 }),
+  );
 
   const handleReducedMotionChange = (event: MediaQueryListEvent): void => {
     viewer?.setReducedMotion(event.matches);
@@ -1999,7 +2001,7 @@ export function bootstrap(): () => void {
         viewer?.zoom("out");
       } else if (event.key === "Home") {
         event.preventDefault();
-        viewer?.resetCamera();
+        viewer?.resetCamera({ animated: false });
       }
     },
     { signal: lifecycle.signal },

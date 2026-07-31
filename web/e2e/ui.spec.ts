@@ -863,9 +863,7 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
         },
         { playing: false, resetCamera: true },
       );
-      await new Promise<void>((resolve) =>
-        requestAnimationFrame(() => resolve()),
-      );
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 750));
 
       const ground = internal.scene.getObjectByName(
         "camera-relative-ground-grid",
@@ -1137,6 +1135,7 @@ test("follows the root while preserving manual camera composition", async ({
         },
         { playing: false, resetCamera: true },
       );
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 750));
       const internal = viewer as unknown as {
         camera: { position: { x: number; y: number; z: number } };
         controls: { target: { x: number; y: number; z: number } };
@@ -1158,7 +1157,7 @@ test("follows the root while preserving manual camera composition", async ({
       const followed = snapshot();
       viewer.moveCamera(1, 0);
       const moved = snapshot();
-      viewer.resetCamera();
+      viewer.resetCamera({ animated: false });
       const reset = snapshot();
       viewer.setReducedMotion(true);
       viewer.setPlaying(true);

@@ -3,6 +3,193 @@
 
 import { expect, test } from "@playwright/test";
 
+test("smoothly resets the camera, remains interruptible, and honors reduced motion", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  const state = await page.evaluate(async () => {
+    const { SkeletonViewer } = await import("/src/viewer.ts");
+    const host = document.createElement("div");
+    host.style.width = "320px";
+    host.style.height = "320px";
+    const canvas = document.createElement("canvas");
+    host.append(canvas);
+    document.body.append(host);
+    const viewer = await SkeletonViewer.create(canvas);
+    const internal = viewer as unknown as {
+      camera: {
+        position: {
+          x: number;
+          y: number;
+          z: number;
+        };
+      };
+      controls: {
+        target: {
+          x: number;
+          y: number;
+          z: number;
+        };
+      };
+    };
+    const snapshot = () => ({
+      camera: [
+        internal.camera.position.x,
+        internal.camera.position.y,
+        internal.camera.position.z,
+      ],
+      target: [
+        internal.controls.target.x,
+        internal.controls.target.y,
+        internal.controls.target.z,
+      ],
+    });
+    const moveAway = () => {
+      for (let step = 0; step < 15; step += 1) {
+        viewer.moveCamera(1, 1);
+      }
+    };
+    const wait = (milliseconds: number) =>
+      new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
+
+    try {
+      moveAway();
+      const start = snapshot();
+      viewer.resetCamera();
+      const immediate = snapshot();
+      await wait(120);
+      const midpoint = snapshot();
+      await wait(700);
+      const completed = snapshot();
+
+      moveAway();
+      viewer.resetCamera();
+      await wait(100);
+      viewer.moveCamera(1, 0);
+      const interrupted = snapshot();
+      await wait(750);
+      const afterInterrupt = snapshot();
+
+      moveAway();
+      viewer.resetCamera();
+      await wait(100);
+      viewer.setReducedMotion(true);
+      const reducedDuringTransition = snapshot();
+
+      viewer.setReducedMotion(false);
+      moveAway();
+      viewer.setReducedMotion(true);
+      viewer.resetCamera();
+      const reduced = snapshot();
+
+      return {
+        start,
+        immediate,
+        midpoint,
+        completed,
+        interrupted,
+        afterInterrupt,
+        reducedDuringTransition,
+        reduced,
+      };
+    } finally {
+      viewer.dispose();
+      host.remove();
+    }
+  });
+
+  const distance = (
+    left: { camera: number[]; target: number[] },
+    right: { camera: number[]; target: number[] },
+  ) =>
+    Math.hypot(
+      ...left.camera.map((value, index) => value - right.camera[index]),
+      ...left.target.map((value, index) => value - right.target[index]),
+    );
+  const expected = {
+    camera: [3.1, 2.15, 3.4],
+    target: [0, 0.85, 0],
+  };
+
+  expect(distance(state.immediate, state.start)).toBeCloseTo(0);
+  expect(distance(state.midpoint, state.start)).toBeGreaterThan(0.01);
+  expect(distance(state.midpoint, expected)).toBeGreaterThan(0.01);
+  expect(distance(state.completed, expected)).toBeLessThan(1e-5);
+  expect(distance(state.afterInterrupt, state.interrupted)).toBeLessThan(1e-5);
+  expect(distance(state.reducedDuringTransition, expected)).toBeLessThan(1e-5);
+  expect(distance(state.reduced, expected)).toBeLessThan(1e-5);
+});
+
+test("keeps a smooth reset anchored to a moving motion root", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  const state = await page.evaluate(async () => {
+    const {
+      CORE27_JOINT_COUNT,
+      CORE27_SKELETON,
+      SkeletonViewer,
+    } = await import("/src/viewer.ts");
+    const host = document.createElement("div");
+    host.style.width = "320px";
+    host.style.height = "320px";
+    const canvas = document.createElement("canvas");
+    host.append(canvas);
+    document.body.append(host);
+    const viewer = await SkeletonViewer.create(canvas);
+    const internal = viewer as unknown as {
+      camera: { position: { toArray(): number[] } };
+      controls: { target: { toArray(): number[] } };
+    };
+
+    try {
+      const positions = new Float32Array(2 * CORE27_JOINT_COUNT * 3);
+      for (let frame = 0; frame < 2; frame += 1) {
+        for (let joint = 0; joint < CORE27_JOINT_COUNT; joint += 1) {
+          const offset = (frame * CORE27_JOINT_COUNT + joint) * 3;
+          positions[offset] = frame * 6;
+          positions[offset + 1] = joint * 0.04;
+          positions[offset + 2] = frame * -4;
+        }
+      }
+      viewer.setMotion(
+        {
+          skeleton: CORE27_SKELETON,
+          positions,
+          positionsShape: [2, CORE27_JOINT_COUNT, 3],
+          frameCount: 2,
+          fps: 20,
+        },
+        { playing: false, resetCamera: true },
+      );
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 750));
+      for (let step = 0; step < 15; step += 1) {
+        viewer.moveCamera(1, 1);
+      }
+      viewer.resetCamera();
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 100));
+      viewer.seek(1);
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 750));
+      return {
+        camera: internal.camera.position.toArray(),
+        target: internal.controls.target.toArray(),
+      };
+    } finally {
+      viewer.dispose();
+      host.remove();
+    }
+  });
+
+  expect(state.target[0]).toBeCloseTo(6);
+  expect(state.target[1]).toBeCloseTo(0.7);
+  expect(state.target[2]).toBeCloseTo(-4);
+  expect(state.camera[0] - state.target[0]).toBeCloseTo(1.95);
+  expect(state.camera[1] - state.target[1]).toBeCloseTo(1.2);
+  expect(state.camera[2] - state.target[2]).toBeCloseTo(2.5);
+});
+
 test("updates the held heading when orbiting horizontally at the top-down pole", async ({
   page,
 }) => {
