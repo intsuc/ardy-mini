@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   CORE27_SKELETON,
   isJointInContact,
+  normalizeGroundedNeutralPose,
   normalizeSkeletonMetadata,
   normalizeStructuredMotion,
 } from "./motion-data";
@@ -63,6 +64,36 @@ describe("dynamic skeleton metadata", () => {
 });
 
 describe("structured motion normalization", () => {
+  it("grounds a manifest neutral pose without mutating its source", () => {
+    const source = [
+      [0, 0.5, 0],
+      [0, -0.25, 0.1],
+      [0.5, 1.25, 0],
+    ];
+    const pose = normalizeGroundedNeutralPose(dynamicSkeleton, source);
+
+    expect(pose.positions).toEqual(
+      Float32Array.from([
+        0, 0.75, 0,
+        0, 0, 0.1,
+        0.5, 1.5, 0,
+      ]),
+    );
+    expect(pose.positionsShape).toEqual([1, 3, 3]);
+    expect(pose.frameCount).toBe(1);
+    expect(source).toEqual([
+      [0, 0.5, 0],
+      [0, -0.25, 0.1],
+      [0.5, 1.25, 0],
+    ]);
+  });
+
+  it("rejects a neutral pose that does not match its skeleton", () => {
+    expect(() =>
+      normalizeGroundedNeutralPose(dynamicSkeleton, [[0, 0, 0]]),
+    ).toThrow(/3 × 3 values/);
+  });
+
   it("preserves all output tracks and derives explicit shapes", () => {
     const frameCount = 2;
     const positions = Float32Array.from({ length: frameCount * 3 * 3 }, (_, index) => index / 10);

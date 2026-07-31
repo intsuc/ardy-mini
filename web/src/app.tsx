@@ -937,7 +937,7 @@ function ViewportPanel({
                   <IconCameraRotate aria-hidden="true" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="bottom">
+              <TooltipContent side="top">
                 Reset camera
               </TooltipContent>
             </Tooltip>
@@ -1127,14 +1127,22 @@ function SettingsFields({
       >
         {tabsAtBottom ? null : SETTINGS_TABS_LIST}
         <TabsContent
-          className={tabsAtBottom ? "min-h-0 overflow-y-auto" : undefined}
+          className={
+            tabsAtBottom
+              ? "min-h-0 overflow-x-hidden overflow-y-auto"
+              : undefined
+          }
           value="view"
           keepMounted
         >
           <ViewSettingsFields />
         </TabsContent>
         <TabsContent
-          className={tabsAtBottom ? "min-h-0 overflow-y-auto" : undefined}
+          className={
+            tabsAtBottom
+              ? "min-h-0 overflow-x-hidden overflow-y-auto"
+              : undefined
+          }
           value="motion"
           keepMounted
         >
@@ -1204,7 +1212,7 @@ function SettingsSection({
                 <IconSettings aria-hidden="true" />
               </DrawerTrigger>
             </TooltipTrigger>
-            <TooltipContent side="bottom">Settings</TooltipContent>
+            <TooltipContent side="top">Settings</TooltipContent>
           </Tooltip>
           <DrawerContent
             ref={drawerContentRef}
@@ -1241,12 +1249,12 @@ function SettingsSection({
                 <IconSettings aria-hidden="true" />
               </PopoverTrigger>
             </TooltipTrigger>
-            <TooltipContent side="bottom">Settings</TooltipContent>
+            <TooltipContent side="top">Settings</TooltipContent>
           </Tooltip>
           <PopoverContent
             id={previewSettingsControl.id}
             align="end"
-            side="bottom"
+            side="top"
             keepMounted
           >
             <PopoverTitle className="sr-only">Settings</PopoverTitle>
@@ -1256,7 +1264,7 @@ function SettingsSection({
       )}
       {portalContainer
         ? createPortal(
-            <SettingsFields tabsAtBottom={isMobile} />,
+            <SettingsFields tabsAtBottom />,
             portalContainer
           )
         : null}

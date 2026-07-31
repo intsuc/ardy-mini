@@ -25,6 +25,7 @@ import {
   CORE27_PARENTS,
   CORE27_SKELETON,
   DEFAULT_MOTION_FPS,
+  normalizeGroundedNeutralPose,
   normalizeSkeletonMetadata,
   normalizeStructuredMotion,
   toFiniteFloat32Array,
@@ -414,6 +415,7 @@ export class SkeletonViewer {
   private contactChannelByJoint = new Int32Array();
   private localWorldRotations: THREE.Quaternion[] = [];
   private localRotationResolved = new Uint8Array();
+  private neutralPose: MotionClip | null = null;
   private clip: MotionClip | null = null;
   private vrm: VRM | null = null;
   private vrmUtils: LoadedVrmAvatar["utils"] | null = null;
@@ -710,6 +712,7 @@ export class SkeletonViewer {
       this.skeleton = normalized;
       return;
     }
+    this.neutralPose = null;
     if (this.clip) this.clearMotion();
     this.skeleton = normalized;
     this.rebuildVrmRetargetPlan();
@@ -728,6 +731,20 @@ export class SkeletonViewer {
 
   getSkeleton(): SkeletonMetadata {
     return this.skeleton;
+  }
+
+  /**
+   * Install a model-provided rest pose without creating playable motion.
+   * The pose remains visible while the playback state stays at zero frames.
+   */
+  setNeutralPose(skeleton: unknown, neutralJoints: unknown): void {
+    this.neutralPose = normalizeGroundedNeutralPose(
+      skeleton,
+      neutralJoints,
+    );
+    if (this.clip) return;
+    this.showNeutralPose();
+    this.invalidate();
   }
 
   /**
@@ -875,8 +892,6 @@ export class SkeletonViewer {
     this.playing = false;
     this.frameCursor = 0;
     this.lastAnimationTime = null;
-    this.joints.visible = false;
-    this.bones.visible = false;
     this.trajectory.visible = false;
     this.orientationAxesGroup.visible = false;
     this.constraintGroup.visible = false;
@@ -884,6 +899,7 @@ export class SkeletonViewer {
     this.vrmRoot.position.set(0, 0, 0);
     this.hasCameraFollowAnchor = false;
     this.updateShadowAnchor(0, 0);
+    this.showNeutralPose();
     this.invalidate();
     this.emitPlaybackState(true);
   }
@@ -1623,14 +1639,21 @@ export class SkeletonViewer {
     );
   }
 
-  private updatePose(frameCursor: number): void {
-    const clip = this.clip;
-    if (!clip) return;
-    const frame0 = Math.min(Math.floor(frameCursor), clip.frameCount - 1);
-    const frame1 = Math.min(frame0 + 1, clip.frameCount - 1);
-    const alpha = frame1 === frame0 ? 0 : frameCursor - frame0;
+  private updateSkeletonPose(
+    clip: MotionClip,
+    frame0: number,
+    frame1: number,
+    alpha: number,
+  ): void {
     for (let joint = 0; joint < this.skeleton.jointNames.length; joint += 1) {
-      this.pointAt(this.currentPoint, joint, frame0, frame1, alpha);
+      this.pointAtClip(
+        this.currentPoint,
+        clip,
+        joint,
+        frame0,
+        frame1,
+        alpha,
+      );
       this.jointTransform.position.copy(this.currentPoint);
       this.jointTransform.scale.setScalar(joint === this.skeleton.rootJointIndex ? 1.25 : 1);
       this.jointTransform.quaternion.identity();
@@ -1653,8 +1676,22 @@ export class SkeletonViewer {
     for (let joint = 0; joint < this.skeleton.jointNames.length; joint += 1) {
       const parent = this.skeleton.parents[joint];
       if (parent === -1) continue;
-      this.pointAt(this.currentPoint, joint, frame0, frame1, alpha);
-      this.pointAt(this.parentPoint, parent, frame0, frame1, alpha);
+      this.pointAtClip(
+        this.currentPoint,
+        clip,
+        joint,
+        frame0,
+        frame1,
+        alpha,
+      );
+      this.pointAtClip(
+        this.parentPoint,
+        clip,
+        parent,
+        frame0,
+        frame1,
+        alpha,
+      );
       this.direction.subVectors(this.currentPoint, this.parentPoint);
       const length = Math.max(this.direction.length(), 0.0001);
       this.midpoint.addVectors(this.currentPoint, this.parentPoint).multiplyScalar(0.5);
@@ -1669,10 +1706,38 @@ export class SkeletonViewer {
     this.joints.instanceMatrix.needsUpdate = true;
     if (this.joints.instanceColor) this.joints.instanceColor.needsUpdate = true;
     this.bones.instanceMatrix.needsUpdate = true;
+  }
+
+  private updatePose(frameCursor: number): void {
+    const clip = this.clip;
+    if (!clip) return;
+    const frame0 = Math.min(Math.floor(frameCursor), clip.frameCount - 1);
+    const frame1 = Math.min(frame0 + 1, clip.frameCount - 1);
+    const alpha = frame1 === frame0 ? 0 : frameCursor - frame0;
+    this.updateSkeletonPose(clip, frame0, frame1, alpha);
     this.updateOrientationAxes(frameCursor);
     this.updateConstraintMarkers(frame0);
     const vrmFrame = this.updateVrmPose(frameCursor);
     this.updateShadowAnchorForFrame(frameCursor, vrmFrame);
+  }
+
+  private showNeutralPose(): void {
+    const pose = this.neutralPose;
+    if (!pose) {
+      this.applyOutputVisibility();
+      return;
+    }
+
+    if (!sameSkeleton(this.skeleton, pose.skeleton)) {
+      this.skeleton = pose.skeleton;
+      this.createSkeletonMeshes(this.skeleton);
+      this.setOrientationAxes("all", this.orientationAxisSize);
+      this.rebuildVrmRetargetPlan();
+    } else {
+      this.skeleton = pose.skeleton;
+    }
+    this.updateSkeletonPose(pose, 0, 0, 0);
+    this.applyOutputVisibility();
   }
 
   private updateShadowAnchorForFrame(
@@ -2078,8 +2143,9 @@ export class SkeletonViewer {
 
   private applyOutputVisibility(): void {
     const hasClip = Boolean(this.clip);
-    this.joints.visible = hasClip && this.outputVisibility.skeleton;
-    this.bones.visible = hasClip && this.outputVisibility.skeleton;
+    const hasSkeletonPose = hasClip || this.neutralPose !== null;
+    this.joints.visible = hasSkeletonPose && this.outputVisibility.skeleton;
+    this.bones.visible = hasSkeletonPose && this.outputVisibility.skeleton;
     this.trajectory.visible =
       this.outputVisibility.trajectory &&
       (this.customTrajectory !== null || Boolean(this.clip)) &&

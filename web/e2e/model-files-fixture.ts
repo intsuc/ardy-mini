@@ -20,9 +20,43 @@ import {
 } from "../src/runtime/manifest";
 import type { BrowserModelVariant } from "../src/runtime/model-variant";
 import { WORKER_PROTOCOL_VERSION } from "../src/runtime/protocol";
+import {
+  CORE27_JOINT_NAMES,
+  CORE27_PARENTS,
+} from "../src/motion-data";
 
 const developmentModelFamilyPath =
   "/models/ardy-minilm-core40-browser-v1/";
+
+const core27NeutralJoints = [
+  [0, 0, 0],
+  [0, 0.071, -0.047],
+  [0, 0.164, -0.064],
+  [0, 0.258, -0.072],
+  [0, 0.353, -0.072],
+  [0, 0.602, -0.037],
+  [0, 0.73, -0.014],
+  [-0.032, 0.526, -0.019],
+  [-0.191, 0.526, -0.019],
+  [-0.486, 0.526, -0.019],
+  [-0.719, 0.526, -0.019],
+  [-0.789, 0.526, -0.019],
+  [-0.747, 0.507, 0.028],
+  [0.032, 0.526, -0.019],
+  [0.191, 0.526, -0.019],
+  [0.486, 0.526, -0.019],
+  [0.719, 0.526, -0.019],
+  [0.789, 0.526, -0.019],
+  [0.747, 0.507, 0.028],
+  [-0.095, -0.028, 0],
+  [-0.095, -0.44, 0],
+  [-0.095, -0.896, 0],
+  [-0.095, -0.954, 0.161],
+  [0.095, -0.028, 0],
+  [0.095, -0.44, 0],
+  [0.095, -0.896, 0],
+  [0.095, -0.954, 0.161],
+];
 
 export function developmentModelPath(
   variant: BrowserModelVariant,
@@ -373,6 +407,13 @@ export function createMockModelFiles(
       levels: new Array(128).fill(4),
       mean: new Array(128).fill(0),
       std: new Array(128).fill(1),
+    },
+    skeleton: {
+      name: "cskel27",
+      root_index: 0,
+      parents: [...CORE27_PARENTS],
+      joint_names: [...CORE27_JOINT_NAMES],
+      neutral_joints: core27NeutralJoints.map((joint) => [...joint]),
     },
     runtime: {
       contract_revision: 3,

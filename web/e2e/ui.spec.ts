@@ -199,6 +199,68 @@ async function openPromptExamples(page: Page): Promise<void> {
   ).toBeVisible();
 }
 
+test("shows the grounded model rest skeleton before motion starts", async ({
+  page,
+}) => {
+  await gotoReadyApp(page);
+  await installCameraMovementProbe(page);
+  await page.locator("#motion-canvas").focus();
+  await page.keyboard.press("w");
+
+  const state = await page.evaluate(() => {
+    interface ViewerProbe {
+      neutralPose: {
+        positions: Float32Array;
+      } | null;
+      clip: unknown;
+      joints: { visible: boolean };
+      bones: { visible: boolean };
+      getPlaybackState(): {
+        frame: number;
+        frameCount: number;
+        playing: boolean;
+      };
+    }
+    const viewer = (
+      globalThis as typeof globalThis & {
+        __cameraMovementProbe?: { viewer: ViewerProbe | null };
+      }
+    ).__cameraMovementProbe?.viewer;
+    if (!viewer?.neutralPose) {
+      throw new Error("The preview neutral pose is unavailable.");
+    }
+    const heights = Array.from(
+      { length: viewer.neutralPose.positions.length / 3 },
+      (_, joint) => viewer.neutralPose!.positions[joint * 3 + 1],
+    );
+    const playback = viewer.getPlaybackState();
+    return {
+      playback: {
+        frame: playback.frame,
+        frameCount: playback.frameCount,
+        playing: playback.playing,
+      },
+      hasMotionClip: viewer.clip !== null,
+      jointsVisible: viewer.joints.visible,
+      bonesVisible: viewer.bones.visible,
+      minimumHeight: Math.min(...heights),
+    };
+  });
+
+  expect(state).toEqual({
+    playback: {
+      frame: 0,
+      frameCount: 0,
+      playing: false,
+    },
+    hasMotionClip: false,
+    jointsVisible: true,
+    bonesVisible: true,
+    minimumHeight: 0,
+  });
+  await expect(page.locator("#preview-diagnostics")).toBeHidden();
+});
+
 test("keeps Composer actions visually consistent when More actions is disabled", async ({
   page,
 }) => {
@@ -352,6 +414,41 @@ test("shows the duration of the latest automatic buffer generation", async ({
   await page.locator("#generate").click();
   const diagnostics = page.locator("#preview-diagnostics");
   await expect(diagnostics).toHaveText("80 frames · 111 ms");
+  const [viewportBox, diagnosticsBox, actionsBox, composerBox] =
+    await Promise.all([
+      page.locator("#viewport").boundingBox(),
+      diagnostics.boundingBox(),
+      page.locator(".preview-overlay-actions").boundingBox(),
+      page.locator(".prompt-composer").boundingBox(),
+    ]);
+  expect(viewportBox).not.toBeNull();
+  expect(diagnosticsBox).not.toBeNull();
+  expect(actionsBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+  expect(diagnosticsBox!.x - viewportBox!.x).toBeCloseTo(12, 1);
+  expect(
+    viewportBox!.y + viewportBox!.height -
+      diagnosticsBox!.y -
+      diagnosticsBox!.height,
+  ).toBeCloseTo(12, 1);
+  expect(
+    viewportBox!.x + viewportBox!.width -
+      actionsBox!.x -
+      actionsBox!.width,
+  ).toBeCloseTo(12, 1);
+  expect(
+    viewportBox!.y + viewportBox!.height - actionsBox!.y - actionsBox!.height,
+  ).toBeCloseTo(12, 1);
+  expect(diagnosticsBox!.y).toBeGreaterThan(
+    viewportBox!.y + viewportBox!.height / 2,
+  );
+  expect(actionsBox!.y).toBeGreaterThan(
+    viewportBox!.y + viewportBox!.height / 2,
+  );
+  expect(diagnosticsBox!.y + diagnosticsBox!.height).toBeLessThan(
+    composerBox!.y,
+  );
+  expect(actionsBox!.y + actionsBox!.height).toBeLessThan(composerBox!.y);
   const playPause = page.locator("#play-pause");
   await playPause.click();
   await expect(playPause).toHaveAttribute("data-playing", "true");
@@ -1756,8 +1853,18 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   ]);
   expect(viewportBefore).not.toBeNull();
   expect(triggerBox).not.toBeNull();
-  expect(triggerBox!.y - viewportBefore!.y).toBeGreaterThanOrEqual(8);
-  expect(triggerBox!.y - viewportBefore!.y).toBeLessThanOrEqual(16);
+  expect(
+    viewportBefore!.y +
+      viewportBefore!.height -
+      triggerBox!.y -
+      triggerBox!.height,
+  ).toBeGreaterThanOrEqual(8);
+  expect(
+    viewportBefore!.y +
+      viewportBefore!.height -
+      triggerBox!.y -
+      triggerBox!.height,
+  ).toBeLessThanOrEqual(16);
   expect(
     viewportBefore!.x +
       viewportBefore!.width -
@@ -1795,6 +1902,23 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   await expect(viewTab).toBeFocused();
   await motionTab.click();
   await expect(motionTab).toHaveAttribute("aria-selected", "true");
+  const [desktopTabsListBox, desktopMotionSettingsBox, cacheControlBox] =
+    await Promise.all([
+      settingsContent.locator('[data-slot="tabs-list"]').boundingBox(),
+      settingsContent
+        .locator('[data-slot="field-group"]:has(#target-buffer)')
+        .boundingBox(),
+      settingsContent.locator("#clear-model-cache").boundingBox(),
+    ]);
+  expect(desktopTabsListBox).not.toBeNull();
+  expect(desktopMotionSettingsBox).not.toBeNull();
+  expect(cacheControlBox).not.toBeNull();
+  expect(desktopTabsListBox!.y).toBeGreaterThanOrEqual(
+    desktopMotionSettingsBox!.y + desktopMotionSettingsBox!.height,
+  );
+  expect(desktopTabsListBox!.y).toBeGreaterThanOrEqual(
+    cacheControlBox!.y + cacheControlBox!.height,
+  );
   expect(await page.locator("#viewport").boundingBox()).toEqual(viewportBefore);
   const previewSettingsOverflow = await settingsContent.evaluate((element) => {
     const style = getComputedStyle(element);
@@ -2256,6 +2380,33 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
     1,
   );
 
+  const mobileDiagnostics = page.locator("#preview-diagnostics");
+  await mobileDiagnostics.evaluate((element) => {
+    element.textContent = "80 frames · 111 ms";
+  });
+  await expect(mobileDiagnostics).toHaveText("80 frames · 111 ms");
+  const [mobileDiagnosticsBox, mobileActionsBox] = await Promise.all([
+    mobileDiagnostics.boundingBox(),
+    page.locator(".preview-overlay-actions").boundingBox(),
+  ]);
+  expect(mobileDiagnosticsBox).not.toBeNull();
+  expect(mobileActionsBox).not.toBeNull();
+  expect(mobileDiagnosticsBox!.x - viewport!.x).toBeCloseTo(12, 1);
+  expect(
+    viewport!.x + viewport!.width -
+      mobileActionsBox!.x -
+      mobileActionsBox!.width,
+  ).toBeCloseTo(12, 1);
+  for (const box of [mobileDiagnosticsBox!, mobileActionsBox!]) {
+    expect(
+      viewport!.y + viewport!.height - box.y - box.height,
+    ).toBeCloseTo(12, 1);
+    expect(box.y + box.height).toBeLessThan(promptComposer!.y);
+  }
+  await mobileDiagnostics.evaluate((element) => {
+    element.textContent = "";
+  });
+
   await expect(page.locator("#generator-panel")).toHaveCount(0);
   await openSettings(page);
   await expect(page.locator("#preview-settings")).toHaveAttribute(
@@ -2403,6 +2554,16 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
   }
 
   await openSettings(page);
+  const motionSettingsContent = page.locator(
+    '[data-slot="tabs-content"]:has(#target-buffer)',
+  );
+  await expect
+    .poll(() =>
+      motionSettingsContent.evaluate(
+        (element) => getComputedStyle(element).overflowX,
+      ),
+    )
+    .toBe("hidden");
   const [tabsListBox, motionSettingsBox] = await Promise.all([
     page.locator('[data-slot="tabs-list"]').boundingBox(),
     page

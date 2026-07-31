@@ -2231,6 +2231,13 @@ export function bootstrap(): () => void {
     modelSource = await fetchModelManifest(baseUrl, {
       signal: lifecycle.signal,
     });
+    const manifestSkeleton = modelSource.manifest.skeleton;
+    if (manifestSkeleton) {
+      viewer?.setNeutralPose(
+        manifestSkeleton,
+        manifestSkeleton.neutral_joints,
+      );
+    }
     const cache = await inspectModelCache(modelSource);
     modelUiControl.dispatch(
       cache.complete

@@ -50,30 +50,36 @@ test("smoothly resets the camera, remains interruptible, and honors reduced moti
         viewer.moveCamera(1, 1);
       }
     };
-    const wait = (milliseconds: number) =>
-      new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
+    const waitForAnimationTime = async (milliseconds: number) => {
+      const end = performance.now() + milliseconds;
+      do {
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => resolve()),
+        );
+      } while (performance.now() < end);
+    };
 
     try {
       moveAway();
       const start = snapshot();
       viewer.resetCamera();
       const immediate = snapshot();
-      await wait(120);
+      await waitForAnimationTime(120);
       const midpoint = snapshot();
-      await wait(700);
+      await waitForAnimationTime(700);
       const completed = snapshot();
 
       moveAway();
       viewer.resetCamera();
-      await wait(100);
+      await waitForAnimationTime(100);
       viewer.moveCamera(1, 0);
       const interrupted = snapshot();
-      await wait(750);
+      await waitForAnimationTime(750);
       const afterInterrupt = snapshot();
 
       moveAway();
       viewer.resetCamera();
-      await wait(100);
+      await waitForAnimationTime(100);
       viewer.setReducedMotion(true);
       const reducedDuringTransition = snapshot();
 

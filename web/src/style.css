@@ -108,11 +108,11 @@ body {
 .preview-overlay-controls {
   position: absolute;
   z-index: 4;
-  top: 0.75rem;
-  right: 0.75rem;
-  left: 0.75rem;
+  right: max(0.75rem, env(safe-area-inset-right, 0px));
+  bottom: max(0.75rem, env(safe-area-inset-bottom, 0px));
+  left: max(0.75rem, env(safe-area-inset-left, 0px));
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 0.5rem;
   pointer-events: none;

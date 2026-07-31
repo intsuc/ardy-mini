@@ -317,4 +317,40 @@ describe("dynamic skeleton layers", () => {
       bones: 3,
     });
   });
+
+  it("keeps the model neutral pose outside the playback timeline", () => {
+    const showNeutralPose = vi.fn();
+    const viewer = Object.assign(Object.create(SkeletonViewer.prototype), {
+      neutralPose: null,
+      clip: null,
+      frameCursor: 0,
+      playing: false,
+      speed: 1,
+      showNeutralPose,
+      invalidate: vi.fn(),
+    }) as SkeletonViewer;
+
+    SkeletonViewer.prototype.setNeutralPose.call(
+      viewer,
+      {
+        name: "two-joint",
+        joint_names: ["Root", "Foot"],
+        parents: [-1, 0],
+        root_index: 0,
+      },
+      [
+        [0, 0, 0],
+        [0, -1, 0],
+      ],
+    );
+
+    expect(showNeutralPose).toHaveBeenCalledOnce();
+    expect(viewer.getPlaybackState()).toEqual({
+      frame: 0,
+      frameCount: 0,
+      fps: 20,
+      playing: false,
+      speed: 1,
+    });
+  });
 });

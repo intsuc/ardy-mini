@@ -105,6 +105,47 @@ export interface MotionNormalizationOptions {
   defaultFps?: number;
 }
 
+/**
+ * Build the one-frame, ground-aligned rest pose shipped with a model manifest.
+ *
+ * Neutral joints are pelvis-relative, so their feet extend below y=0. Moving
+ * the lowest joint to y=0 matches the generated motion and VRM presentation
+ * without mutating the manifest-owned array.
+ */
+export function normalizeGroundedNeutralPose(
+  skeletonInput: unknown,
+  neutralJointsInput: unknown,
+): StructuredMotionResult {
+  const skeleton = normalizeSkeletonMetadata(skeletonInput);
+  const source = toFiniteFloat32Array(
+    neutralJointsInput,
+    "Skeleton neutral joint positions",
+  );
+  const expectedValues = skeleton.jointNames.length * 3;
+  if (source.length !== expectedValues) {
+    throw new RangeError(
+      `Skeleton neutral joint positions must contain ${skeleton.jointNames.length} × 3 values; received ${source.length}.`,
+    );
+  }
+
+  let minimumHeight = Number.POSITIVE_INFINITY;
+  for (let offset = 1; offset < source.length; offset += 3) {
+    minimumHeight = Math.min(minimumHeight, source[offset]);
+  }
+  const positions = source.slice();
+  for (let offset = 1; offset < positions.length; offset += 3) {
+    positions[offset] -= minimumHeight;
+  }
+
+  return {
+    skeleton,
+    positions,
+    positionsShape: [1, skeleton.jointNames.length, 3],
+    frameCount: 1,
+    fps: DEFAULT_MOTION_FPS,
+  };
+}
+
 export function isJointInContact(
   motion: StructuredMotionResult,
   frame: number,
