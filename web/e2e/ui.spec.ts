@@ -5,7 +5,6 @@ import { expect, test, type Page } from "@playwright/test";
 
 import {
   allowRequiredWebGpuFeatureForPreflight,
-  openPreviewSettings,
   setSliderValue,
   waitForPreviewReady,
 } from "./control-helpers";
@@ -18,12 +17,9 @@ import {
 
 test.beforeEach(async ({ page }) => {
   await allowRequiredWebGpuFeatureForPreflight(page);
-  await page.route(
-    missingDevelopmentModelRoute,
-    async (route) => {
-      await route.fulfill({ status: 404, body: "Not found" });
-    },
-  );
+  await page.route(missingDevelopmentModelRoute, async (route) => {
+    await route.fulfill({ status: 404, body: "Not found" });
+  });
 });
 
 interface CameraMovementProbeState {
@@ -38,10 +34,9 @@ async function installCameraMovementProbe(page: Page): Promise<void> {
       .getEntriesByType("resource")
       .map((entry) => entry.name)
       .find((url) => new URL(url).pathname.endsWith("/src/viewer.ts"));
-    if (!viewerModuleUrl) throw new Error("Viewer module URL was not observed.");
-    const { SkeletonViewer } = await import(
-      /* @vite-ignore */ viewerModuleUrl
-    );
+    if (!viewerModuleUrl)
+      throw new Error("Viewer module URL was not observed.");
+    const { SkeletonViewer } = await import(/* @vite-ignore */ viewerModuleUrl);
     interface ProbeViewer {
       camera: {
         position: { x: number; y: number; z: number };
@@ -126,7 +121,10 @@ function horizontalDistance(
   return Math.hypot(second[0] - first[0], second[2] - first[2]);
 }
 
-async function waitForAnimationFrames(page: Page, count: number): Promise<void> {
+async function waitForAnimationFrames(
+  page: Page,
+  count: number,
+): Promise<void> {
   await page.evaluate(async (frameCount) => {
     for (let frame = 0; frame < frameCount; frame += 1) {
       await new Promise<void>((resolve) => {
@@ -136,20 +134,43 @@ async function waitForAnimationFrames(page: Page, count: number): Promise<void> 
   }, count);
 }
 
-async function openMotionControls(page: Page): Promise<void> {
-  const trigger = page.getByRole("button", {
-    name: "Motion controls",
-    exact: true,
-  });
+async function gotoReadyApp(page: Page): Promise<void> {
+  const modelFiles = createMockModelFiles();
+  await page.unroute(missingDevelopmentModelRoute);
+  await routeMockModelFiles(page, modelFiles);
+  await installMockModelWorker(page, modelFiles.manifest);
+  await page.goto("/");
+
+  const startupDialog = page.getByRole("alertdialog");
+  await expect(startupDialog).toBeVisible();
+  await startupDialog
+    .getByRole("button", {
+      name: /^(?:Download model|Resume download|Resume setup|Try again)$/,
+    })
+    .click();
+  await expect(page.locator("main.workspace")).toHaveAttribute(
+    "data-ready",
+    "true",
+  );
+  await expect(startupDialog).toHaveCount(0);
+}
+
+async function openSettings(
+  page: Page,
+  tab: "motion" | "view" = "motion",
+): Promise<void> {
+  const trigger = page.locator("#settings-trigger");
   await expect(trigger).toBeVisible();
-  await trigger.click();
-  await expect(
-    page.getByRole("dialog", {
-      name: "Motion controls",
-      exact: true,
-    }),
-  ).toBeVisible();
-  await expect(page.locator("#generator-panel")).toBeVisible();
+  if ((await trigger.getAttribute("aria-expanded")) !== "true") {
+    await trigger.click();
+  }
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator("#preview-settings")).toBeVisible();
+  const tabTrigger = page.getByRole("tab", {
+    name: tab === "motion" ? "Motion" : "View",
+  });
+  await tabTrigger.click();
+  await expect(tabTrigger).toHaveAttribute("aria-selected", "true");
 }
 
 async function openPromptExamples(page: Page): Promise<void> {
@@ -167,37 +188,27 @@ async function openPromptExamples(page: Page): Promise<void> {
   ).toBeVisible();
 }
 
-test("renders the two-pane technical workspace without motion parameters", async ({
+test("renders one preview-first workspace with responsive settings", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto("/");
+  await gotoReadyApp(page);
 
   await expect
     .poll(() =>
-      page
-        .evaluate(() => globalThis.crossOriginIsolated)
-        .catch(() => false),
+      page.evaluate(() => globalThis.crossOriginIsolated).catch(() => false),
     )
     .toBe(true);
-  await expect(page.locator("#model-runtime-state")).toHaveText(
-    "Unavailable",
-  );
-  await expect(page.locator("#generator-panel")).toBeVisible();
-  await expect(page.locator("#viewport-panel")).toBeVisible();
-  await expect(page.locator(".inspector-panel")).toHaveCount(0);
-
-  const panePositions = await Promise.all(
-    ["#generator-panel", "#viewport-panel"].map((selector) =>
-      page.locator(selector).boundingBox(),
-    ),
-  );
-  expect(panePositions.every(Boolean)).toBe(true);
-  expect(panePositions[0]!.x).toBeLessThan(panePositions[1]!.x);
-  expect(panePositions[0]!.y).toBe(0);
-  expect(panePositions[1]!.y).toBe(0);
-  expect(panePositions[0]!.height).toBeCloseTo(900, 1);
-  expect(panePositions[1]!.height).toBeCloseTo(900, 1);
+  const viewportPanel = page.locator("#viewport-panel");
+  const viewportPanelBox = await viewportPanel.boundingBox();
+  expect(viewportPanelBox).not.toBeNull();
+  expect(viewportPanelBox!.x).toBe(0);
+  expect(viewportPanelBox!.y).toBe(0);
+  expect(viewportPanelBox!.width).toBeCloseTo(1440, 1);
+  expect(viewportPanelBox!.height).toBeCloseTo(900, 1);
+  await expect(page.locator("#generator-panel")).toHaveCount(0);
+  await expect(page.locator("#sidebar-toggle")).toHaveCount(0);
+  await expect(page.locator("#model-cache")).toHaveCount(0);
 
   await expect(
     page.getByRole("textbox", {
@@ -210,7 +221,6 @@ test("renders the two-pane technical workspace without motion parameters", async
     "ARDY Mini",
     "Input",
     "Output",
-    "Motion generation",
     "3D preview",
     "No motion",
     "No motion loaded",
@@ -223,32 +233,41 @@ test("renders the two-pane technical workspace without motion parameters", async
   await expect(page.locator("#motion-badge")).toHaveCount(0);
   await expect(page.locator("#runtime-metric")).toHaveCount(0);
   await expect(
-    page.getByText(
-      "Clear, typo-free English. Apply updates while streaming.",
-      { exact: true },
-    ),
+    page.getByText("Clear, typo-free English. Apply updates while streaming.", {
+      exact: true,
+    }),
   ).toHaveCount(0);
   await expect(page.locator("#privacy-badge")).toHaveCount(0);
   await expect(page.locator("#gpu-badge")).toHaveCount(0);
   await expect(page.locator("#isolation-badge")).toHaveCount(0);
   await expect(page.locator("#backend")).toHaveCount(0);
-  await expect(page.locator("#model-cache")).toBeVisible();
-  await expect(page.locator("#model-cache-state")).toHaveText(
-    "Needs attention",
-  );
-  await expect(page.locator("#download-model")).toHaveText("Retry download");
+  await expect(page.locator("#model-cache-state")).toHaveCount(0);
+  await expect(page.locator("#model-runtime-state")).toHaveCount(0);
+  await expect(page.locator("#download-model")).toHaveCount(0);
   await expect(page.getByText("20 FPS", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Core40", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Runtime notes", { exact: true })).toHaveCount(0);
   await expect(page.locator("#runtime-settings")).toHaveCount(0);
 
-  for (const selector of [
-    "#generate",
-    "#restart-generation",
-    "#restart-from-now",
-  ]) {
-    await expect(page.locator(selector)).toBeDisabled();
-  }
+  await expect(page.locator("#generate")).toBeEnabled();
+  await expect(page.locator("#generation-actions-menu")).toBeDisabled();
+  const [generateBox, generationMenuBox] = await Promise.all([
+    page.locator("#generate").boundingBox(),
+    page.locator("#generation-actions-menu").boundingBox(),
+  ]);
+  expect(generateBox).not.toBeNull();
+  expect(generationMenuBox).not.toBeNull();
+  expect(generationMenuBox!.y).toBeCloseTo(generateBox!.y, 1);
+  expect(generationMenuBox!.height).toBeCloseTo(generateBox!.height, 1);
+  const [promptGroupBox, playbackBarBox] = await Promise.all([
+    page.locator('[data-slot="input-group"]:has(#prompt)').boundingBox(),
+    page.locator(".playback-bar").boundingBox(),
+  ]);
+  expect(promptGroupBox).not.toBeNull();
+  expect(playbackBarBox).not.toBeNull();
+  expect(
+    playbackBarBox!.y - promptGroupBox!.y - promptGroupBox!.height,
+  ).toBeLessThanOrEqual(12);
   for (const selector of [
     "#apply-prompt",
     "#stream-generation",
@@ -324,8 +343,25 @@ test("renders the two-pane technical workspace without motion parameters", async
     "aria-keyshortcuts",
     "Control+Enter Meta+Enter",
   );
-  await openPreviewSettings(page);
-  await expect(page.getByText("VRM avatar", { exact: true })).toBeVisible();
+  await expect(page.locator("#preview-diagnostics")).toBeHidden();
+  await openSettings(page, "view");
+  const vrmAvatarLegend = page.locator('[data-slot="field-legend"]', {
+    hasText: "VRM avatar",
+  });
+  const displayLegend = page.locator('[data-slot="field-legend"]', {
+    hasText: "Display",
+  });
+  await expect(vrmAvatarLegend).toBeVisible();
+  await expect(vrmAvatarLegend).toHaveAttribute("data-variant", "label");
+  await expect
+    .poll(async () => {
+      const [vrmColor, displayColor] = await Promise.all([
+        vrmAvatarLegend.evaluate((element) => getComputedStyle(element).color),
+        displayLegend.evaluate((element) => getComputedStyle(element).color),
+      ]);
+      return vrmColor === displayColor;
+    })
+    .toBe(true);
   await expect(page.locator("#import-vrm")).toBeEnabled();
   await expect(page.locator("#import-vrm svg")).toHaveCount(0);
   await expect(page.getByText("Foot contacts", { exact: true })).toBeVisible();
@@ -344,7 +380,10 @@ test("renders the two-pane technical workspace without motion parameters", async
   }
   await expect(page.locator("#show-orientations")).toBeChecked();
   await expect(page.getByText("Body proxy", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("Reference motion", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Reference motion", { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(page.locator("#clear-model-cache")).toBeVisible();
 });
 
 test("blocks model loading with a non-dismissible dialog when WebGPU is unavailable", async ({
@@ -369,16 +408,20 @@ test("blocks model loading with a non-dismissible dialog when WebGPU is unavaila
 
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText(unavailableReason);
-  await expect(
-    page.getByText(unavailableReason, { exact: true }),
-  ).toHaveCount(1);
+  await expect(page.getByText(unavailableReason, { exact: true })).toHaveCount(
+    1,
+  );
   await expect(
     page.getByRole("alertdialog", {
       name: "Download model files?",
     }),
   ).toHaveCount(0);
-  await expect(page.locator("#download-model")).toHaveCount(0);
-  await expect(page.locator("#generate")).toBeDisabled();
+  await expect(page.locator("#confirm-model-download")).toHaveCount(0);
+  await expect(page.locator("main.workspace")).toHaveAttribute(
+    "data-ready",
+    "false",
+  );
+  await expect(page.locator("main.workspace")).toHaveAttribute("inert", "");
 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeVisible();
@@ -387,7 +430,7 @@ test("blocks model loading with a non-dismissible dialog when WebGPU is unavaila
   await expect(dialog.getByRole("button")).toHaveCount(0);
 });
 
-test("confirms model download and manages the browser cache", async ({
+test("gates startup through model download and manages the browser cache", async ({
   page,
 }) => {
   const modelFiles = createMockModelFiles();
@@ -404,47 +447,145 @@ test("confirms model download and manages the browser cache", async ({
 
   await page.goto("/");
 
-  const downloadDialog = page.getByRole("alertdialog", {
-    name: "Download model files?",
-  });
-  const postpone = downloadDialog.getByRole("button", {
-    name: "Not now",
-    exact: true,
-  });
-  const confirmDownload = downloadDialog.getByRole("button", {
-    name: "Download model",
-    exact: true,
-  });
-  await expect(downloadDialog).toBeVisible();
-  await expect(postpone).toBeFocused();
-  await expect(page.locator("#model-cache-state")).toHaveText(
-    "Not cached",
+  const startupDialog = page.getByRole("alertdialog");
+  await expect(
+    startupDialog.getByRole("heading", {
+      name: "Download model files?",
+    }),
+  ).toBeVisible();
+  await expect(
+    startupDialog.getByRole("button", {
+      name: "Not now",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await expect(page.locator("main.workspace")).toHaveAttribute(
+    "data-ready",
+    "false",
   );
-  await expect(page.locator("#model-cache-files")).toHaveText("0 of 5");
-  await expect(page.locator("#model-runtime-state")).toHaveText(
-    "Not loaded",
-  );
+  await expect(page.locator("main.workspace")).toHaveAttribute("inert", "");
   expect(
     modelRequests.filter((path) => !path.endsWith("model.json.gz")),
   ).toEqual([]);
 
-  await postpone.click();
-  await expect(downloadDialog).toBeHidden();
-  const downloadButton = page.locator("#download-model");
-  await expect(downloadButton).toHaveText("Download model");
-  await downloadButton.click();
-  await expect(downloadDialog).toBeVisible();
-  await expect(postpone).toBeFocused();
-
-  await confirmDownload.click();
-  await expect(downloadDialog).toBeHidden();
-  await expect(page.locator("#model-cache-state")).toHaveText(
-    /Downloading|Verifying/,
+  await page.evaluate(async () => {
+    const { modelUiControl } =
+      await import("/src/ui-control-store.ts");
+    modelUiControl.dispatch({
+      type: "cache-missing",
+      cachedFiles: 1,
+      totalFiles: 5,
+      cachedBytes: 1_024,
+      totalBytes: 4_096,
+    });
+  });
+  await expect(
+    startupDialog.getByRole("heading", {
+      name: "Resume model download?",
+    }),
+  ).toBeVisible();
+  await expect(page.locator("#confirm-model-download")).toHaveText(
+    "Resume download",
   );
+  const clearPartialCache = page.locator(
+    "#clear-partial-model-cache",
+  );
+  await expect(clearPartialCache).toBeVisible();
+  await clearPartialCache.click();
+  await expect(
+    startupDialog.getByRole("heading", {
+      name: "Download model files?",
+    }),
+  ).toBeVisible();
+  await expect(clearPartialCache).toHaveCount(0);
+
+  await page.evaluate(async () => {
+    const { modelUiControl } =
+      await import("/src/ui-control-store.ts");
+    modelUiControl.dispatch({ type: "cache-check-started" });
+  });
+  await expect(
+    startupDialog.getByRole("heading", {
+      name: "Checking this browser",
+    }),
+  ).toBeVisible();
+  const checkingSpinner = startupDialog.locator(
+    '[data-slot="spinner"]',
+  );
+  await expect(checkingSpinner).toBeVisible();
+  const [checkingDialogBox, checkingSpinnerBox] = await Promise.all([
+    startupDialog.boundingBox(),
+    checkingSpinner.boundingBox(),
+  ]);
+  expect(checkingDialogBox).not.toBeNull();
+  expect(checkingSpinnerBox).not.toBeNull();
+  expect(
+    Math.abs(
+      checkingSpinnerBox!.x +
+        checkingSpinnerBox!.width / 2 -
+        (checkingDialogBox!.x + checkingDialogBox!.width / 2),
+    ),
+  ).toBeLessThanOrEqual(1);
+
+  await page.evaluate(async () => {
+    const { modelUiControl } =
+      await import("/src/ui-control-store.ts");
+    modelUiControl.dispatch({
+      type: "cache-error",
+      operation: "initialization",
+    });
+  });
+  await expect(
+    startupDialog.getByRole("heading", {
+      name: "ARDY Mini couldn’t start",
+    }),
+  ).toBeVisible();
+  await expect(startupDialog).toContainText(
+    "could not be verified or initialized for WebGPU",
+  );
+  await expect(page.locator("#confirm-model-download")).toHaveText(
+    "Try again",
+  );
+
+  await page.locator("#confirm-model-download").click();
+  await expect(startupDialog).toBeVisible();
   await expect(page.locator("#model-download-progress")).toBeVisible();
-  await expect(page.locator("#model-cache-state")).toHaveText("Cached");
-  await expect(page.locator("#model-cache-files")).toHaveText("5 of 5");
-  await expect(page.locator("#model-runtime-state")).toHaveText("Ready");
+  await expect(page.locator("#cancel-model-download")).toBeVisible();
+  await expect(
+    startupDialog.getByRole("heading", {
+      name: /^(?:Downloading model files|Preparing model)$/,
+    }),
+  ).toBeVisible();
+  await expect(
+    startupDialog.getByRole("heading", {
+      name: "Preparing model",
+    }),
+  ).toBeVisible();
+  const preparationProgress = page.locator(
+    "#model-preparation-progress",
+  );
+  await Promise.all([
+    expect(preparationProgress).toBeVisible(),
+    expect(
+      preparationProgress.locator(
+        '[data-slot="progress-track"]',
+      ),
+    ).toBeVisible(),
+    expect(
+      preparationProgress.locator(
+        '[data-slot="progress-label"], [data-slot="progress-value"]',
+      ),
+    ).toHaveCount(0),
+    expect(
+      startupDialog.locator('[data-slot="spinner"]'),
+    ).toHaveCount(0),
+    expect(page.locator("#cancel-model-download")).toHaveCount(0),
+  ]);
+  await expect(page.locator("main.workspace")).toHaveAttribute(
+    "data-ready",
+    "true",
+  );
+  await expect(startupDialog).toHaveCount(0);
   await expect(page.locator("#model-download-progress")).toHaveCount(0);
   const payloadRequestCount = modelRequests.filter(
     (path) => !path.endsWith("model.json.gz"),
@@ -452,13 +593,16 @@ test("confirms model download and manages the browser cache", async ({
   expect(payloadRequestCount).toBe(5);
 
   await page.reload();
-  await expect(downloadDialog).toHaveCount(0);
-  await expect(page.locator("#model-cache-state")).toHaveText("Cached");
-  await expect(page.locator("#model-runtime-state")).toHaveText("Ready");
+  await expect(page.locator("main.workspace")).toHaveAttribute(
+    "data-ready",
+    "true",
+  );
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
   expect(
     modelRequests.filter((path) => !path.endsWith("model.json.gz")),
   ).toHaveLength(payloadRequestCount);
 
+  await openSettings(page);
   const clearCache = page.locator("#clear-model-cache");
   await expect(clearCache).toBeVisible();
   await clearCache.click();
@@ -472,16 +616,26 @@ test("confirms model download and manages the browser cache", async ({
   await expect(clearDialog).toBeVisible();
   await expect(cancelClear).toBeFocused();
   await clearDialog
-    .getByRole("button", { name: "Clear cache", exact: true })
+    .getByRole("button", { name: "Clear model cache", exact: true })
     .click();
   await expect(clearDialog).toBeHidden();
-  await expect(page.locator("#model-cache-state")).toHaveText(
-    "Not cached",
+  await expect(clearCache).toHaveText("Cache cleared");
+  await expect(clearCache).toBeDisabled();
+  await expect(page.locator("main.workspace")).toHaveAttribute(
+    "data-ready",
+    "true",
   );
-  await expect(page.locator("#model-cache-files")).toHaveText("0 of 5");
-  await expect(page.locator("#model-runtime-state")).toHaveText("Ready");
-  await expect(downloadButton).toBeVisible();
-  await expect(clearCache).toHaveCount(0);
+
+  await page.reload();
+  await expect(
+    page.getByRole("alertdialog", {
+      name: "Download model files?",
+    }),
+  ).toBeVisible();
+  await expect(page.locator("main.workspace")).toHaveAttribute(
+    "data-ready",
+    "false",
+  );
 });
 
 test("rejects renderer initialization instead of using a WebGL fallback", async ({
@@ -491,25 +645,14 @@ test("rejects renderer initialization instead of using a WebGL fallback", async 
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.addInitScript(() => {
     const requestedContexts: string[] = [];
-    type ContextGetter = (
-      contextId: string,
-      ...options: unknown[]
-    ) => unknown;
-    const canvasPrototype =
-      HTMLCanvasElement.prototype as unknown as {
-        getContext: ContextGetter;
-      };
+    type ContextGetter = (contextId: string, ...options: unknown[]) => unknown;
+    const canvasPrototype = HTMLCanvasElement.prototype as unknown as {
+      getContext: ContextGetter;
+    };
     const originalGetContext = canvasPrototype.getContext;
-    canvasPrototype.getContext = function (
-      contextId,
-      ...options
-    ): unknown {
+    canvasPrototype.getContext = function (contextId, ...options): unknown {
       requestedContexts.push(contextId);
-      return Reflect.apply(
-        originalGetContext,
-        this,
-        [contextId, ...options],
-      );
+      return Reflect.apply(originalGetContext, this, [contextId, ...options]);
     };
     Object.defineProperty(globalThis, "__rendererContexts", {
       configurable: true,
@@ -554,16 +697,18 @@ test("rejects renderer initialization instead of using a WebGL fallback", async 
 test("retains the square Lyra treatment on standard shadcn surfaces", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoReadyApp(page);
+  await openSettings(page);
 
   const radii = await page.evaluate(() =>
     [
-      "#model-cache",
       "#generate",
       "#prompt",
       '[data-slot="combobox-trigger"]',
       "#seed",
       "#playback-speed",
+      "#settings-trigger",
+      "#reset-camera",
     ].map((selector) => {
       const element = document.querySelector(selector);
       if (!(element instanceof HTMLElement)) {
@@ -573,14 +718,7 @@ test("retains the square Lyra treatment on standard shadcn surfaces", async ({
     }),
   );
 
-  expect(radii).toEqual([
-    "0px",
-    "0px",
-    "0px",
-    "0px",
-    "0px",
-    "0px",
-  ]);
+  expect(radii).toEqual(["0px", "0px", "0px", "0px", "0px", "0px", "0px"]);
 });
 
 test("renders a camera-relative pristine ground while shadows follow motion", async ({
@@ -602,11 +740,8 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
   const groundState = await page.evaluate(async () => {
     const viewerModule = await import("/src/viewer.ts");
     const { createVrmRetargetPlan } = await import("/src/vrm-retarget.ts");
-    const {
-      CORE27_JOINT_COUNT,
-      CORE27_SKELETON,
-      SkeletonViewer,
-    } = viewerModule;
+    const { CORE27_JOINT_COUNT, CORE27_SKELETON, SkeletonViewer } =
+      viewerModule;
     const host = document.createElement("div");
     host.style.width = "320px";
     host.style.height = "320px";
@@ -738,9 +873,7 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
       const rig = internal.scene.getObjectByName("shadow-follow-rig");
       const light = internal.scene.getObjectByName("shadow-key-light");
       const snapshot = () => ({
-        ground: ground
-          ? { x: ground.position.x, z: ground.position.z }
-          : null,
+        ground: ground ? { x: ground.position.x, z: ground.position.z } : null,
         rig: rig ? { x: rig.position.x, z: rig.position.z } : null,
         camera: {
           x: internal.camera.position.x,
@@ -835,10 +968,7 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
         readonly vertexShader: string | null;
       } | null = null;
       try {
-        await internal.renderer.compileAsync(
-          internal.scene,
-          internal.camera,
-        );
+        await internal.renderer.compileAsync(internal.scene, internal.camera);
         if (ground) {
           groundShader = await internal.renderer.debug.getShaderAsync(
             internal.scene,
@@ -849,8 +979,7 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
         internal.renderPipeline.render();
         await device?.queue.onSubmittedWorkDone();
       } finally {
-        validationError =
-          (await device?.popErrorScope())?.message ?? null;
+        validationError = (await device?.popErrorScope())?.message ?? null;
       }
       const width =
         (ground?.geometry?.parameters.width ?? 0) *
@@ -862,10 +991,8 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
       return {
         renderer: {
           isWebGPURenderer: internal.renderer.isWebGPURenderer,
-          isWebGPUBackend:
-            internal.renderer.backend.isWebGPUBackend === true,
-          isWebGLBackend:
-            internal.renderer.backend.isWebGLBackend === true,
+          isWebGPUBackend: internal.renderer.backend.isWebGPUBackend === true,
+          isWebGLBackend: internal.renderer.backend.isWebGLBackend === true,
           outputColorTransform:
             internal.renderPipeline.pipeline.outputColorTransform,
           generatedWgsl:
@@ -885,10 +1012,7 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
             }
           : null,
         requiredDiameter:
-          2 *
-          (internal.camera.far +
-            internal.controls.maxDistance +
-            5),
+          2 * (internal.camera.far + internal.controls.maxDistance + 5),
         initial,
         vrm1State,
         vrm0State,
@@ -953,8 +1077,7 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
   expect(groundState.afterOrbit.rig).toEqual({ x: 24, z: -18 });
   expect(groundState.afterMove.rig).toEqual({ x: 24, z: -18 });
 
-  const snappedTarget = (value: number): number =>
-    Math.round(value / 5) * 5;
+  const snappedTarget = (value: number): number => Math.round(value / 5) * 5;
   for (const state of [
     groundState.initial,
     groundState.afterOrbit,
@@ -963,15 +1086,9 @@ test("renders a camera-relative pristine ground while shadows follow motion", as
     expect(state.ground?.x).toBeCloseTo(snappedTarget(state.target.x));
     expect(state.ground?.z).toBeCloseTo(snappedTarget(state.target.z));
   }
-  expect(groundState.afterOrbit.ground).toEqual(
-    groundState.initial.ground,
-  );
-  expect(groundState.afterMove.ground).not.toEqual(
-    groundState.initial.ground,
-  );
-  expect(groundState.afterMove.camera).not.toEqual(
-    groundState.initial.camera,
-  );
+  expect(groundState.afterOrbit.ground).toEqual(groundState.initial.ground);
+  expect(groundState.afterMove.ground).not.toEqual(groundState.initial.ground);
+  expect(groundState.afterMove.camera).not.toEqual(groundState.initial.camera);
   expect(groundState.light).toEqual({
     target: "shadow-key-light-target",
     left: -4,
@@ -991,11 +1108,8 @@ test("follows the root while preserving manual camera composition", async ({
   await page.goto("/");
 
   const cameraState = await page.evaluate(async () => {
-    const {
-      CORE27_JOINT_COUNT,
-      CORE27_SKELETON,
-      SkeletonViewer,
-    } = await import("/src/viewer.ts");
+    const { CORE27_JOINT_COUNT, CORE27_SKELETON, SkeletonViewer } =
+      await import("/src/viewer.ts");
     const host = document.createElement("div");
     host.style.width = "320px";
     host.style.height = "320px";
@@ -1004,9 +1118,7 @@ test("follows the root while preserving manual camera composition", async ({
     document.body.append(host);
     const viewer = await SkeletonViewer.create(canvas);
     try {
-      const positions = new Float32Array(
-        2 * CORE27_JOINT_COUNT * 3,
-      );
+      const positions = new Float32Array(2 * CORE27_JOINT_COUNT * 3);
       for (let frame = 0; frame < 2; frame += 1) {
         for (let joint = 0; joint < CORE27_JOINT_COUNT; joint += 1) {
           const offset = (frame * CORE27_JOINT_COUNT + joint) * 3;
@@ -1063,20 +1175,16 @@ test("follows the root while preserving manual camera composition", async ({
     }
   });
 
-  const delta = (
-    after: number[],
-    before: number[],
-  ): number[] => after.map((value, index) => value - before[index]);
-  const relative = (state: {
-    camera: number[];
-    target: number[];
-  }): number[] => delta(state.camera, state.target);
-  expect(delta(cameraState.followed.camera, cameraState.initial.camera)).toEqual(
-    [6, 0, -4],
-  );
-  expect(delta(cameraState.followed.target, cameraState.initial.target)).toEqual(
-    [6, 0, -4],
-  );
+  const delta = (after: number[], before: number[]): number[] =>
+    after.map((value, index) => value - before[index]);
+  const relative = (state: { camera: number[]; target: number[] }): number[] =>
+    delta(state.camera, state.target);
+  expect(
+    delta(cameraState.followed.camera, cameraState.initial.camera),
+  ).toEqual([6, 0, -4]);
+  expect(
+    delta(cameraState.followed.target, cameraState.initial.target),
+  ).toEqual([6, 0, -4]);
   relative(cameraState.followed).forEach((value, index) => {
     expect(value).toBeCloseTo(relative(cameraState.initial)[index]);
   });
@@ -1089,9 +1197,9 @@ test("follows the root while preserving manual camera composition", async ({
     cameraState.followed.target,
   );
   expect(manualCameraDelta[1]).toBeCloseTo(0);
-  expect(Math.hypot(manualCameraDelta[0], manualCameraDelta[2])).toBeGreaterThan(
-    0,
-  );
+  expect(
+    Math.hypot(manualCameraDelta[0], manualCameraDelta[2]),
+  ).toBeGreaterThan(0);
   manualTargetDelta.forEach((value, index) => {
     expect(value).toBeCloseTo(manualCameraDelta[index]);
   });
@@ -1103,7 +1211,7 @@ test("follows the root while preserving manual camera composition", async ({
 test("exposes deterministic inputs and enforces the prompt contract", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoReadyApp(page);
 
   const prompt = page.getByRole("textbox", {
     name: "Motion description",
@@ -1120,10 +1228,35 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
   await expect(prompt).toHaveValue(
     "A person walks forward, then waves with their right hand.",
   );
-  await expect(page.locator("#prompt-count")).toHaveText("57 / 280");
-  await page.locator("#prompt-count").click();
-  await expect(prompt).toBeFocused();
+  await expect(page.locator("#prompt-label")).toHaveClass(/sr-only/);
+  await expect(page.locator("#prompt-count")).toHaveCount(0);
+  await expect(page.locator("#generation-progress")).toHaveCount(0);
+  await expect(page.locator("#cancel-generation")).toHaveCount(0);
+  await expect(page.locator("#prompt-error")).toBeHidden();
+  await expect(page.locator("#generate").locator("xpath=..")).toHaveAttribute(
+    "data-slot",
+    "button-group",
+  );
 
+  await prompt.fill("");
+  await page.locator("#generation-form").evaluate((form) => {
+    form.dispatchEvent(
+      new SubmitEvent("submit", {
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  });
+  await expect(page.locator("#prompt-error")).toHaveText(
+    "Describe the motion you want to generate.",
+  );
+  await expect(page.locator("#prompt-error")).toBeVisible();
+  await prompt.fill(
+    "A person walks forward, then waves with their right hand.",
+  );
+  await expect(page.locator("#prompt-error")).toBeHidden();
+
+  await openSettings(page);
   await setSliderValue(page, "#target-buffer", 120);
   await expect(page.locator("#target-buffer-output")).toHaveText("6 seconds");
   await expect(page.getByRole("spinbutton", { name: "Seed" })).toHaveValue("2");
@@ -1158,13 +1291,8 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
     name: "Search example prompts",
     exact: true,
   });
-  await expect(promptExample).toHaveAttribute(
-    "placeholder",
-    "Search examples",
-  );
-  const promptExampleContent = page.locator(
-    '[data-slot="combobox-content"]',
-  );
+  await expect(promptExample).toHaveAttribute("placeholder", "Search examples");
+  const promptExampleContent = page.locator('[data-slot="combobox-content"]');
   await expect(promptExampleContent).toBeVisible();
   const promptOptions = promptExampleContent.getByRole("option");
   await expect(promptOptions).toHaveCount(100);
@@ -1180,6 +1308,30 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
   await promptExample.press("Enter");
   await expect(prompt).toHaveValue("A person performs a joyful dance.");
 
+  await page.evaluate(async () => {
+    const { generationActionsControl } =
+      await import("/src/ui-control-store.ts");
+    generationActionsControl.setState({
+      menuDisabled: false,
+      regenerateDisabled: false,
+      newMotionDisabled: false,
+    });
+  });
+  await page.locator("#generation-actions-menu").click();
+  await expect(
+    page.getByRole("menuitem", {
+      name: "Regenerate from current time",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", {
+      name: "Start new motion",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+
   const validation = await page.evaluate(async () => {
     const { validateGenerationForm } = await import("/src/main.ts");
     return {
@@ -1187,10 +1339,8 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
       multilingual: validateGenerationForm("人物が歩く。", "2").values,
       long: validateGenerationForm("a".repeat(281), "2").promptError,
       seed: validateGenerationForm("A person walks.", "-1").seedError,
-      valid: validateGenerationForm(
-        "A person walks forward.",
-        "4294967295",
-      ).values,
+      valid: validateGenerationForm("A person walks forward.", "4294967295")
+        .values,
     };
   });
   expect(validation.empty).toContain("Describe the motion");
@@ -1209,14 +1359,12 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
 test("uses the Select control to update runtime playback speed", async ({
   page,
 }) => {
-  await page.goto("/");
-  await waitForPreviewReady(page);
+  await gotoReadyApp(page);
   await page.evaluate(async () => {
-    const [{ SkeletonViewer }, { playbackSpeedControl }] =
-      await Promise.all([
-        import("/src/viewer.ts"),
-        import("/src/ui-control-store.ts"),
-      ]);
+    const [{ SkeletonViewer }, { playbackSpeedControl }] = await Promise.all([
+      import("/src/viewer.ts"),
+      import("/src/ui-control-store.ts"),
+    ]);
     const probe = globalThis as typeof globalThis & {
       __playbackSpeeds?: number[];
     };
@@ -1256,7 +1404,7 @@ test("uses the Select control to update runtime playback speed", async ({
 test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoReadyApp(page);
 
   await expect(
     page.getByRole("heading", {
@@ -1265,20 +1413,17 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
     }),
   ).toHaveClass(/sr-only/);
   await expect(
-    page.getByRole("heading", { level: 2, name: "Motion controls" }),
-  ).toHaveClass(/sr-only/);
-  await expect(
     page.getByRole("heading", { level: 2, name: "Motion preview" }),
   ).toHaveClass(/sr-only/);
 
-  await page.keyboard.press("Tab");
+  await page.locator(".skip-link").focus();
   await expect(page.locator(".skip-link")).toBeFocused();
 
-  const previewSettingsTrigger = page.locator("#preview-settings-trigger");
-  const previewSettingsContent = page.locator("#preview-settings");
+  const settingsTrigger = page.locator("#settings-trigger");
+  const settingsContent = page.locator("#preview-settings");
   const [viewportBefore, triggerBox] = await Promise.all([
     page.locator("#viewport").boundingBox(),
-    previewSettingsTrigger.boundingBox(),
+    settingsTrigger.boundingBox(),
   ]);
   expect(viewportBefore).not.toBeNull();
   expect(triggerBox).not.toBeNull();
@@ -1296,43 +1441,48 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
       triggerBox!.x -
       triggerBox!.width,
   ).toBeLessThanOrEqual(16);
-  await expect(previewSettingsContent).toHaveCount(1);
-  await expect(previewSettingsContent).toHaveAttribute(
-    "data-slot",
-    "popover-content",
-  );
-  await expect(previewSettingsContent).toBeHidden();
-  await previewSettingsTrigger.click();
-  await expect(previewSettingsTrigger).toHaveAttribute(
-    "aria-expanded",
-    "true",
-  );
-  await expect(previewSettingsContent).toBeVisible();
-  expect(await page.locator("#viewport").boundingBox()).toEqual(
-    viewportBefore,
-  );
-  const previewSettingsOverflow = await previewSettingsContent.evaluate(
-    (element) => {
-      const style = getComputedStyle(element);
-      const borderWidth =
-        Number.parseFloat(style.borderLeftWidth) +
-        Number.parseFloat(style.borderRightWidth);
-      return {
-        overflowY: style.overflowY,
-        scrollbarWidth:
-          element.offsetWidth - element.clientWidth - borderWidth,
-      };
-    },
-  );
+  await expect(settingsContent).toHaveCount(1);
+  await expect(settingsContent).toHaveAttribute("data-slot", "popover-content");
+  await expect(settingsContent).toBeHidden();
+  await settingsTrigger.click();
+  await expect(settingsTrigger).toHaveAttribute("aria-expanded", "true");
+  await expect(settingsContent).toBeVisible();
+  await expect(
+    settingsContent.locator('[data-slot="popover-title"]'),
+  ).toHaveClass(/sr-only/);
+  await expect(
+    settingsContent.locator('[data-slot="popover-header"]'),
+  ).toHaveCount(0);
+  await expect(
+    settingsContent.locator('[data-slot="popover-description"]'),
+  ).toHaveCount(0);
+  const motionTab = page.getByRole("tab", { name: "Motion" });
+  const viewTab = page.getByRole("tab", { name: "View" });
+  await expect(motionTab).toHaveAttribute("aria-selected", "true");
+  await motionTab.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(viewTab).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(motionTab).toBeFocused();
+  await viewTab.click();
+  await expect(viewTab).toHaveAttribute("aria-selected", "true");
+  expect(await page.locator("#viewport").boundingBox()).toEqual(viewportBefore);
+  const previewSettingsOverflow = await settingsContent.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const borderWidth =
+      Number.parseFloat(style.borderLeftWidth) +
+      Number.parseFloat(style.borderRightWidth);
+    return {
+      overflowY: style.overflowY,
+      scrollbarWidth: element.offsetWidth - element.clientWidth - borderWidth,
+    };
+  });
   expect(previewSettingsOverflow.overflowY).toBe("visible");
   expect(previewSettingsOverflow.scrollbarWidth).toBeLessThanOrEqual(0.5);
   await page.keyboard.press("Escape");
-  await expect(previewSettingsTrigger).toHaveAttribute(
-    "aria-expanded",
-    "false",
-  );
-  await expect(previewSettingsContent).toBeHidden();
-  await expect(previewSettingsTrigger).toBeFocused();
+  await expect(settingsTrigger).toHaveAttribute("aria-expanded", "false");
+  await expect(settingsContent).toBeHidden();
+  await expect(settingsTrigger).toBeFocused();
 
   await expect(
     page.getByRole("textbox", {
@@ -1340,16 +1490,10 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
       exact: true,
     }),
   ).toHaveCount(1);
-  await expect(
-    page.getByRole("spinbutton", { name: "Seed", exact: true }),
-  ).toHaveCount(1);
-  await expect(
-    page.getByRole("slider", { name: "Buffer ahead", exact: true }),
-  ).toHaveCount(1);
+  await expect(page.locator("#seed")).toHaveCount(1);
+  await expect(page.locator("#target-buffer")).toHaveCount(1);
 
-  await expect(page.locator("#model-runtime-state")).toHaveText(
-    "Unavailable",
-  );
+  await expect(page.locator("#model-runtime-state")).toHaveCount(0);
   const canvas = page.locator("#motion-canvas");
   await expect(canvas).toHaveAttribute("aria-keyshortcuts", /W A S D/);
   await canvas.focus();
@@ -1391,10 +1535,13 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
 
   await expect(page.locator("#loop-toggle")).toHaveCount(0);
   const resetCamera = page.locator("#reset-camera");
-  await expect(resetCamera).toHaveAttribute(
-    "data-variant",
-    "outline",
+  await expect(resetCamera).toHaveAttribute("data-variant", "outline");
+  await expect(page.locator("#viewport").locator("#reset-camera")).toHaveCount(
+    1,
   );
+  await expect(
+    page.locator("#playback-bar").locator("#reset-camera"),
+  ).toHaveCount(0);
   const resetBorder = await resetCamera.evaluate((element) => {
     const style = getComputedStyle(element);
     return {
@@ -1405,20 +1552,17 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   expect(resetBorder).toEqual({ style: "solid", width: "1px" });
 });
 
-test("labels every icon button in the playback bar with a tooltip", async ({
+test("labels playback and preview icon buttons with tooltips", async ({
   page,
 }) => {
-  await page.goto("/");
-  await waitForPreviewReady(page);
+  await gotoReadyApp(page);
   await installCameraMovementProbe(page);
   const canvas = page.locator("#motion-canvas");
   await canvas.focus();
   await page.keyboard.press("w");
   await page.evaluate(async () => {
-    const {
-      CORE27_JOINT_COUNT,
-      CORE27_SKELETON,
-    } = await import("/src/viewer.ts");
+    const { CORE27_JOINT_COUNT, CORE27_SKELETON } =
+      await import("/src/viewer.ts");
     interface MotionViewer {
       setMotion(
         motion: {
@@ -1431,20 +1575,16 @@ test("labels every icon button in the playback bar with a tooltip", async ({
         options: { playing: boolean },
       ): void;
     }
-    const probe = (
-      globalThis as typeof globalThis & {
-        __cameraMovementProbe?: { viewer: MotionViewer | null };
-      }
-    );
+    const probe = globalThis as typeof globalThis & {
+      __cameraMovementProbe?: { viewer: MotionViewer | null };
+    };
     const viewer = probe.__cameraMovementProbe?.viewer;
     if (!viewer) throw new Error("Preview viewer is unavailable.");
     const frameCount = 200;
     viewer.setMotion(
       {
         skeleton: CORE27_SKELETON,
-        positions: new Float32Array(
-          frameCount * CORE27_JOINT_COUNT * 3,
-        ),
+        positions: new Float32Array(frameCount * CORE27_JOINT_COUNT * 3),
         positionsShape: [frameCount, CORE27_JOINT_COUNT, 3],
         frameCount,
         fps: 20,
@@ -1458,6 +1598,7 @@ test("labels every icon button in the playback bar with a tooltip", async ({
   for (const [selector, label] of [
     ["#play-pause", "Play motion"],
     ["#reset-camera", "Reset camera"],
+    ["#settings-trigger", "Settings"],
   ] as const) {
     const trigger = page.locator(selector);
     const tooltipTrigger = trigger.locator("xpath=..");
@@ -1495,8 +1636,7 @@ test("labels every icon button in the playback bar with a tooltip", async ({
 test("moves continuously from one held W keydown and stops on keyup", async ({
   page,
 }) => {
-  await page.goto("/");
-  await waitForPreviewReady(page);
+  await gotoReadyApp(page);
   await installCameraMovementProbe(page);
 
   const canvas = page.locator("#motion-canvas");
@@ -1540,8 +1680,7 @@ test("moves continuously from one held W keydown and stops on keyup", async ({
 test("clears held camera movement when the window loses focus", async ({
   page,
 }) => {
-  await page.goto("/");
-  await waitForPreviewReady(page);
+  await gotoReadyApp(page);
   await installCameraMovementProbe(page);
 
   const canvas = page.locator("#motion-canvas");
@@ -1588,10 +1727,7 @@ test("reports internal failures to the console without rendering an error panel"
     const NativeWorker = globalThis.Worker;
     const WorkerProxy = new Proxy(NativeWorker, {
       construct(target, argumentsList) {
-        const worker = Reflect.construct(
-          target,
-          argumentsList,
-        ) as Worker;
+        const worker = Reflect.construct(target, argumentsList) as Worker;
         (
           globalThis as typeof globalThis & {
             __ardyTestWorker?: Worker;
@@ -1629,13 +1765,9 @@ test("reports internal failures to the console without rendering an error panel"
     );
   });
 
-  await expect
-    .poll(() => internalErrors)
-    .toHaveLength(1);
+  await expect.poll(() => internalErrors).toHaveLength(1);
   await expect(
-    page.locator(
-      "#error-banner, #error-title, #error-message, #dismiss-error",
-    ),
+    page.locator("#error-banner, #error-title, #error-message, #dismiss-error"),
   ).toHaveCount(0);
   await expect(
     page.getByText("Synthetic internal inference failure", {
@@ -1644,113 +1776,19 @@ test("reports internal failures to the console without rendering an error panel"
   ).toHaveCount(0);
   await expect
     .poll(() =>
-      page.locator("#generator-panel").evaluate(
-        (element) => element.scrollWidth <= element.clientWidth,
+      page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
       ),
     )
     .toBe(true);
   expect(pageErrors).toEqual([]);
 });
 
-test("keeps model cache actions inside the input panel at minimum width", async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 320, height: 800 });
-  await page.goto("/");
-  await openMotionControls(page);
-
-  const [panel, modelCard, downloadButton] = await Promise.all(
-    ["#generator-panel", "#model-cache", "#download-model"].map((selector) =>
-      page.locator(selector).boundingBox(),
-    ),
-  );
-  expect(panel).not.toBeNull();
-  expect(modelCard).not.toBeNull();
-  expect(downloadButton).not.toBeNull();
-  expect(modelCard!.x + modelCard!.width).toBeLessThanOrEqual(
-    panel!.x + panel!.width,
-  );
-  expect(downloadButton!.x + downloadButton!.width).toBeLessThanOrEqual(
-    panel!.x + panel!.width,
-  );
-  expect(
-    await page
-      .locator("#generator-panel")
-      .evaluate((element) => element.scrollWidth <= element.clientWidth),
-  ).toBe(true);
-});
-
-test("toggles the motion-control sidebar only in the side-by-side layout", async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto("/");
-
-  const generatorPanel = page.locator("#generator-panel");
-  const viewportPanel = page.locator("#viewport-panel");
-  const viewport = page.locator("#viewport");
-  const sidebarToggle = page.locator("#sidebar-toggle");
-  const [generatorBefore, viewportPanelBefore, viewportBox, toggleBox] =
-    await Promise.all([
-      generatorPanel.boundingBox(),
-      viewportPanel.boundingBox(),
-      viewport.boundingBox(),
-      sidebarToggle.boundingBox(),
-    ]);
-  expect(generatorBefore).not.toBeNull();
-  expect(viewportPanelBefore).not.toBeNull();
-  expect(viewportBox).not.toBeNull();
-  expect(toggleBox).not.toBeNull();
-  expect(toggleBox!.x - viewportBox!.x).toBeGreaterThanOrEqual(8);
-  expect(toggleBox!.x - viewportBox!.x).toBeLessThanOrEqual(16);
-  expect(toggleBox!.y - viewportBox!.y).toBeGreaterThanOrEqual(8);
-  expect(toggleBox!.y - viewportBox!.y).toBeLessThanOrEqual(16);
-  await expect(
-    sidebarToggle.locator("svg.tabler-icon-layout-sidebar"),
-  ).toHaveCount(1);
-  await expect(sidebarToggle).toHaveAccessibleName(
-    "Hide motion controls",
-  );
-  await expect(sidebarToggle).toHaveAttribute("aria-expanded", "true");
-  const sidebarTooltip = page
-    .locator('[data-slot="tooltip-content"]')
-    .filter({ hasText: "Hide motion controls" });
-  await sidebarToggle.hover();
-  await expect(sidebarTooltip).toBeVisible();
-  await expect(sidebarTooltip).toHaveAttribute("data-open", "");
-  await page.waitForTimeout(750);
-  await expect(sidebarTooltip).toBeVisible();
-  await expect(sidebarTooltip).toHaveAttribute("data-open", "");
-  await page.mouse.move(0, 0);
-  await expect(sidebarTooltip).toBeHidden();
-
-  await sidebarToggle.click();
-  await expect(generatorPanel).toBeHidden();
-  await expect(sidebarToggle).toHaveAccessibleName(
-    "Show motion controls",
-  );
-  await expect(sidebarToggle).toHaveAttribute("aria-expanded", "false");
-  const viewportPanelCollapsed = await viewportPanel.boundingBox();
-  expect(viewportPanelCollapsed).not.toBeNull();
-  expect(viewportPanelCollapsed!.x).toBe(0);
-  expect(viewportPanelCollapsed!.width).toBeGreaterThan(
-    viewportPanelBefore!.width,
-  );
-
-  await sidebarToggle.click();
-  await expect(generatorPanel).toBeVisible();
-  await expect(sidebarToggle).toHaveAccessibleName(
-    "Hide motion controls",
-  );
-  expect(await generatorPanel.boundingBox()).toEqual(generatorBefore);
-  expect(await viewportPanel.boundingBox()).toEqual(viewportPanelBefore);
-});
-
-test("uses a viewport-centered workspace and motion drawer on narrow screens", async ({
+test("uses a viewport-centered workspace and settings drawer on narrow screens", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 800, height: 900 });
-  await page.goto("/");
+  await gotoReadyApp(page);
 
   const viewportPanel = page.locator("#viewport-panel");
   const viewportPanelBox = await viewportPanel.boundingBox();
@@ -1759,12 +1797,12 @@ test("uses a viewport-centered workspace and motion drawer on narrow screens", a
   expect(viewportPanelBox!.y).toBe(0);
   expect(viewportPanelBox!.width).toBeCloseTo(800, 1);
   expect(viewportPanelBox!.height).toBeCloseTo(900, 1);
-  await expect(page.locator("#generator-panel")).toBeHidden();
+  await expect(page.locator("#generator-panel")).toHaveCount(0);
   await expect(page.locator("#sidebar-toggle")).toHaveCount(0);
   await expect(page.locator(".sidebar-toggle-anchor")).toHaveCount(0);
   await expect(
     page.getByRole("button", {
-      name: "Motion controls",
+      name: "Settings",
       exact: true,
     }),
   ).toBeVisible();
@@ -1784,10 +1822,48 @@ test("uses a viewport-centered workspace and motion drawer on narrow screens", a
     )
     .toBe(true);
 
-  await openMotionControls(page);
+  await openSettings(page);
+  await expect(page.locator("#preview-settings")).toHaveAttribute(
+    "data-slot",
+    "drawer-popup",
+  );
+  await expect(
+    page.locator("#preview-settings [data-slot='drawer-title']"),
+  ).toHaveClass(/sr-only/);
+  await expect(
+    page.locator("#preview-settings [data-slot='drawer-header']"),
+  ).toHaveCount(0);
+  await expect(
+    page.locator("#preview-settings [data-slot='drawer-description']"),
+  ).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Motion" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
   await expect(
     page.getByRole("slider", { name: "Buffer ahead", exact: true }),
   ).toBeVisible();
+  await expect(
+    page.getByText("Motion generation", { exact: true }),
+  ).toHaveCount(0);
+  await expect(page.locator("fieldset:has(#seed)")).toHaveCount(0);
+  const motionTabsBox = await page
+    .locator('[data-slot="tabs-list"]')
+    .boundingBox();
+  expect(motionTabsBox).not.toBeNull();
+  expect(
+    900 - (motionTabsBox!.y + motionTabsBox!.height),
+  ).toBeCloseTo(16, 0);
+  await page.getByRole("tab", { name: "View" }).click();
+  await expect(page.locator("#import-vrm")).toBeVisible();
+  await expect
+    .poll(async () => {
+      const box = await page
+        .locator('[data-slot="tabs-list"]')
+        .boundingBox();
+      return box ? 900 - (box.y + box.height) : Number.NaN;
+    })
+    .toBeCloseTo(16, 0);
 });
 
 test("honors reduced motion and keeps shadcn controls usable on mobile", async ({
@@ -1795,15 +1871,8 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
 }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
+  await gotoReadyApp(page);
 
-  await expect
-    .poll(() =>
-      page
-        .locator("#generate-spinner")
-        .evaluate((element) => getComputedStyle(element).animationName),
-    )
-    .toBe("none");
   await expect
     .poll(() =>
       page
@@ -1828,28 +1897,16 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
     .toBe("16px");
   await page.keyboard.press("Escape");
 
-  await expect(page.locator("#generation-progress")).toBeVisible();
-  await expect(page.locator("#generation-progress")).not.toHaveAttribute(
-    "hidden",
-    "",
-  );
-  const idleGenerationStatus =
-    await page.locator("#generation-progress").boundingBox();
-  await page.locator("#generation-progress").evaluate((element) => {
-    element.setAttribute("data-state", "active");
-  });
-  const activeGenerationStatus =
-    await page.locator("#generation-progress").boundingBox();
-  expect(activeGenerationStatus).toEqual(idleGenerationStatus);
+  await expect(page.locator("#generation-progress")).toHaveCount(0);
+  await expect(page.locator("#cancel-generation")).toHaveCount(0);
+  await expect(page.locator("#generation-stage")).toHaveCount(0);
+  await expect(page.locator("#generation-percent")).toHaveCount(0);
 
   const [viewportPanel, viewport, promptComposer, playbackBar] =
     await Promise.all(
-      [
-        "#viewport-panel",
-        "#viewport",
-        ".prompt-composer",
-        "#playback-bar",
-      ].map((selector) => page.locator(selector).boundingBox()),
+      ["#viewport-panel", "#viewport", ".prompt-composer", "#playback-bar"].map(
+        (selector) => page.locator(selector).boundingBox(),
+      ),
     );
   expect(viewportPanel).not.toBeNull();
   expect(viewport).not.toBeNull();
@@ -1863,18 +1920,18 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
     1,
   );
 
-  await expect(page.locator("#generator-panel")).toBeHidden();
-  await openMotionControls(page);
+  await expect(page.locator("#generator-panel")).toHaveCount(0);
+  await openSettings(page);
+  await expect(page.locator("#preview-settings")).toHaveAttribute(
+    "data-slot",
+    "drawer-popup",
+  );
 
   // Regression: the initial mobile drawer placement must make the slider
   // thumb measurable and interactive.
   const targetBuffer = page.locator("#target-buffer");
-  const targetBufferThumb = targetBuffer.locator(
-    '[data-slot="slider-thumb"]',
-  );
-  const targetBufferTrack = targetBuffer.locator(
-    '[data-slot="slider-track"]',
-  );
+  const targetBufferThumb = targetBuffer.locator('[data-slot="slider-thumb"]');
+  const targetBufferTrack = targetBuffer.locator('[data-slot="slider-track"]');
   await expect(targetBufferThumb).toBeVisible();
   const [targetBufferThumbBox, targetBufferTrackBox] = await Promise.all([
     targetBufferThumb.boundingBox(),
@@ -1891,43 +1948,6 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
     targetBufferTrackBox!.x + targetBufferTrackBox!.width + 1,
   );
 
-  const downloadModel = page.locator("#download-model");
-  const downloadModelBox = await downloadModel.boundingBox();
-  expect(downloadModelBox).not.toBeNull();
-  await page.mouse.move(
-    downloadModelBox!.x + downloadModelBox!.width / 2,
-    downloadModelBox!.y + downloadModelBox!.height / 2,
-  );
-  await page.mouse.down();
-  await expect
-    .poll(() =>
-      downloadModel.evaluate(
-        (element) => getComputedStyle(element).translate,
-      ),
-    )
-    .toBe("none");
-  await page.mouse.move(0, 0);
-  await page.mouse.up();
-
-  const modelActionBounds = await Promise.all(
-    ["#download-model", "#model-cache", "#generator-panel"].map(
-      (selector) => page.locator(selector).boundingBox(),
-    ),
-  );
-  expect(modelActionBounds.every(Boolean)).toBe(true);
-  expect(
-    modelActionBounds[1]!.x + modelActionBounds[1]!.width,
-  ).toBeLessThanOrEqual(
-    modelActionBounds[2]!.x + modelActionBounds[2]!.width,
-  );
-  await expect
-    .poll(() =>
-      page.locator("#generator-panel").evaluate(
-        (element) => element.scrollWidth <= element.clientWidth,
-      ),
-    )
-    .toBe(true);
-
   await expect(page.locator(".inspector-panel")).toHaveCount(0);
   await expect
     .poll(() =>
@@ -1937,14 +1957,9 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
     )
     .toBe("16px");
   await page.keyboard.press("Escape");
-  await expect(
-    page.getByRole("button", {
-      name: "Motion controls",
-      exact: true,
-    }),
-  ).toBeFocused();
+  await expect(page.locator("#settings-trigger")).toBeFocused();
 
-  await openPreviewSettings(page);
+  await openSettings(page, "view");
   const preview = await page.locator("#viewport").boundingBox();
   expect(preview).not.toBeNull();
   expect(preview!.height).toBeGreaterThan(0);
@@ -1961,7 +1976,7 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
     "#play-pause",
     "#playback-speed",
     "#reset-camera",
-    "#preview-settings-trigger",
+    "#settings-trigger",
     "#import-vrm",
   ];
   const boxes = await Promise.all(
@@ -1974,13 +1989,22 @@ test("honors reduced motion and keeps shadcn controls usable on mobile", async (
   }
 
   const playbackBoxes = await Promise.all(
-    ["#play-pause", "#playback-speed", "#reset-camera"].map(
-      (selector) => page.locator(selector).boundingBox(),
+    ["#play-pause", "#playback-speed"].map((selector) =>
+      page.locator(selector).boundingBox(),
     ),
   );
   expect(
     Math.max(...playbackBoxes.map((box) => box!.y)) -
       Math.min(...playbackBoxes.map((box) => box!.y)),
+  ).toBeLessThanOrEqual(2);
+  const overlayBoxes = await Promise.all(
+    ["#reset-camera", "#settings-trigger"].map((selector) =>
+      page.locator(selector).boundingBox(),
+    ),
+  );
+  expect(
+    Math.max(...overlayBoxes.map((box) => box!.y)) -
+      Math.min(...overlayBoxes.map((box) => box!.y)),
   ).toBeLessThanOrEqual(2);
   await expect
     .poll(() =>
@@ -2009,7 +2033,7 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
     maxTouchPoints: 5,
   });
 
-  await page.goto("/");
+  await gotoReadyApp(page);
   await expect
     .poll(() =>
       page.evaluate(() => matchMedia("(any-pointer: coarse)").matches),
@@ -2020,11 +2044,8 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
     page.locator('[data-slot="input-group"]:has(#prompt)'),
     page.locator('[data-slot="combobox-trigger"]'),
     page.locator("#generate"),
-    page.getByRole("button", {
-      name: "Motion controls",
-      exact: true,
-    }),
-    page.locator("#preview-settings-trigger"),
+    page.locator("#generation-actions-menu"),
+    page.locator("#settings-trigger"),
     page.locator("#play-pause"),
     page.locator("#playback-speed"),
     page.locator("#reset-camera"),
@@ -2045,13 +2066,24 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
     ).toBeGreaterThanOrEqual(43.5);
   }
 
-  await openMotionControls(page);
+  await openSettings(page);
+  const [tabsListBox, motionSettingsBox] = await Promise.all([
+    page.locator('[data-slot="tabs-list"]').boundingBox(),
+    page
+      .locator('[data-slot="field-group"]:has(#target-buffer)')
+      .boundingBox(),
+  ]);
+  expect(tabsListBox).not.toBeNull();
+  expect(motionSettingsBox).not.toBeNull();
+  expect(tabsListBox!.y).toBeGreaterThanOrEqual(
+    motionSettingsBox!.y + motionSettingsBox!.height,
+  );
   const drawerControls = [
-    page.locator("#download-model"),
+    page.getByRole("tab", { name: "Motion" }),
+    page.getByRole("tab", { name: "View" }),
     page.locator("#randomize-seed"),
     page.locator("#target-buffer"),
-    page.locator("#restart-generation"),
-    page.locator("#restart-from-now"),
+    page.locator("#clear-model-cache"),
   ];
   for (const [index, control] of drawerControls.entries()) {
     await control.scrollIntoViewIfNeeded();
@@ -2071,6 +2103,24 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
   );
   await expect(targetBufferThumb).toBeVisible();
   expect(await targetBufferThumb.boundingBox()).not.toBeNull();
+  for (const sliderSelector of ["#target-buffer", "#timeline"]) {
+    const slider = page.locator(sliderSelector);
+    const track = slider.locator('[data-slot="slider-track"]');
+    const [sliderBox, trackBox] = await Promise.all([
+      slider.boundingBox(),
+      track.boundingBox(),
+    ]);
+    expect(sliderBox).not.toBeNull();
+    expect(trackBox).not.toBeNull();
+    expect(
+      Math.abs(
+        sliderBox!.y +
+          sliderBox!.height / 2 -
+          (trackBox!.y + trackBox!.height / 2),
+      ),
+      `${sliderSelector} track vertical alignment`,
+    ).toBeLessThanOrEqual(0.5);
+  }
   await page.keyboard.press("Escape");
 
   const promptExamples = page.locator('[data-slot="combobox-item"]');
@@ -2084,7 +2134,7 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
     expect(box!.height).toBeGreaterThanOrEqual(44);
   }
   await page.keyboard.press("Escape");
-  await openPreviewSettings(page);
+  await openSettings(page, "view");
   const importVrm = page.locator("#import-vrm");
   await expect(importVrm).toBeVisible();
   const importVrmBox = await importVrm.boundingBox();
@@ -2112,9 +2162,7 @@ test("keeps coarse-pointer controls at least 44 pixels", async ({
 
   const orientations = page.locator("#show-orientations");
   await expect(orientations).toHaveAttribute("aria-checked", "true");
-  const orientationsLabel = page.locator(
-    'label[for="show-orientations"]',
-  );
+  const orientationsLabel = page.locator('label[for="show-orientations"]');
   await orientationsLabel.scrollIntoViewIfNeeded();
   const orientationsLabelBox = await orientationsLabel.boundingBox();
   expect(orientationsLabelBox).not.toBeNull();

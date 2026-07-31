@@ -1,203 +1,394 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 // SPDX-License-Identifier: Apache-2.0
 
-import { act } from "react";
-import { createRoot } from "react-dom/client";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { BoundProgress } from "./control-bindings";
 import {
   clearModelCacheAction,
-  generationProgressControl,
   modelDownloadAction,
+  modelDownloadCancelAction,
   modelUiControl,
-  useModelUiState,
-} from "../ui-control-store";
+  regenerateMotionAction,
+  startNewMotionAction,
+  type UiAction,
+} from "../ui-control-store"
 
-(globalThis as typeof globalThis & {
-  IS_REACT_ACT_ENVIRONMENT: boolean;
-}).IS_REACT_ACT_ENVIRONMENT = true;
+afterEach(() => {
+  modelUiControl.dispatch({ type: "reset" })
+})
 
-describe("BoundProgress", () => {
-  it("keeps Base UI visual and accessibility state synchronized", async () => {
-    const container = document.createElement("div");
-    const root = createRoot(container);
-
-    try {
-      await act(async () => {
-        root.render(
-          <BoundProgress
-            control={generationProgressControl}
-            aria-label="Generation progress"
-          />,
-        );
-      });
-
-      await act(async () => {
-        generationProgressControl.commit(42);
-      });
-
-      const progress = container.querySelector<HTMLElement>(
-        "#generation-progressbar",
-      );
-      const indicator = progress?.querySelector<HTMLElement>(
-        '[data-slot="progress-indicator"]',
-      );
-
-      expect(progress?.getAttribute("aria-valuenow")).toBe("42");
-      expect(progress?.getAttribute("aria-valuetext")).toBe("42%");
-      expect(progress?.hasAttribute("data-progressing")).toBe(true);
-      expect(indicator?.style.width).toBe("42%");
-
-      await act(async () => {
-        generationProgressControl.commit(100);
-      });
-
-      expect(progress?.getAttribute("aria-valuenow")).toBe("100");
-      expect(progress?.getAttribute("aria-valuetext")).toBe("100%");
-      expect(progress?.hasAttribute("data-complete")).toBe(true);
-      expect(progress?.hasAttribute("data-progressing")).toBe(false);
-    } finally {
-      await act(async () => {
-        generationProgressControl.commit(0);
-        root.unmount();
-      });
-    }
-  });
-});
-
-function ModelStateProbe() {
-  const state = useModelUiState();
-  return (
-    <output>
-      {state.cache}:{state.runtime}:{state.cachedFiles}/{state.totalFiles}:
-      {state.cachedBytes}/{state.totalBytes}:
-      {String(state.downloadDialogOpen)}
-    </output>
-  );
-}
-
-describe("model UI control", () => {
-  it("keeps cache progress, runtime state, and the download dialog coherent", async () => {
-    const container = document.createElement("div");
-    const root = createRoot(container);
-
-    try {
-      modelUiControl.dispatch({ type: "reset" });
-      await act(async () => {
-        root.render(<ModelStateProbe />);
-      });
-
-      await act(async () => {
-        modelUiControl.dispatch({
-          type: "cache-missing",
-          cachedFiles: 1,
-          totalFiles: 4,
-          cachedBytes: 250,
-          totalBytes: 1_000,
-          showDownloadPrompt: true,
-        });
-      });
-      expect(container.textContent).toBe(
-        "missing:idle:1/4:250/1000:true",
-      );
-
-      await act(async () => {
-        modelUiControl.dispatch({ type: "download-started" });
-        modelUiControl.dispatch({
-          type: "download-progress",
-          cachedFiles: 8,
-          totalFiles: 4,
-          cachedBytes: 2_000,
-          totalBytes: 1_000,
-        });
-      });
-      expect(container.textContent).toBe(
-        "downloading:idle:4/4:1000/1000:false",
-      );
-
-      await act(async () => {
-        modelUiControl.dispatch({ type: "verification-started" });
-        modelUiControl.dispatch({
-          type: "cache-ready",
-          totalFiles: 4,
-          totalBytes: 1_000,
-        });
-        modelUiControl.dispatch({ type: "runtime-ready" });
-      });
-      expect(container.textContent).toBe(
-        "ready:ready:4/4:1000/1000:false",
-      );
-
-      await act(async () => {
-        modelUiControl.dispatch({ type: "clear-started" });
-        modelUiControl.dispatch({ type: "cache-cleared" });
-      });
-      expect(container.textContent).toBe(
-        "missing:ready:0/4:0/1000:false",
-      );
-    } finally {
-      await act(async () => {
-        modelUiControl.dispatch({ type: "reset" });
-        root.unmount();
-      });
-    }
-  });
-
-  it("ignores invalid prompt transitions and exposes explicit actions", () => {
-    modelUiControl.dispatch({ type: "reset" });
-    modelUiControl.dispatch({ type: "download-prompt-opened" });
-    expect(modelUiControl.getSnapshot().downloadDialogOpen).toBe(false);
-
-    let downloads = 0;
-    let clears = 0;
-    const stopDownload = modelDownloadAction.onTrigger(() => {
-      downloads += 1;
-    });
-    const stopClear = clearModelCacheAction.onTrigger(() => {
-      clears += 1;
-    });
-
-    try {
-      modelDownloadAction.trigger();
-      clearModelCacheAction.trigger();
-      expect(downloads).toBe(1);
-      expect(clears).toBe(1);
-    } finally {
-      stopDownload();
-      stopClear();
-      modelUiControl.dispatch({ type: "reset" });
-    }
-  });
-
-  it("represents discovery failures and allows partial caches to clear", () => {
-    modelUiControl.dispatch({ type: "reset" });
+describe("model startup state machine", () => {
+  it("pauses a partial download, resumes it, and prepares the runtime", () => {
     modelUiControl.dispatch({
-      type: "cache-error",
-      operation: "download",
-    });
+      type: "cache-missing",
+      cachedFiles: 0,
+      totalFiles: 5,
+      cachedBytes: 0,
+      totalBytes: 1_000,
+    })
     expect(modelUiControl.getSnapshot()).toMatchObject({
-      cache: "error",
-      errorOperation: "download",
-    });
+      cache: "missing",
+      runtime: "idle",
+      cachedFiles: 0,
+      totalFiles: 5,
+      cachedBytes: 0,
+      totalBytes: 1_000,
+    })
+
+    modelUiControl.dispatch({ type: "download-started" })
+    modelUiControl.dispatch({ type: "runtime-loading" })
+    modelUiControl.dispatch({
+      type: "download-progress",
+      cachedFiles: 2,
+      totalFiles: 5,
+      cachedBytes: 400,
+      totalBytes: 1_000,
+    })
+    expect(modelUiControl.getSnapshot()).toMatchObject({
+      cache: "downloading",
+      runtime: "loading",
+      cachedFiles: 2,
+      cachedBytes: 400,
+    })
+
+    modelUiControl.dispatch({ type: "download-cancel-requested" })
+    expect(modelUiControl.getSnapshot().cache).toBe("cancelling")
+
+    modelUiControl.dispatch({ type: "runtime-idle" })
+    modelUiControl.dispatch({
+      type: "cache-missing",
+      cachedFiles: 2,
+      totalFiles: 5,
+      cachedBytes: 400,
+      totalBytes: 1_000,
+    })
+    expect(modelUiControl.getSnapshot()).toMatchObject({
+      cache: "missing",
+      runtime: "idle",
+      cachedFiles: 2,
+      totalFiles: 5,
+      cachedBytes: 400,
+      totalBytes: 1_000,
+    })
+
+    modelUiControl.dispatch({ type: "download-started" })
+    modelUiControl.dispatch({ type: "runtime-loading" })
+    modelUiControl.dispatch({
+      type: "download-progress",
+      cachedFiles: 5,
+      totalFiles: 5,
+      cachedBytes: 1_000,
+      totalBytes: 1_000,
+    })
+    expect(modelUiControl.getSnapshot()).toMatchObject({
+      cache: "downloading",
+      runtime: "loading",
+      cachedFiles: 5,
+      cachedBytes: 1_000,
+    })
+
+    modelUiControl.dispatch({ type: "download-completed" })
+    expect(modelUiControl.getSnapshot()).toMatchObject({
+      cache: "verifying",
+      cachedFiles: 5,
+      cachedBytes: 1_000,
+    })
+    modelUiControl.dispatch({
+      type: "initialization-progress",
+      completedSteps: 0,
+      totalSteps: 4,
+    })
+    modelUiControl.dispatch({
+      type: "verification-progress",
+      completedFiles: 3,
+      totalFiles: 5,
+    })
+    expect(modelUiControl.getSnapshot()).toMatchObject({
+      cache: "initializing",
+      cachedFiles: 5,
+      totalFiles: 5,
+      cachedBytes: 1_000,
+      verifiedFiles: 3,
+      initializationSteps: 0,
+      totalInitializationSteps: 4,
+    })
+
+    modelUiControl.dispatch({
+      type: "initialization-progress",
+      completedSteps: 1,
+      totalSteps: 4,
+    })
+    modelUiControl.dispatch({
+      type: "verification-progress",
+      completedFiles: 5,
+      totalFiles: 5,
+    })
+    modelUiControl.dispatch({
+      type: "initialization-progress",
+      completedSteps: 4,
+      totalSteps: 4,
+    })
+
+    modelUiControl.dispatch({
+      type: "cache-ready",
+      totalFiles: 5,
+      totalBytes: 1_000,
+    })
+    modelUiControl.dispatch({ type: "runtime-ready" })
+    expect(modelUiControl.getSnapshot()).toEqual({
+      cache: "ready",
+      errorOperation: null,
+      runtime: "ready",
+      cachedFiles: 5,
+      totalFiles: 5,
+      cachedBytes: 1_000,
+      totalBytes: 1_000,
+      verifiedFiles: 5,
+      initializationSteps: 4,
+      totalInitializationSteps: 4,
+    })
+  })
+
+  it("clears persisted files without unloading the ready runtime", () => {
+    modelUiControl.dispatch({
+      type: "cache-ready",
+      totalFiles: 5,
+      totalBytes: 1_000,
+    })
+    modelUiControl.dispatch({ type: "runtime-ready" })
+
+    modelUiControl.dispatch({ type: "clear-started" })
+    expect(modelUiControl.getSnapshot()).toMatchObject({
+      cache: "clearing",
+      runtime: "ready",
+      cachedBytes: 1_000,
+    })
+
+    modelUiControl.dispatch({ type: "cache-cleared" })
+    expect(modelUiControl.getSnapshot()).toEqual({
+      cache: "missing",
+      errorOperation: null,
+      runtime: "ready",
+      cachedFiles: 0,
+      totalFiles: 5,
+      cachedBytes: 0,
+      totalBytes: 1_000,
+      verifiedFiles: 0,
+      initializationSteps: 0,
+      totalInitializationSteps: 0,
+    })
+  })
+
+  it("clears a partial download before the runtime is ready", () => {
+    modelUiControl.dispatch({
+      type: "cache-missing",
+      cachedFiles: 2,
+      totalFiles: 5,
+      cachedBytes: 400,
+      totalBytes: 1_000,
+    })
+
+    modelUiControl.dispatch({ type: "clear-started" })
+    expect(modelUiControl.getSnapshot()).toMatchObject({
+      cache: "clearing",
+      runtime: "idle",
+      cachedFiles: 2,
+      cachedBytes: 400,
+    })
+
+    modelUiControl.dispatch({ type: "cache-cleared" })
+    expect(modelUiControl.getSnapshot()).toMatchObject({
+      cache: "missing",
+      runtime: "idle",
+      cachedFiles: 0,
+      cachedBytes: 0,
+      totalFiles: 5,
+      totalBytes: 1_000,
+    })
+  })
+
+  it("rejects operations that conflict with an active download", () => {
+    modelUiControl.dispatch({
+      type: "cache-missing",
+      cachedFiles: 1,
+      totalFiles: 5,
+      cachedBytes: 200,
+      totalBytes: 1_000,
+    })
+    modelUiControl.dispatch({ type: "download-started" })
+
+    const downloading = modelUiControl.getSnapshot()
+    modelUiControl.dispatch({ type: "clear-started" })
+    expect(modelUiControl.getSnapshot()).toBe(downloading)
+
+    modelUiControl.dispatch({ type: "download-cancel-requested" })
+    const cancelling = modelUiControl.getSnapshot()
+    modelUiControl.dispatch({
+      type: "download-progress",
+      cachedFiles: 5,
+      totalFiles: 5,
+      cachedBytes: 1_000,
+      totalBytes: 1_000,
+    })
+    modelUiControl.dispatch({ type: "download-cancel-requested" })
+    expect(modelUiControl.getSnapshot()).toBe(cancelling)
+  })
+
+  it("keeps resumed download progress monotonic while cached files are replayed", () => {
+    modelUiControl.dispatch({
+      type: "cache-missing",
+      cachedFiles: 2,
+      totalFiles: 5,
+      cachedBytes: 400,
+      totalBytes: 1_000,
+    })
+    modelUiControl.dispatch({ type: "cache-check-started" })
+    expect(modelUiControl.getSnapshot()).toMatchObject({
+      cache: "checking",
+      cachedFiles: 2,
+      cachedBytes: 400,
+    })
 
     modelUiControl.dispatch({
       type: "cache-missing",
       cachedFiles: 2,
-      totalFiles: 4,
-      cachedBytes: 500,
+      totalFiles: 5,
+      cachedBytes: 400,
       totalBytes: 1_000,
-      showDownloadPrompt: false,
-    });
-    modelUiControl.dispatch({ type: "clear-started" });
-    expect(modelUiControl.getSnapshot().cache).toBe("clearing");
-    modelUiControl.dispatch({ type: "cache-cleared" });
+    })
+    modelUiControl.dispatch({ type: "download-started" })
+    modelUiControl.dispatch({
+      type: "download-progress",
+      cachedFiles: 1,
+      totalFiles: 5,
+      cachedBytes: 100,
+      totalBytes: 1_000,
+    })
     expect(modelUiControl.getSnapshot()).toMatchObject({
-      cache: "missing",
-      cachedFiles: 0,
-      cachedBytes: 0,
-    });
+      cache: "downloading",
+      cachedFiles: 2,
+      cachedBytes: 400,
+    })
 
-    modelUiControl.dispatch({ type: "reset" });
-  });
-});
+    modelUiControl.dispatch({
+      type: "download-progress",
+      cachedFiles: 3,
+      totalFiles: 5,
+      cachedBytes: 600,
+      totalBytes: 1_000,
+    })
+    expect(modelUiControl.getSnapshot()).toMatchObject({
+      cache: "downloading",
+      cachedFiles: 3,
+      cachedBytes: 600,
+    })
+  })
+
+  it("stops accepting download progress and cancellation after download completion", () => {
+    modelUiControl.dispatch({
+      type: "cache-missing",
+      cachedFiles: 0,
+      totalFiles: 5,
+      cachedBytes: 0,
+      totalBytes: 1_000,
+    })
+    modelUiControl.dispatch({ type: "download-started" })
+    modelUiControl.dispatch({
+      type: "download-progress",
+      cachedFiles: 5,
+      totalFiles: 5,
+      cachedBytes: 1_000,
+      totalBytes: 1_000,
+    })
+    modelUiControl.dispatch({ type: "download-completed" })
+
+    const preparing = modelUiControl.getSnapshot()
+    modelUiControl.dispatch({
+      type: "download-progress",
+      cachedFiles: 1,
+      totalFiles: 5,
+      cachedBytes: 100,
+      totalBytes: 1_000,
+    })
+    modelUiControl.dispatch({ type: "download-cancel-requested" })
+
+    expect(modelUiControl.getSnapshot()).toBe(preparing)
+    expect(preparing).toMatchObject({
+      cache: "verifying",
+      cachedFiles: 5,
+      cachedBytes: 1_000,
+    })
+  })
+
+  it("distinguishes an initialization retry from a download retry", () => {
+    modelUiControl.dispatch({
+      type: "cache-missing",
+      cachedFiles: 5,
+      totalFiles: 5,
+      cachedBytes: 1_000,
+      totalBytes: 1_000,
+    })
+    modelUiControl.dispatch({ type: "download-started" })
+    modelUiControl.dispatch({ type: "download-completed" })
+    modelUiControl.dispatch({
+      type: "initialization-progress",
+      completedSteps: 0,
+      totalSteps: 4,
+    })
+    modelUiControl.dispatch({
+      type: "cache-error",
+      operation: "initialization",
+    })
+    expect(modelUiControl.getSnapshot()).toMatchObject({
+      cache: "error",
+      errorOperation: "initialization",
+    })
+
+    modelUiControl.dispatch({ type: "download-started" })
+    expect(modelUiControl.getSnapshot()).toMatchObject({
+      cache: "downloading",
+      errorOperation: null,
+    })
+  })
+})
+
+const uiActions: readonly (readonly [string, UiAction])[] = [
+  ["model download", modelDownloadAction],
+  ["model download cancellation", modelDownloadCancelAction],
+  ["model cache clearing", clearModelCacheAction],
+  ["motion regeneration", regenerateMotionAction],
+  ["new motion", startNewMotionAction],
+]
+
+describe.each(uiActions)("%s action", (_label, action) => {
+  it("notifies active subscribers and supports explicit unsubscribe", () => {
+    const listener = vi.fn()
+    const unsubscribe = action.onTrigger(listener)
+
+    action.trigger()
+    expect(listener).toHaveBeenCalledTimes(1)
+
+    unsubscribe()
+    action.trigger()
+    expect(listener).toHaveBeenCalledTimes(1)
+  })
+
+  it("removes subscriptions when their AbortSignal aborts", () => {
+    const listener = vi.fn()
+    const controller = new AbortController()
+    action.onTrigger(listener, controller.signal)
+
+    action.trigger()
+    expect(listener).toHaveBeenCalledTimes(1)
+
+    controller.abort()
+    action.trigger()
+    expect(listener).toHaveBeenCalledTimes(1)
+
+    const alreadyAborted = new AbortController()
+    alreadyAborted.abort()
+    action.onTrigger(listener, alreadyAborted.signal)
+    action.trigger()
+    expect(listener).toHaveBeenCalledTimes(1)
+  })
+})

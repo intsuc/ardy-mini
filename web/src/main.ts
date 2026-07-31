@@ -46,12 +46,15 @@ import {
 import { PROMPT_EXAMPLE_EVENT } from "./prompt-examples";
 import {
   clearModelCacheAction,
-  generationProgressControl,
+  generationActionsControl,
   modelDownloadAction,
+  modelDownloadCancelAction,
   modelUiControl,
   playbackSpeedControl,
   playPauseControl,
   previewSettingsControl,
+  previewSettingsTabControl,
+  regenerateMotionAction,
   showContactsControl,
   showOrientationsControl,
   showSkeletonControl,
@@ -60,6 +63,7 @@ import {
   targetBufferControl,
   timelineControl,
   unsupportedDeviceControl,
+  startNewMotionAction,
 } from "./ui-control-store";
 
 const UINT32_MAX = 0xffff_ffff;
@@ -137,7 +141,12 @@ export function cameraMovementForCodes(
 interface ActiveGeneration {
   id: string;
   mode: GenerationMode;
-  background: boolean;
+  action:
+    | "start"
+    | "update"
+    | "regenerate"
+    | "new-motion"
+    | "extend";
   receivedChunk: boolean;
   resumePlayback: boolean;
 }
@@ -238,27 +247,6 @@ export function isVrmFile(file: File): boolean {
   return file.name.toLocaleLowerCase("en-US").endsWith(".vrm");
 }
 
-export function resolveGenerationProgressState(
-  active: boolean,
-  playbackOnly: boolean,
-  progress: number,
-): "active" | "complete" | "idle" | "playback-only" {
-  if (active) return "active";
-  if (playbackOnly) return "playback-only";
-  return progress >= 1 ? "complete" : "idle";
-}
-
-export function shouldShowIdleGenerationStatus(
-  generationBusy: boolean,
-  state: string | undefined,
-): boolean {
-  return (
-    !generationBusy &&
-    state !== "complete" &&
-    state !== "playback-only"
-  );
-}
-
 export function shouldAutoplayMotion(reducedMotion: boolean): boolean {
   return !reducedMotion;
 }
@@ -327,33 +315,6 @@ function requestId(prefix: string): string {
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random()}`;
   return `${prefix}-${suffix}`;
-}
-
-function humanizeStage(stage: string): string {
-  const labels: Record<string, string> = {
-    "downloading-model": "Downloading model files",
-    "verifying-model": "Verifying model files",
-    "loading-tokenizer": "Loading tokenizer",
-    "loading-sessions": "Preparing inference sessions",
-    "encoding-text": "Encoding motion prompt",
-    denoising: "Generating motion",
-    decoding: "Decoding skeleton",
-  };
-  return labels[stage] ?? stage;
-}
-
-function progressFraction(event: ProgressEvent): number {
-  if (!(event.total > 0)) return 0;
-  return Math.max(0, Math.min(1, event.completed / event.total));
-}
-
-function generationProgress(event: ProgressEvent): number {
-  const local = progressFraction(event);
-  const stage = event.stage as string;
-  if (stage === "encoding-text") return local * 0.1;
-  if (stage === "denoising") return 0.1 + local * 0.78;
-  if (stage === "decoding") return 0.88 + local * 0.12;
-  return local;
 }
 
 function sameSkeleton(
@@ -609,29 +570,20 @@ export function bootstrap(): () => void {
 
   const form = requiredElement<HTMLFormElement>("generation-form");
   const prompt = requiredElement<HTMLTextAreaElement>("prompt");
-  const promptCount = requiredElement<HTMLElement>("prompt-count");
   const promptError = requiredElement<HTMLElement>("prompt-error");
   const seed = requiredElement<HTMLInputElement>("seed");
   const seedError = requiredElement<HTMLElement>("seed-error");
   const randomizeSeed = requiredElement<HTMLButtonElement>("randomize-seed");
   const generate = requiredElement<HTMLButtonElement>("generate");
-  const generateSpinner =
-    requiredElement<SVGSVGElement>("generate-spinner");
-  const generateLabel = requiredElement<HTMLElement>("generate-label");
+  const generationMenuTrigger = requiredElement<HTMLButtonElement>(
+    "generation-actions-menu",
+  );
   const generateHelp = requiredElement<HTMLElement>("generate-help");
-  const restartGeneration =
-    requiredElement<HTMLButtonElement>("restart-generation");
-  const restartFromNow =
-    requiredElement<HTMLButtonElement>("restart-from-now");
-  const cancelGeneration =
-    requiredElement<HTMLButtonElement>("cancel-generation");
   const targetBufferOutput =
     requiredElement<HTMLOutputElement>("target-buffer-output");
-  const generationProgressElement =
-    requiredElement<HTMLElement>("generation-progress");
-  const generationStage = requiredElement<HTMLElement>("generation-stage");
-  const generationPercent = requiredElement<HTMLElement>("generation-percent");
   const canvas = requiredElement<HTMLCanvasElement>("motion-canvas");
+  const previewDiagnostics =
+    requiredElement<HTMLElement>("preview-diagnostics");
   const playPause = requiredElement<HTMLButtonElement>("play-pause");
   const currentTime = requiredElement<HTMLElement>("current-time");
   const totalTime = requiredElement<HTMLElement>("total-time");
@@ -652,8 +604,6 @@ export function bootstrap(): () => void {
   const dismissVrmError =
     requiredElement<HTMLButtonElement>("dismiss-vrm-error");
   const vrmDropTarget = requiredElement<HTMLElement>("vrm-drop-target");
-
-  restartFromNow.disabled = true;
 
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
@@ -691,13 +641,12 @@ export function bootstrap(): () => void {
   let modelSource: ModelManifestSource | null = null;
   let activeManifest: BrowserModelManifest | null = null;
   let modelProgressFiles = new Set<string>();
-  let generationProgressValue = 0;
-  let generationReturnFocus: HTMLElement | null = null;
+  let tokenizerPreparationSteps = 0;
+  let lastUserGenerationMs: number | null = null;
   let currentMotion: StructuredMotionResult | null = null;
   let currentContinuation: RuntimeContinuationState | null = null;
   let activePrompt: string | null = null;
   let playbackIntent = false;
-  let playbackOnlyStatus = false;
   let currentProvenance: MotionSessionProvenance = {};
   let editorState = cloneEditorState(DEFAULT_EDITOR_STATE);
   let activeVrmLoad = 0;
@@ -713,16 +662,6 @@ export function bootstrap(): () => void {
     window.requestAnimationFrame(() => {
       appStatus.textContent = message;
     });
-  }
-
-  function setProgress(
-    control: typeof generationProgressControl,
-    fraction: number,
-  ): number {
-    const safeFraction = Math.max(0, Math.min(1, fraction));
-    const percent = Math.round(safeFraction * 100);
-    control.commit(percent);
-    return percent;
   }
 
   function setFieldInvalid(
@@ -799,6 +738,7 @@ export function bootstrap(): () => void {
       document.activeElement instanceof HTMLElement
         ? document.activeElement
         : importVrm;
+    previewSettingsTabControl.commit("view");
     previewSettingsControl.setState({ open: true });
     vrmErrorMessage.textContent = message;
     vrmErrorBanner.hidden = false;
@@ -862,7 +802,6 @@ export function bootstrap(): () => void {
   }
 
   function updatePrompt(): void {
-    promptCount.textContent = `${prompt.value.length} / 280`;
     if (prompt.dataset.validated === "true") {
       const validation = validateGenerationForm(prompt.value, seed.value);
       promptError.textContent = validation.promptError ?? "";
@@ -877,6 +816,7 @@ export function bootstrap(): () => void {
       seedError.textContent = validation.seedError ?? "";
       setFieldInvalid(seed, Boolean(validation.seedError));
     }
+    updateGenerateAvailability();
   }
 
   function updateTargetBuffer(): void {
@@ -906,35 +846,54 @@ export function bootstrap(): () => void {
       currentMotion !== null,
       currentContinuation !== null,
     );
+    const canAttempt = canAttemptGeneration(
+      prompt.value,
+      workerReady,
+      modelReady,
+      modelLoading,
+      generationBusy,
+    );
+    const seedIsValid =
+      validateGenerationForm("valid prompt", seed.value).seedError ===
+      undefined;
+    const primaryDisabled = !canAttempt || !promptAction.canSubmit;
+    const newMotionDisabled =
+      currentMotion === null || !canAttempt || !seedIsValid;
+    const activeLabel =
+      activeGeneration?.action === "start" ||
+      activeGeneration?.action === "new-motion"
+        ? "Starting…"
+        : activeGeneration?.action === "update"
+          ? "Updating…"
+          : activeGeneration?.action === "regenerate"
+            ? "Regenerating…"
+            : null;
+    generationActionsControl.setState({
+      primaryLabel: promptAction.label,
+      activeLabel,
+      primaryDisabled:
+        primaryDisabled ||
+        (currentMotion === null && !seedIsValid),
+      menuDisabled:
+        generationBusy ||
+        (newMotionDisabled && !continuationAvailable),
+      regenerateDisabled: !continuationAvailable,
+      newMotionDisabled,
+    });
     generate.disabled =
-      !canAttemptGeneration(
-        prompt.value,
-        workerReady,
-        modelReady,
-        modelLoading,
-        generationBusy,
-      ) || !promptAction.canSubmit;
+      primaryDisabled ||
+      (currentMotion === null && !seedIsValid);
+    generationMenuTrigger.disabled =
+      generationBusy ||
+      (newMotionDisabled && !continuationAvailable);
     generate.dataset.dirty = String(promptAction.dirty);
     form.dataset.promptAction =
       promptAction.label === "Start motion" ? "start" : "update";
-    if (!generationBusy) {
-      generateLabel.textContent = promptAction.label;
-    }
-    restartGeneration.disabled =
-      currentMotion === null ||
-      !canAttemptGeneration(
-        prompt.value,
-        workerReady,
-        modelReady,
-        modelLoading,
-        generationBusy,
-      );
-    restartFromNow.disabled = !continuationAvailable;
 
     if (generationBusy) {
       generateHelp.textContent = activeRestoreRequest
         ? "Restoring the saved generation state."
-        : "Generating locally. Received frames remain available if you cancel.";
+        : "Generating locally.";
     } else if (webGpuState === "checking") {
       generateHelp.textContent = "Checking WebGPU support.";
     } else if (webGpuState === "unavailable") {
@@ -945,6 +904,9 @@ export function bootstrap(): () => void {
       generateHelp.textContent = "Download the model to enable generation.";
     } else if (prompt.value.trim().length === 0) {
       generateHelp.textContent = "Describe a motion to enable generation.";
+    } else if (currentMotion === null && !seedIsValid) {
+      generateHelp.textContent =
+        "Enter a whole-number seed from 0 to 4294967295.";
     } else if (currentMotion !== null && currentContinuation === null) {
       generateHelp.textContent =
         "Start a new motion to create a continuable session.";
@@ -956,72 +918,15 @@ export function bootstrap(): () => void {
         ? "Ready to update the live motion."
         : "Ready to start motion in this browser.";
     }
-
-    if (
-      shouldShowIdleGenerationStatus(
-        generationBusy,
-        generationProgressElement.dataset.state,
-      )
-    ) {
-      generationStage.textContent = modelReady
-        ? "Ready to generate"
-        : webGpuState === "checking"
-          ? "Checking WebGPU"
-          : modelLoading
-            ? "Preparing model"
-            : "Download the model to start";
-      generationPercent.textContent = "—";
-    }
   }
 
   function markCurrentMotionPlaybackOnly(): void {
     currentContinuation = null;
-    playbackOnlyStatus = currentMotion !== null;
-    if (currentMotion) {
-      generationProgressElement.dataset.state = "playback-only";
-      generationStage.textContent =
-        `${currentMotion.frameCount} frames · playback only`;
-      generationPercent.textContent = "—";
-    }
     updateGenerateAvailability();
   }
 
-  function setGenerationBusy(active: boolean, background = false): void {
-    const activeElement = document.activeElement;
-    const returnFocus =
-      !active &&
-      (activeElement === cancelGeneration || activeElement === document.body)
-        ? generationReturnFocus
-        : null;
-    generationProgressElement.dataset.state = resolveGenerationProgressState(
-      active,
-      playbackOnlyStatus,
-      generationProgressValue,
-    );
-    generationProgressElement.setAttribute("aria-busy", String(active));
-    cancelGeneration.dataset.state = active ? "active" : "idle";
-    cancelGeneration.disabled = !active;
-    cancelGeneration.setAttribute("aria-hidden", String(!active));
-    cancelGeneration.tabIndex = active ? 0 : -1;
-    cancelGeneration.textContent = "Cancel";
-    generateLabel.textContent = active
-      ? activeGeneration?.mode === "branch"
-        ? "Updating motion"
-        : background
-          ? "Extending motion"
-          : "Starting motion"
-      : currentMotion
-        ? "Update motion"
-        : "Start motion";
-    generateSpinner.classList.toggle("hidden", !active);
-    generate.setAttribute("aria-busy", String(active));
+  function setGenerationBusy(): void {
     updateGenerateAvailability();
-    if (!active) {
-      generationReturnFocus = null;
-      if (returnFocus?.isConnected) {
-        returnFocus.focus({ preventScroll: true });
-      }
-    }
   }
 
   function setEditor(next: MotionEditorState): void {
@@ -1109,7 +1014,11 @@ export function bootstrap(): () => void {
     modelLoading = true;
     modelReady = false;
     modelProgressFiles = new Set();
+    tokenizerPreparationSteps = 0;
     modelUiControl.dispatch({ type: "runtime-loading" });
+    if (modelUiControl.getSnapshot().cache === "ready") {
+      modelUiControl.dispatch({ type: "initialization-started" });
+    }
     updateGenerateAvailability();
     announce(
       `Preparing ${formatBytes(modelTransportSize(modelSource.manifest))} of model files.`,
@@ -1137,28 +1046,38 @@ export function bootstrap(): () => void {
           cachedBytes: event.completed,
           totalBytes: event.total,
         });
+        if (event.total > 0 && event.completed >= event.total) {
+          modelUiControl.dispatch({ type: "download-completed" });
+        }
       } else if (event.stage === "verifying-model") {
-        modelUiControl.dispatch({ type: "verification-started" });
-      } else if (
-        event.stage === "loading-tokenizer" ||
-        event.stage === "loading-sessions"
-      ) {
+        modelUiControl.dispatch({
+          type: "verification-progress",
+          completedFiles: event.completed,
+          totalFiles: event.total,
+        });
+      } else if (event.stage === "loading-tokenizer") {
+        tokenizerPreparationSteps = Math.max(
+          0,
+          Math.floor(event.total),
+        );
+        const sessionSteps = modelSource
+          ? Object.keys(modelSource.manifest.graphs).length
+          : 0;
         modelUiControl.dispatch({ type: "runtime-loading" });
+        modelUiControl.dispatch({
+          type: "initialization-progress",
+          completedSteps: event.completed,
+          totalSteps: tokenizerPreparationSteps + sessionSteps,
+        });
+      } else if (event.stage === "loading-sessions") {
+        modelUiControl.dispatch({ type: "runtime-loading" });
+        modelUiControl.dispatch({
+          type: "initialization-progress",
+          completedSteps: tokenizerPreparationSteps + event.completed,
+          totalSteps: tokenizerPreparationSteps + event.total,
+        });
       }
       return;
-    }
-    if (event.requestId === activeGeneration?.id) {
-      generationProgressValue = Math.max(
-        generationProgressValue,
-        generationProgress(event),
-      );
-      const percent = setProgress(
-        generationProgressControl,
-        generationProgressValue,
-      );
-      generationStage.textContent =
-        event.message || humanizeStage(event.stage);
-      generationPercent.textContent = `${percent}%`;
     }
   }
 
@@ -1212,13 +1131,20 @@ export function bootstrap(): () => void {
                   totalFiles: cache.fileCount,
                   cachedBytes: cache.cachedTransportSizeBytes,
                   totalBytes: cache.transportSizeBytes,
-                  showDownloadPrompt: false,
                 },
           );
         })
-        .catch((error) =>
-          reportInternalError("Could not refresh model cache status", error),
-        );
+        .catch((error) => {
+          if (disposed) return;
+          modelUiControl.dispatch({
+            type: "cache-error",
+            operation: "download",
+          });
+          reportInternalError(
+            "Could not refresh model cache status",
+            error,
+          );
+        });
     }
     const incompatibleContinuation =
       currentContinuation !== null &&
@@ -1236,6 +1162,42 @@ export function bootstrap(): () => void {
       restoreWorkerContinuation();
     } else {
       resetWorkerSession();
+    }
+  }
+
+  async function reconcileCancelledModelLoad(): Promise<void> {
+    if (!modelSource) {
+      modelUiControl.dispatch({
+        type: "cache-error",
+        operation: "download",
+      });
+      return;
+    }
+    try {
+      const cache = await inspectModelCache(modelSource);
+      if (disposed) return;
+      modelUiControl.dispatch({
+        type: "cache-missing",
+        cachedFiles: cache.cachedFileCount,
+        totalFiles: cache.fileCount,
+        cachedBytes: cache.cachedTransportSizeBytes,
+        totalBytes: cache.transportSizeBytes,
+      });
+      announce(
+        cache.cachedTransportSizeBytes > 0
+          ? "Model download paused. Downloaded data was kept in this browser."
+          : "Model download paused.",
+      );
+    } catch (error) {
+      if (disposed) return;
+      modelUiControl.dispatch({
+        type: "cache-error",
+        operation: "download",
+      });
+      reportInternalError(
+        "Could not inspect the paused model download",
+        error,
+      );
     }
   }
 
@@ -1303,10 +1265,6 @@ export function bootstrap(): () => void {
       preservePlaying,
       resetPresentation,
     );
-    generationStage.textContent = `Received ${chunk.frameCount} frames`;
-    announce(
-      `Generated frames ${chunk.startFrame} through ${chunk.startFrame + chunk.frameCount - 1}.`,
-    );
   }
 
   function finishGeneration(event: GenerationCompleteEvent): void {
@@ -1322,7 +1280,6 @@ export function bootstrap(): () => void {
         );
       }
       currentContinuation = event.result.continuation;
-      playbackOnlyStatus = false;
       const playback = viewer?.getPlaybackState();
       const resetPresentation = shouldResetMotionPresentation(
         active.mode,
@@ -1333,20 +1290,23 @@ export function bootstrap(): () => void {
         Boolean(playback?.playing || active.resumePlayback),
         resetPresentation,
       );
-      generationProgressValue = 1;
-      generationStage.textContent = `${event.sessionFrameCount} frames`;
-      generationPercent.textContent =
-        `${Math.round(event.result.timingsMs.total)} ms`;
-      setProgress(generationProgressControl, 1);
+      if (active.action !== "extend") {
+        lastUserGenerationMs = Math.round(event.result.timingsMs.total);
+      }
+      previewDiagnostics.textContent =
+        `${event.sessionFrameCount} frames` +
+        (lastUserGenerationMs === null
+          ? ""
+          : ` · ${lastUserGenerationMs} ms`);
       activeGeneration = null;
-      setGenerationBusy(false);
+      setGenerationBusy();
       announce(
         `Generation complete. The session contains ${event.sessionFrameCount} frames.`,
       );
       updateGenerateAvailability();
     } catch (error) {
       activeGeneration = null;
-      setGenerationBusy(false);
+      setGenerationBusy();
       reportInternalError("Could not assemble generated motion", error);
     }
   }
@@ -1375,6 +1335,8 @@ export function bootstrap(): () => void {
       if (validation.promptError) {
         prompt.focus();
       } else if (mode === "replace" && validation.seedError) {
+        previewSettingsTabControl.commit("motion");
+        previewSettingsControl.commit(true);
         window.requestAnimationFrame(() => seed.focus());
       }
       return null;
@@ -1389,7 +1351,7 @@ export function bootstrap(): () => void {
       branchFrame?: number;
       background?: boolean;
       promptValue?: string;
-      returnFocus?: HTMLElement;
+      action?: ActiveGeneration["action"];
     } = {},
   ): void {
     if (
@@ -1416,55 +1378,35 @@ export function bootstrap(): () => void {
       return;
     }
     const promptValue =
-      options.promptValue ?? (mode === "append" ? activePrompt : prompt.value);
-    if (!promptValue) return;
+      options.promptValue ??
+      (mode === "append" ? (activePrompt ?? "") : prompt.value);
     const values = validateFormForGeneration(mode, promptValue);
     if (!values) return;
     if (mode !== "append") {
       activePrompt = values.prompt;
     }
-    playbackOnlyStatus = false;
     const background = Boolean(options.background);
     const id = requestId(mode);
     const playback = viewer?.getPlaybackState();
     activeGeneration = {
       id,
       mode,
-      background,
+      action:
+        options.action ??
+        (mode === "append"
+          ? "extend"
+          : mode === "branch"
+            ? "update"
+            : currentMotion
+              ? "new-motion"
+              : "start"),
       receivedChunk: false,
       resumePlayback:
         mode === "replace"
           ? shouldAutoplayMotion(reducedMotion.matches)
           : playbackIntent,
     };
-    generationProgressValue = 0;
-    setProgress(generationProgressControl, 0);
-    generationPercent.textContent = "0%";
-    generationStage.textContent =
-      mode === "append"
-        ? "Extending session"
-        : mode === "branch"
-          ? "Replanning future"
-          : "Starting session";
-    if (!background) {
-      generationReturnFocus =
-        options.returnFocus ??
-        (document.activeElement instanceof HTMLElement &&
-        document.activeElement !== document.body
-          ? document.activeElement
-          : generate);
-    }
-    setGenerationBusy(true, background);
-    if (!background) {
-      window.requestAnimationFrame(() => {
-        if (
-          activeGeneration &&
-          cancelGeneration.dataset.state === "active"
-        ) {
-          cancelGeneration.focus();
-        }
-      });
-    }
+    setGenerationBusy();
     const command: WorkerCommand = {
       type: "generate",
       requestId: id,
@@ -1531,6 +1473,7 @@ export function bootstrap(): () => void {
       durationFrames: targetFrameCount(),
       background: true,
       promptValue: activePrompt,
+      action: "extend",
     });
   }
 
@@ -1601,10 +1544,17 @@ export function bootstrap(): () => void {
           }
           break;
         case "cancelled":
-          if (event.targetRequestId === activeGeneration?.id) {
+          if (event.targetRequestId === activeLoadRequest) {
+            activeLoadRequest = null;
+            modelLoading = false;
+            modelReady = false;
+            modelUiControl.dispatch({ type: "runtime-idle" });
+            void reconcileCancelledModelLoad();
+            updateGenerateAvailability();
+          } else if (event.targetRequestId === activeGeneration?.id) {
             activeGeneration = null;
             markCurrentMotionPlaybackOnly();
-            setGenerationBusy(false);
+            setGenerationBusy();
             announce(
               currentMotion
                 ? "Generation cancelled. Received frames remain available for playback, but continuation and replanning are disabled."
@@ -1630,19 +1580,23 @@ export function bootstrap(): () => void {
           const wasGenerating = event.requestId === activeGeneration?.id;
           const wasRestoring = event.requestId === activeRestoreRequest;
           if (wasLoading) {
+            const loadErrorOperation =
+              modelUiControl.getSnapshot().cache === "downloading"
+                ? "download"
+                : "initialization";
             activeLoadRequest = null;
             modelLoading = false;
             modelReady = false;
             modelUiControl.dispatch({ type: "runtime-error" });
             modelUiControl.dispatch({
               type: "cache-error",
-              operation: "download",
+              operation: loadErrorOperation,
             });
           }
           if (wasGenerating) {
             activeGeneration = null;
             markCurrentMotionPlaybackOnly();
-            setGenerationBusy(false);
+            setGenerationBusy();
           }
           if (wasRestoring) {
             activeRestoreRequest = null;
@@ -1655,7 +1609,7 @@ export function bootstrap(): () => void {
           }
           if (wasLoading) {
             reportInternalError("Model loading failed", event.error);
-            announce("The model could not be prepared. Retry the download.");
+            announce("The model could not be prepared. Try again.");
           } else if (wasRestoring) {
             reportInternalError(
               "Continuation unavailable",
@@ -1682,15 +1636,39 @@ export function bootstrap(): () => void {
   worker.addEventListener(
     "error",
     (event) => {
+      const wasLoading = activeLoadRequest !== null;
+      activeLoadRequest = null;
       modelLoading = false;
       modelReady = false;
       activeGeneration = null;
-      setGenerationBusy(false);
+      setGenerationBusy();
       modelUiControl.dispatch({ type: "runtime-error" });
+      const cacheState = modelUiControl.getSnapshot().cache;
+      if (
+        wasLoading ||
+        cacheState === "downloading" ||
+        cacheState === "cancelling" ||
+        cacheState === "verifying" ||
+        cacheState === "initializing"
+      ) {
+        modelUiControl.dispatch({
+          type: "cache-error",
+          operation:
+            cacheState === "downloading"
+              ? "download"
+              : "initialization",
+        });
+      }
       reportInternalError(
         "Inference worker stopped",
         event.message || "An unexpected worker error occurred.",
       );
+      unsupportedDeviceControl.commit({
+        open: true,
+        title: "Inference runtime unavailable",
+        description:
+          "The local inference worker stopped unexpectedly. Reload the page to try again.",
+      });
       announce("The inference worker stopped. Reload the page to try again.");
     },
     { signal: lifecycle.signal },
@@ -1698,15 +1676,8 @@ export function bootstrap(): () => void {
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    const submitter =
-      event.submitter instanceof HTMLElement
-        ? event.submitter
-        : document.activeElement instanceof HTMLElement &&
-            document.activeElement !== document.body
-          ? document.activeElement
-          : generate;
     if (!currentMotion) {
-      startGeneration("replace", { returnFocus: submitter });
+      startGeneration("replace", { action: "start" });
       return;
     }
     if (!currentContinuation) {
@@ -1715,13 +1686,13 @@ export function bootstrap(): () => void {
     }
     const playback = viewer?.getPlaybackState();
     startGeneration("branch", {
-      returnFocus: submitter,
       branchFrame: livePromptBranchFrame(
         playback?.frame ?? 0,
         currentMotion.frameCount,
       ),
       durationFrames: targetFrameCount(),
       background: playbackIntent,
+      action: "update",
     });
   });
 
@@ -1746,29 +1717,32 @@ export function bootstrap(): () => void {
   });
 
   modelDownloadAction.onTrigger(async () => {
+    if (modelLoading || activeLoadRequest) return;
     try {
-      if (!modelSource) {
-        modelUiControl.dispatch({ type: "cache-check-started" });
-        const cache = await discoverModelSource(false);
-        if (cache.complete) {
-          loadModel();
-          return;
+      modelUiControl.dispatch({ type: "cache-check-started" });
+      const cache = await discoverModelSource();
+      if (cache.complete && modelReady) return;
+      if (!cache.complete) {
+        const remainingBytes = Math.max(
+          0,
+          cache.transportSizeBytes - cache.cachedTransportSizeBytes,
+        );
+        const estimate = await navigator.storage?.estimate?.();
+        const available =
+          estimate?.quota === undefined
+            ? undefined
+            : estimate.quota - (estimate.usage ?? 0);
+        if (
+          available !== undefined &&
+          available < remainingBytes * 1.05
+        ) {
+          throw new Error(
+            `The remaining model files need ${formatBytes(remainingBytes)}, but only about ${formatBytes(Math.max(0, available))} is available.`,
+          );
         }
+        await navigator.storage?.persist?.();
         modelUiControl.dispatch({ type: "download-started" });
       }
-      if (!modelSource) throw new Error("The model source is unavailable.");
-      const totalBytes = modelTransportSize(modelSource.manifest);
-      const estimate = await navigator.storage?.estimate?.();
-      const available =
-        estimate?.quota === undefined
-          ? undefined
-          : estimate.quota - (estimate.usage ?? 0);
-      if (available !== undefined && available < totalBytes * 1.05) {
-        throw new Error(
-          `The model needs ${formatBytes(totalBytes)}, but only about ${formatBytes(Math.max(0, available))} is available.`,
-        );
-      }
-      await navigator.storage?.persist?.();
       loadModel();
     } catch (error) {
       modelUiControl.dispatch({
@@ -1802,30 +1776,34 @@ export function bootstrap(): () => void {
     }
   }, lifecycle.signal);
 
-  cancelGeneration.addEventListener("click", () => {
-    if (!activeGeneration) return;
-    cancelGeneration.disabled = true;
-    cancelGeneration.textContent = "Cancelling…";
-    generateLabel.textContent = "Cancelling…";
+  modelDownloadCancelAction.onTrigger(() => {
+    if (
+      !modelLoading ||
+      !activeLoadRequest ||
+      modelUiControl.getSnapshot().cache !== "downloading"
+    ) {
+      return;
+    }
+    modelUiControl.dispatch({ type: "download-cancel-requested" });
     postCommand({
       type: "cancel",
       requestId: requestId("cancel"),
-      targetRequestId: activeGeneration.id,
+      targetRequestId: activeLoadRequest,
     });
-    announce("Cancelling after the current inference step.");
-  });
+    announce("Stopping the model download.");
+  }, lifecycle.signal);
 
-  restartGeneration.addEventListener("click", () =>
-    startGeneration("replace", { returnFocus: restartGeneration }),
-  );
-  restartFromNow.addEventListener("click", () => {
+  startNewMotionAction.onTrigger(() => {
+    startGeneration("replace", { action: "new-motion" });
+  }, lifecycle.signal);
+  regenerateMotionAction.onTrigger(() => {
     const frame = viewer?.getPlaybackState().frame ?? 0;
     startGeneration("branch", {
-      returnFocus: restartFromNow,
       branchFrame: frame,
       durationFrames: targetFrameCount(),
+      action: "regenerate",
     });
-  });
+  }, lifecycle.signal);
 
   for (const control of [
     showSkeletonControl,
@@ -1985,10 +1963,6 @@ export function bootstrap(): () => void {
         if (!generate.disabled) form.requestSubmit();
         return;
       }
-      if (event.key === "Escape" && activeGeneration) {
-        cancelGeneration.click();
-        return;
-      }
       if (
         target !== canvas ||
         event.metaKey ||
@@ -2096,7 +2070,7 @@ export function bootstrap(): () => void {
     modelUiControl.dispatch({ type: "cache-check-started" });
     updateGenerateAvailability();
     try {
-      const cache = await discoverModelSource(true);
+      const cache = await discoverModelSource();
       if (disposed) return;
       if (cache.complete) {
         loadModel();
@@ -2114,9 +2088,7 @@ export function bootstrap(): () => void {
     }
   }
 
-  async function discoverModelSource(
-    showDownloadPrompt: boolean,
-  ): Promise<ModelCacheStatus> {
+  async function discoverModelSource(): Promise<ModelCacheStatus> {
     const baseUrl = configuredModelBaseUrl();
     if (!baseUrl) {
       throw new Error(
@@ -2140,7 +2112,6 @@ export function bootstrap(): () => void {
             totalFiles: cache.fileCount,
             cachedBytes: cache.cachedTransportSizeBytes,
             totalBytes: cache.transportSizeBytes,
-            showDownloadPrompt,
           },
     );
     updateGenerateAvailability();

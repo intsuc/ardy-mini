@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  type RefObject,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -10,8 +9,8 @@ import {
 } from "react"
 import { createPortal } from "react-dom"
 import {
-  IconLayoutSidebar,
   IconCameraRotate,
+  IconChevronDown,
   IconPlayerPause,
   IconPlayerPlay,
   IconRefresh,
@@ -37,12 +36,13 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
+  ButtonGroup,
+  ButtonGroupSeparator,
+} from "@/components/ui/button-group"
+import {
   Card,
-  CardAction,
-  CardContent,
   CardDescription,
   CardFooter,
   CardHeader,
@@ -61,7 +61,6 @@ import {
   InputGroupAddon,
   InputGroupButton,
   InputGroupInput,
-  InputGroupText,
   InputGroupTextarea,
 } from "@/components/ui/input-group"
 import {
@@ -76,15 +75,19 @@ import {
 import {
   Drawer,
   DrawerContent,
-  DrawerDescription,
-  DrawerHeader,
   DrawerTitle,
   DrawerTrigger,
 } from "@/components/ui/drawer"
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import {
   Popover,
   PopoverContent,
-  PopoverHeader,
   PopoverTitle,
   PopoverTrigger,
 } from "@/components/ui/popover"
@@ -104,6 +107,12 @@ import {
   ProgressValue,
 } from "@/components/ui/progress"
 import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs"
+import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -111,7 +120,6 @@ import {
 } from "@/components/ui/tooltip"
 import {
   BoundCheckbox,
-  BoundProgress,
   BoundSlider,
 } from "@/components/control-bindings"
 import {
@@ -123,12 +131,15 @@ import {
 import { bootstrap } from "@/main"
 import {
   clearModelCacheAction,
-  generationProgressControl,
+  generationActionsControl,
   modelDownloadAction,
+  modelDownloadCancelAction,
   modelUiControl,
   playbackSpeedControl,
   playPauseControl,
   previewSettingsControl,
+  previewSettingsTabControl,
+  regenerateMotionAction,
   showContactsControl,
   showOrientationsControl,
   showSkeletonControl,
@@ -139,6 +150,7 @@ import {
   unsupportedDeviceControl,
   useControlState,
   useModelUiState,
+  startNewMotionAction,
 } from "@/ui-control-store"
 
 function EmptyFieldError({
@@ -146,11 +158,7 @@ function EmptyFieldError({
 }: {
   id: string
 }) {
-  return (
-    <FieldError id={id} aria-live="polite">
-      <span />
-    </FieldError>
-  )
+  return <FieldError id={id} aria-live="polite" forceMount />
 }
 
 function selectPrompt(prompt: string) {
@@ -169,20 +177,30 @@ const PLAYBACK_SPEED_OPTIONS = [
 
 const MOBILE_LAYOUT_QUERY = "(max-width: 840px)"
 
+function setPreviewSettingsOpen(open: boolean) {
+  previewSettingsControl.commit(open)
+}
+
 function useStablePortal(
   host: HTMLElement | null,
   className: string
-) {
+): HTMLElement | null {
   const [container] = useState(() => {
     const element = document.createElement("div")
     element.className = className
     return element
   })
+  const [connected, setConnected] = useState(false)
 
   useLayoutEffect(() => {
-    if (host && container.parentElement !== host) {
+    if (!host) {
+      setConnected(false)
+      return
+    }
+    if (container.parentElement !== host) {
       host.append(container)
     }
+    setConnected(true)
   }, [container, host])
 
   useEffect(
@@ -192,7 +210,7 @@ function useStablePortal(
     [container]
   )
 
-  return container
+  return connected ? container : null
 }
 
 function PromptExampleCombobox() {
@@ -293,63 +311,9 @@ function formatModelBytes(bytes: number): string {
   return `${value >= 10 || exponent === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[exponent]}`
 }
 
-function modelCacheLabel(
-  cache: ReturnType<typeof modelUiControl.getSnapshot>["cache"]
-): string {
-  const labels = {
-    checking: "Checking",
-    missing: "Not cached",
-    downloading: "Downloading",
-    verifying: "Verifying",
-    ready: "Cached",
-    clearing: "Clearing",
-    error: "Needs attention",
-  } as const
-  return labels[cache]
-}
-
-function modelRuntimeLabel(
-  runtime: ReturnType<typeof modelUiControl.getSnapshot>["runtime"]
-): string {
-  const labels = {
-    idle: "Not loaded",
-    loading: "Preparing",
-    ready: "Ready",
-    error: "Unavailable",
-  } as const
-  return labels[runtime]
-}
-
-function modelCacheDescription(
-  state: ReturnType<typeof modelUiControl.getSnapshot>
-): string {
-  if (state.cache === "checking") {
-    return "Checking this browser for cached model files."
-  }
-  if (state.cache === "downloading") {
-    return "Downloading model files to this browser."
-  }
-  if (state.cache === "verifying") {
-    return "Verifying the downloaded model files."
-  }
-  if (state.cache === "clearing") {
-    return "Removing cached model files from this browser."
-  }
-  if (state.cache === "error") {
-    return state.errorOperation === "clear"
-      ? "The cached files could not be cleared. Try again."
-      : "The download did not finish. Retry to continue."
-  }
-  if (state.cache === "missing") {
-    return "Download the model files to use ARDY Mini in this browser."
-  }
-  return "Model files are stored in this browser for faster startup."
-}
-
-function modelProgressPercent(
+function modelByteProgress(
   state: ReturnType<typeof modelUiControl.getSnapshot>
 ): number | null {
-  if (state.cache === "verifying") return 100
   if (state.totalBytes <= 0) return null
   return Math.min(
     100,
@@ -357,78 +321,291 @@ function modelProgressPercent(
   )
 }
 
-function preferredModelDialogFocus(
-  actionRef: RefObject<HTMLButtonElement | null>
-): HTMLElement | true {
-  const action = actionRef.current
-  if (
-    action &&
-    !action.disabled &&
-    action.getClientRects().length > 0 &&
-    !action.closest("[inert]")
-  ) {
-    return action
-  }
+function modelPreparationProgress(
+  state: ReturnType<typeof modelUiControl.getSnapshot>
+): number {
+  const totalSteps =
+    state.totalFiles + state.totalInitializationSteps
+  if (totalSteps <= 0) return 0
+  const completedSteps =
+    state.verifiedFiles + state.initializationSteps
+  return Math.min(
+    100,
+    Math.round((completedSteps / totalSteps) * 100)
+  )
+}
+
+function preferredStartupDialogFocus(): HTMLElement | true {
   return document.getElementById("motion-canvas") ?? true
 }
 
-function ModelDownloadDialog({
-  actionRef,
+function ModelStartupDialog({
+  appReady,
 }: {
-  actionRef: RefObject<HTMLButtonElement | null>
+  appReady: boolean
 }) {
   const state = useModelUiState()
   const unsupported = useControlState(unsupportedDeviceControl)
-  const cancelRef = useRef<HTMLButtonElement>(null)
-  const size =
-    state.totalFiles > 0 && state.totalBytes > 0
-      ? `${formatModelBytes(state.totalBytes)} across ${state.totalFiles} ${state.totalFiles === 1 ? "file" : "files"}`
-      : "the model files"
-  const open = state.downloadDialogOpen && !unsupported.open
+  const contentRef = useRef<HTMLDivElement>(null)
+  const downloadSize =
+    state.totalBytes > 0
+      ? formatModelBytes(state.totalBytes)
+      : null
+  const open = !appReady && !unsupported.open
+  const hasPartialDownload =
+    state.cachedBytes > 0 && state.cachedBytes < state.totalBytes
+  const hasCompleteDownload =
+    state.totalBytes > 0 && state.cachedBytes >= state.totalBytes
+  const awaitingConsent =
+    state.cache === "missing" ||
+    state.cache === "error"
+  const downloading = state.cache === "downloading"
+  const cancelling = state.cache === "cancelling"
+  const verifying = state.cache === "verifying"
+  const initializing = state.cache === "initializing"
+  const clearing = state.cache === "clearing"
+  const checking = state.cache === "checking"
+  const downloadError =
+    state.cache === "error" && state.errorOperation === "download"
+  const initializationError =
+    state.cache === "error" &&
+    state.errorOperation === "initialization"
+  const clearError =
+    state.cache === "error" && state.errorOperation === "clear"
+  const startupError = downloadError || initializationError
+
+  let title = "Starting ARDY Mini"
+  let description =
+    "Preparing the model for WebGPU. This may take a moment."
+
+  if (checking) {
+    title = "Checking this browser"
+    description =
+      "Checking device support and model files already stored here."
+  } else if (awaitingConsent && !startupError && !clearError) {
+    title = hasCompleteDownload
+      ? "Resume model setup?"
+      : hasPartialDownload
+        ? "Resume model download?"
+        : "Download model files?"
+    description = hasCompleteDownload
+      ? "All model files are already stored in this browser. Resume preparing them for WebGPU."
+      : hasPartialDownload
+        ? `${formatModelBytes(state.cachedBytes)} of ${formatModelBytes(state.totalBytes)} is already stored in this browser. Resume downloading the remaining files.`
+        : downloadSize
+          ? `ARDY Mini needs a ${downloadSize} model download. The files will be stored in this browser so future visits can start faster.`
+          : "ARDY Mini needs to download its model files. They will be stored in this browser so future visits can start faster."
+  } else if (startupError) {
+    title = downloadError
+      ? "Model download failed"
+      : "ARDY Mini couldn’t start"
+    description = downloadError
+      ? "The model files could not be downloaded. Check your connection and try again; downloaded data will be reused."
+      : "The downloaded model could not be verified or initialized for WebGPU. Try preparing it again."
+  } else if (clearError) {
+    title = "Couldn’t clear cached files"
+    description =
+      "The partial model download could not be removed. Try clearing it again or resume the download."
+  } else if (downloading) {
+    title = "Downloading model files"
+    description =
+      "Keep this tab open. Downloaded data is stored in this browser and verified before use."
+  } else if (cancelling) {
+    title = "Stopping download"
+    description =
+      "Downloaded data is being kept so the download can resume later."
+  } else if (clearing) {
+    title = "Clearing cached files"
+    description =
+      "Removing the partial model download from this browser."
+  } else if (verifying) {
+    title = "Preparing model"
+    description =
+      "Verifying the model files before they are used."
+  } else if (initializing) {
+    title = "Preparing model"
+    description =
+      "Verifying model files and starting the WebGPU inference runtime."
+  }
 
   return (
     <AlertDialog
       open={open}
-      onOpenChange={(nextOpen) => {
-        if (!nextOpen && state.downloadDialogOpen) {
-          modelUiControl.dispatch({
-            type: "download-prompt-dismissed",
-          })
-        }
+      onOpenChange={(nextOpen, eventDetails) => {
+        if (!nextOpen) eventDetails.cancel()
       }}
     >
       <AlertDialogContent
-        size="sm"
-        initialFocus={cancelRef}
-        finalFocus={() => preferredModelDialogFocus(actionRef)}
+        ref={contentRef}
+        initialFocus={contentRef}
+        finalFocus={preferredStartupDialogFocus}
+        tabIndex={-1}
+        aria-busy={
+          checking ||
+          downloading ||
+          cancelling ||
+          clearing ||
+          verifying ||
+          initializing
+        }
       >
         <AlertDialogHeader>
-          <AlertDialogTitle>Download model files?</AlertDialogTitle>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription>
-            ARDY Mini needs {size}. The files will be downloaded and
-            stored in this browser. You can remove them later from
-            Model.
+            {description}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {downloading ? (
+          <Progress
+            id="model-download-progress"
+            value={modelByteProgress(state)}
+            getAriaValueText={() =>
+              state.totalBytes > 0
+                ? `${formatModelBytes(state.cachedBytes)} of ${formatModelBytes(state.totalBytes)}`
+                : "Downloading model files"
+            }
+          >
+            <ProgressLabel>Download progress</ProgressLabel>
+            <ProgressValue>
+              {(_formattedValue, value) =>
+                value === null ? "—" : `${value}%`
+              }
+            </ProgressValue>
+          </Progress>
+        ) : null}
+        {verifying ||
+        initializing ||
+        (state.cache === "ready" && state.runtime !== "ready") ? (
+          <Progress
+            id="model-preparation-progress"
+            aria-label="Model preparation progress"
+            value={modelPreparationProgress(state)}
+          />
+        ) : null}
+        {checking || cancelling || clearing ? (
+          <Spinner
+            className="justify-self-center"
+            aria-label={title}
+          />
+        ) : null}
+        {awaitingConsent ? (
+          <AlertDialogFooter>
+            {hasPartialDownload ? (
+              <Button
+                id="clear-partial-model-cache"
+                variant="outline"
+                type="button"
+                onClick={() => {
+                  modelUiControl.dispatch({ type: "clear-started" })
+                  clearModelCacheAction.trigger()
+                }}
+              >
+                Clear partial download
+              </Button>
+            ) : null}
+            <Button
+              id="confirm-model-download"
+              type="button"
+              onClick={() => modelDownloadAction.trigger()}
+            >
+              {startupError
+                ? "Try again"
+                : hasCompleteDownload
+                  ? "Resume setup"
+                  : hasPartialDownload
+                    ? "Resume download"
+                    : "Download model"}
+            </Button>
+          </AlertDialogFooter>
+        ) : downloading ? (
+          <AlertDialogFooter>
+            <Button
+              id="cancel-model-download"
+              variant="outline"
+              type="button"
+              onClick={() => modelDownloadCancelAction.trigger()}
+            >
+              Cancel download
+            </Button>
+          </AlertDialogFooter>
+        ) : null}
+      </AlertDialogContent>
+    </AlertDialog>
+  )
+}
+
+function ModelCacheControl() {
+  const state = useModelUiState()
+  const actionRef = useRef<HTMLButtonElement>(null)
+  const clearCancelRef = useRef<HTMLButtonElement>(null)
+  const [clearDialogOpen, setClearDialogOpen] = useState(false)
+  const canClear =
+    state.runtime === "ready" &&
+    state.cachedBytes > 0 &&
+    state.cache !== "clearing"
+  const cleared =
+    state.runtime === "ready" &&
+    state.cachedBytes === 0 &&
+    state.cache === "missing"
+  const actionLabel =
+    state.cache === "clearing"
+      ? "Clearing…"
+      : cleared
+        ? "Cache cleared"
+        : state.cache === "error" &&
+            state.errorOperation === "clear"
+          ? "Retry clearing model cache"
+          : "Clear model cache…"
+
+  return (
+    <AlertDialog
+      open={clearDialogOpen}
+      onOpenChange={setClearDialogOpen}
+    >
+      <AlertDialogTrigger
+        render={
+          <Button
+            ref={actionRef}
+            id="clear-model-cache"
+            className="w-full"
+            variant="outline"
+            type="button"
+            disabled={!canClear}
+          />
+        }
+      >
+        {state.cache === "clearing" ? (
+          <Spinner data-icon="inline-start" aria-hidden="true" />
+        ) : null}
+        {actionLabel}
+      </AlertDialogTrigger>
+      <AlertDialogContent
+        size="sm"
+        initialFocus={clearCancelRef}
+        finalFocus={actionRef}
+      >
+        <AlertDialogHeader>
+          <AlertDialogTitle>Clear cached model files?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This removes {formatModelBytes(state.cachedBytes)} from this
+            browser. ARDY Mini will keep working in this tab, but the
+            files must be downloaded again on your next visit.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel
-            ref={cancelRef}
-            onClick={() => {
-              modelUiControl.dispatch({
-                type: "download-prompt-dismissed",
-              })
-            }}
-          >
-            Not now
+          <AlertDialogCancel ref={clearCancelRef}>
+            Cancel
           </AlertDialogCancel>
           <AlertDialogAction
-            id="confirm-model-download"
+            id="confirm-clear-model-cache"
+            variant="destructive"
             onClick={() => {
-              modelUiControl.dispatch({ type: "download-started" })
-              modelDownloadAction.trigger()
+              modelUiControl.dispatch({ type: "clear-started" })
+              setClearDialogOpen(false)
+              clearModelCacheAction.trigger()
             }}
           >
-            Download model
+            Clear model cache
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
@@ -436,398 +613,161 @@ function ModelDownloadDialog({
   )
 }
 
-function ModelCacheSection({
-  actionRef,
-}: {
-  actionRef: RefObject<HTMLButtonElement | null>
-}) {
-  const state = useModelUiState()
-  const clearCancelRef = useRef<HTMLButtonElement>(null)
-  const [clearDialogOpen, setClearDialogOpen] = useState(false)
-  const showProgress =
-    state.cache === "downloading" || state.cache === "verifying"
-  const canDownload =
-    state.runtime !== "loading" &&
-    (state.cache === "missing" ||
-      (state.cache === "error" &&
-        state.errorOperation === "download"))
-  const canClear =
-    state.runtime !== "loading" &&
-    state.cachedBytes > 0 &&
-    state.cache !== "checking" &&
-    state.cache !== "downloading" &&
-    state.cache !== "verifying" &&
-    state.cache !== "clearing"
-  const fileValue =
-    state.totalFiles > 0
-      ? `${state.cachedFiles} of ${state.totalFiles}`
-      : "—"
-  const byteValue =
-    state.totalBytes > 0
-      ? `${formatModelBytes(state.cachedBytes)} of ${formatModelBytes(state.totalBytes)}`
-      : "—"
-
-  return (
-    <section
-      className="flex flex-col gap-3 border-b p-3"
-      aria-labelledby="model-step-title"
-    >
-      <h3
-        className="text-xs font-medium text-muted-foreground"
-        id="model-step-title"
-      >
-        Model
-      </h3>
-
-      <Card id={modelUiControl.id} size="sm">
-        <CardHeader>
-          <CardTitle>Model files</CardTitle>
-          <CardDescription id="model-cache-description">
-            {modelCacheDescription(state)}
-          </CardDescription>
-          <CardAction>
-            <Badge
-              variant={
-                state.cache === "error"
-                  ? "destructive"
-                  : state.cache === "ready"
-                    ? "secondary"
-                    : "outline"
-              }
-              id="model-cache-state"
-              data-state={state.cache}
-            >
-              {modelCacheLabel(state.cache)}
-            </Badge>
-          </CardAction>
-        </CardHeader>
-        <CardContent>
-          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
-            <dt className="text-muted-foreground">Files</dt>
-            <dd
-              className="truncate text-right tabular-nums"
-              id="model-cache-files"
-            >
-              {fileValue}
-            </dd>
-            <dt className="text-muted-foreground">Storage</dt>
-            <dd
-              className="truncate text-right tabular-nums"
-              id="model-cache-bytes"
-            >
-              {byteValue}
-            </dd>
-            <dt className="text-muted-foreground">Runtime</dt>
-            <dd
-              className="truncate text-right"
-              id="model-runtime-state"
-              data-state={state.runtime}
-            >
-              {modelRuntimeLabel(state.runtime)}
-            </dd>
-          </dl>
-          {showProgress ? (
-            <Progress
-              id="model-download-progress"
-              className="mt-3"
-              value={modelProgressPercent(state)}
-              getAriaValueText={() =>
-                state.totalBytes > 0
-                  ? `${formatModelBytes(state.cachedBytes)} of ${formatModelBytes(state.totalBytes)}`
-                  : modelCacheLabel(state.cache)
-              }
-            >
-              <ProgressLabel>
-                {state.cache === "verifying"
-                  ? "Verifying model files"
-                  : "Downloading model files"}
-              </ProgressLabel>
-              <ProgressValue>
-                {(_formattedValue, value) =>
-                  value === null ? "—" : `${value}%`
-                }
-              </ProgressValue>
-            </Progress>
-          ) : null}
-        </CardContent>
-        {canDownload || canClear ? (
-          <CardFooter>
-            {canDownload ? (
-              <Button
-                ref={actionRef}
-                id="download-model"
-                type="button"
-                onClick={() => {
-                  modelUiControl.dispatch({
-                    type: "download-prompt-opened",
-                  })
-                }}
-              >
-                {state.cache === "error"
-                  ? "Retry download"
-                  : "Download model"}
-              </Button>
-            ) : null}
-            {canClear ? (
-              <AlertDialog
-                open={clearDialogOpen}
-                onOpenChange={setClearDialogOpen}
-              >
-                <AlertDialogTrigger
-                  render={
-                    <Button
-                      ref={canDownload ? undefined : actionRef}
-                      id="clear-model-cache"
-                      variant="destructive"
-                      type="button"
-                    />
-                  }
-                >
-                  Clear cache
-                </AlertDialogTrigger>
-                <AlertDialogContent
-                  size="sm"
-                  initialFocus={clearCancelRef}
-                  finalFocus={() =>
-                    preferredModelDialogFocus(actionRef)
-                  }
-                >
-                  <AlertDialogHeader>
-                    <AlertDialogTitle>
-                      Clear cached model files?
-                    </AlertDialogTitle>
-                    <AlertDialogDescription>
-                      This removes cached ARDY Mini model files from this
-                      browser. A model already loaded in this tab remains
-                      available until you close it.
-                    </AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogCancel ref={clearCancelRef}>
-                      Cancel
-                    </AlertDialogCancel>
-                    <AlertDialogAction
-                      id="confirm-clear-model-cache"
-                      variant="destructive"
-                      onClick={() => {
-                        modelUiControl.dispatch({
-                          type: "clear-started",
-                        })
-                        setClearDialogOpen(false)
-                        clearModelCacheAction.trigger()
-                      }}
-                    >
-                      Clear cache
-                    </AlertDialogAction>
-                  </AlertDialogFooter>
-                </AlertDialogContent>
-              </AlertDialog>
-            ) : null}
-          </CardFooter>
-        ) : null}
-      </Card>
-    </section>
-  )
-}
-
 function PromptComposer() {
+  const actions = useControlState(generationActionsControl)
+  const visibleLabel =
+    actions.activeLabel ?? actions.primaryLabel
+
   return (
     <section className="prompt-composer border-t bg-background p-2">
-      <Field>
-        <InputGroup>
-          <InputGroupTextarea
-            id="prompt"
-            name="prompt"
-            form="generation-form"
-            defaultValue={DEFAULT_PROMPT}
-            rows={2}
-            maxLength={280}
-            spellCheck
-            autoComplete="off"
-            placeholder="A person walks forward, then waves with their right hand."
-            aria-describedby="prompt-count prompt-error generate-help"
-            required
-          />
-          <InputGroupAddon align="block-start" className="border-b">
-            <FieldLabel id="prompt-label" htmlFor="prompt">
-              Motion description
-            </FieldLabel>
-            <InputGroupText className="ml-auto" id="prompt-count">
-              {DEFAULT_PROMPT.length} / 280
-            </InputGroupText>
-          </InputGroupAddon>
-          <InputGroupAddon align="block-end" className="border-t">
-            <PromptExampleCombobox />
-            <InputGroupButton
-              id="generate"
-              className="ml-auto"
-              variant="default"
-              size="sm"
-              type="submit"
-              form="generation-form"
-              aria-describedby="generate-help"
-              aria-keyshortcuts="Control+Enter Meta+Enter"
-              disabled
-            >
-              <Spinner
-                id="generate-spinner"
-                className="hidden"
-                data-icon="inline-start"
-                aria-hidden="true"
-              />
-              <span id="generate-label">Start motion</span>
-            </InputGroupButton>
-          </InputGroupAddon>
-        </InputGroup>
-        <EmptyFieldError id="prompt-error" />
-      </Field>
-
-      <div
-        className="generation-status mt-1.5 grid min-h-9 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2"
-        id="generation-progress"
-        data-state="idle"
-        aria-busy="false"
-      >
-        <div className="flex min-w-0 items-center gap-2">
-          <span
-            className="truncate text-xs text-muted-foreground"
-            id="generation-stage"
-          >
-            Load a model to start
+      <form id="generation-form" noValidate>
+        <Field>
+          <FieldLabel className="sr-only" id="prompt-label" htmlFor="prompt">
+            Motion description
+          </FieldLabel>
+          <InputGroup>
+            <InputGroupTextarea
+              id="prompt"
+              name="prompt"
+              defaultValue={DEFAULT_PROMPT}
+              rows={2}
+              maxLength={280}
+              spellCheck
+              autoComplete="off"
+              placeholder="A person walks forward, then waves with their right hand."
+              aria-describedby="prompt-error generate-help"
+              required
+            />
+            <InputGroupAddon align="block-end" className="border-t">
+              <PromptExampleCombobox />
+              <ButtonGroup
+                className="ml-auto"
+                aria-label="Motion generation actions"
+              >
+                <Button
+                  id="generate"
+                  variant="default"
+                  size="sm"
+                  type="submit"
+                  aria-describedby="generate-help"
+                  aria-keyshortcuts="Control+Enter Meta+Enter"
+                  aria-busy={actions.activeLabel !== null}
+                  disabled={actions.primaryDisabled}
+                >
+                  {actions.activeLabel !== null ? (
+                    <Spinner
+                      data-icon="inline-start"
+                      aria-hidden="true"
+                    />
+                  ) : null}
+                  <span>{visibleLabel}</span>
+                </Button>
+                <ButtonGroupSeparator />
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    id="generation-actions-menu"
+                    render={
+                      <Button
+                        variant="default"
+                        size="icon-sm"
+                        type="button"
+                        aria-label="More motion generation actions"
+                        disabled={actions.menuDisabled}
+                      />
+                    }
+                  >
+                    <IconChevronDown aria-hidden="true" />
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuGroup>
+                      <DropdownMenuItem
+                        id="restart-from-now"
+                        disabled={actions.regenerateDisabled}
+                        onClick={() => regenerateMotionAction.trigger()}
+                      >
+                        Regenerate from current time
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        id="restart-generation"
+                        disabled={actions.newMotionDisabled}
+                        onClick={() => startNewMotionAction.trigger()}
+                      >
+                        Start new motion
+                      </DropdownMenuItem>
+                    </DropdownMenuGroup>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </ButtonGroup>
+            </InputGroupAddon>
+          </InputGroup>
+          <EmptyFieldError id="prompt-error" />
+          <span className="sr-only" id="generate-help">
+            Download and prepare the model to enable generation.
           </span>
-          <span
-            className="shrink-0 text-xs text-muted-foreground tabular-nums"
-            id="generation-percent"
-          >
-            —
-          </span>
-        </div>
-        <Button
-          id="cancel-generation"
-          className="invisible data-[state=active]:visible"
-          variant="destructive"
-          size="xs"
-          type="button"
-          data-state="idle"
-          aria-hidden="true"
-          tabIndex={-1}
-          disabled
-        >
-          Cancel
-        </Button>
-        <BoundProgress
-          control={generationProgressControl}
-          className="col-span-full"
-          aria-label="Generation progress"
-        />
-        <span className="sr-only" id="generate-help">
-          Download the model files to enable generation.
-        </span>
-      </div>
+        </Field>
+      </form>
     </section>
   )
 }
 
 function MotionSettingsSection() {
   return (
-    <section
-      className="flex flex-col gap-3 border-b p-3"
-      aria-labelledby="new-motion-settings-title"
-    >
-      <div className="flex items-center justify-between gap-3">
-        <h3
-          className="text-xs font-medium text-muted-foreground"
-          id="new-motion-settings-title"
-        >
-          New motion
-        </h3>
-      </div>
-
-      <FieldGroup>
-        <Field>
-          <FieldLabel htmlFor="seed">Seed</FieldLabel>
-          <InputGroup>
-            <InputGroupInput
-              id="seed"
-              name="seed"
-              type="number"
-              min="0"
-              max="4294967295"
-              step="1"
-              inputMode="numeric"
-              defaultValue="2"
-              aria-describedby="seed-error"
-            />
-            <InputGroupAddon align="inline-end">
-              <InputGroupButton
-                id="randomize-seed"
-                size="icon-xs"
-                aria-label="Choose a random seed"
-                title="Random seed"
-              >
-                <IconRefresh aria-hidden="true" />
-              </InputGroupButton>
-            </InputGroupAddon>
-          </InputGroup>
-          <EmptyFieldError id="seed-error" />
-        </Field>
-
-        <Field>
-          <div className="flex items-center justify-between gap-3">
-            <FieldLabel id="target-buffer-label">
-              Buffer ahead
-            </FieldLabel>
-            <output
-              className="text-xs text-muted-foreground"
-              id="target-buffer-output"
-            >
-              4 seconds
-            </output>
-          </div>
-          <BoundSlider
-            control={targetBufferControl}
-            aria-labelledby="target-buffer-label"
+    <FieldGroup>
+      <Field>
+        <FieldLabel htmlFor="seed">Seed</FieldLabel>
+        <InputGroup>
+          <InputGroupInput
+            id="seed"
+            name="seed"
+            form="generation-form"
+            type="number"
+            min="0"
+            max="4294967295"
+            step="1"
+            inputMode="numeric"
+            defaultValue="2"
+            aria-describedby="seed-error"
           />
-          <div
-            className="flex justify-between text-xs text-muted-foreground"
-            aria-hidden="true"
-          >
-            <span>2s</span>
-            <span>10s</span>
-          </div>
-        </Field>
-      </FieldGroup>
-    </section>
-  )
-}
+          <InputGroupAddon align="inline-end">
+            <InputGroupButton
+              id="randomize-seed"
+              size="icon-xs"
+              aria-label="Choose a random seed"
+              title="Random seed"
+            >
+              <IconRefresh aria-hidden="true" />
+            </InputGroupButton>
+          </InputGroupAddon>
+        </InputGroup>
+        <EmptyFieldError id="seed-error" />
+      </Field>
 
-function SessionActionsSection() {
-  return (
-    <section
-      className="flex flex-col gap-3 border-b p-3"
-      aria-labelledby="session-actions-title"
-    >
-      <h3
-        className="text-xs font-medium text-muted-foreground"
-        id="session-actions-title"
-      >
-        Session
-      </h3>
-      <Button
-        id="restart-generation"
-        variant="secondary"
-        type="button"
-      >
-        Start new motion
-      </Button>
-      <Button
-        id="restart-from-now"
-        variant="outline"
-        type="button"
-      >
-        Regenerate from here
-      </Button>
-    </section>
+      <Field>
+        <div className="flex items-center justify-between gap-3">
+          <FieldLabel id="target-buffer-label">
+            Buffer ahead
+          </FieldLabel>
+          <output
+            className="text-xs text-muted-foreground"
+            id="target-buffer-output"
+          >
+            4 seconds
+          </output>
+        </div>
+        <BoundSlider
+          control={targetBufferControl}
+          aria-labelledby="target-buffer-label"
+          thumbAlignment="center"
+        />
+        <div
+          className="flex justify-between text-xs text-muted-foreground"
+          aria-hidden="true"
+        >
+          <span>2s</span>
+          <span>10s</span>
+        </div>
+      </Field>
+    </FieldGroup>
   )
 }
 
@@ -894,111 +834,10 @@ function PlayPauseButton() {
   )
 }
 
-function SidebarToggle({
-  expanded,
-  onExpandedChange,
-}: {
-  expanded: boolean
-  onExpandedChange: (expanded: boolean) => void
-}) {
-  const label = expanded
-    ? "Hide motion controls"
-    : "Show motion controls"
-
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <span
-            className="sidebar-toggle-anchor inline-flex"
-          />
-        }
-      >
-        <Button
-          id="sidebar-toggle"
-          variant="outline"
-          size="icon-lg"
-          type="button"
-          aria-label={label}
-          aria-controls="generator-panel"
-          aria-expanded={expanded}
-          onClick={(event) => {
-            event.currentTarget.focus()
-            onExpandedChange(!expanded)
-          }}
-        >
-          <IconLayoutSidebar aria-hidden="true" />
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent side="bottom">{label}</TooltipContent>
-    </Tooltip>
-  )
-}
-
-function MotionControlsDrawer({
-  open,
-  onOpenChange,
-  hostRef,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  hostRef: (element: HTMLDivElement | null) => void
-}) {
-  const contentRef = useRef<HTMLDivElement>(null)
-
-  return (
-    <Drawer
-      open={open}
-      onOpenChange={onOpenChange}
-      swipeDirection="down"
-      showSwipeHandle
-    >
-      <DrawerTrigger
-        render={
-          <Button
-            variant="outline"
-            size="icon-lg"
-            type="button"
-            aria-label="Motion controls"
-          />
-        }
-      >
-        <IconLayoutSidebar aria-hidden="true" />
-      </DrawerTrigger>
-      <DrawerContent
-        ref={contentRef}
-        initialFocus={contentRef}
-        tabIndex={-1}
-      >
-        <DrawerHeader>
-          <DrawerTitle>Motion controls</DrawerTitle>
-          <DrawerDescription>
-            Model, buffer, seed, and session actions.
-          </DrawerDescription>
-        </DrawerHeader>
-        <div
-          ref={hostRef}
-          className="motion-controls-drawer-body flex-1 overflow-y-auto"
-        />
-      </DrawerContent>
-    </Drawer>
-  )
-}
-
 function ViewportPanel({
   isMobile,
-  sidebarExpanded,
-  onSidebarExpandedChange,
-  motionDrawerOpen,
-  onMotionDrawerOpenChange,
-  motionDrawerHostRef,
 }: {
   isMobile: boolean
-  sidebarExpanded: boolean
-  onSidebarExpandedChange: (expanded: boolean) => void
-  motionDrawerOpen: boolean
-  onMotionDrawerOpenChange: (open: boolean) => void
-  motionDrawerHostRef: (element: HTMLDivElement | null) => void
 }) {
   return (
     <section
@@ -1027,22 +866,33 @@ function ViewportPanel({
           to orbit, Plus or Minus to zoom, and Home to reset the camera.
         </p>
         <div className="preview-overlay-controls">
-          {isMobile ? (
-            <MotionControlsDrawer
-              open={motionDrawerOpen}
-              onOpenChange={onMotionDrawerOpenChange}
-              hostRef={motionDrawerHostRef}
-            />
-          ) : (
-            <SidebarToggle
-              expanded={sidebarExpanded}
-              onExpandedChange={onSidebarExpandedChange}
-            />
-          )}
-          <PreviewSettingsSection
-            isMobile={isMobile}
-            onMobileOpen={() => onMotionDrawerOpenChange(false)}
+          <p
+            className="preview-diagnostics bg-background/80 px-2 py-1 text-xs text-muted-foreground shadow-sm ring-1 ring-border/50 tabular-nums backdrop-blur-sm"
+            id="preview-diagnostics"
+            aria-hidden="true"
           />
+          <div className="preview-overlay-actions">
+            <Tooltip>
+              <TooltipTrigger
+                render={<span className="inline-flex" />}
+              >
+                <Button
+                  id="reset-camera"
+                  variant="outline"
+                  size="icon-lg"
+                  type="button"
+                  aria-label="Reset camera"
+                  aria-keyshortcuts="Home"
+                >
+                  <IconCameraRotate aria-hidden="true" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                Reset camera
+              </TooltipContent>
+            </Tooltip>
+            <SettingsSection isMobile={isMobile} />
+          </div>
         </div>
       </div>
 
@@ -1073,22 +923,6 @@ function ViewportPanel({
           00:00.00
         </span>
         <PlaybackSpeedSelect />
-        <Tooltip>
-          <TooltipTrigger
-            render={<span className="inline-flex" />}
-          >
-            <Button
-              id="reset-camera"
-              variant="outline"
-              size="icon-lg"
-              type="button"
-              aria-label="Reset camera"
-            >
-              <IconCameraRotate aria-hidden="true" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>Reset camera</TooltipContent>
-        </Tooltip>
       </div>
     </section>
   )
@@ -1098,16 +932,8 @@ function VrmAvatarSection() {
   const showVrm = useControlState(showVrmControl)
 
   return (
-    <section
-      className="grid gap-3"
-      aria-labelledby="vrm-avatar-title"
-    >
-      <h3
-        className="text-xs font-medium text-muted-foreground"
-        id="vrm-avatar-title"
-      >
-        VRM avatar
-      </h3>
+    <FieldSet>
+      <FieldLegend variant="label">VRM avatar</FieldLegend>
 
       <Card id="vrm-card" size="sm">
         <CardHeader>
@@ -1174,7 +1000,7 @@ function VrmAvatarSection() {
           </Button>
         </AlertAction>
       </Alert>
-    </section>
+    </FieldSet>
   )
 }
 
@@ -1215,12 +1041,60 @@ function ViewSettingsFields() {
   )
 }
 
-function PreviewSettingsSection({
+const SETTINGS_TABS_LIST = (
+  <TabsList className="grid w-full grid-cols-2">
+    <TabsTrigger value="motion">Motion</TabsTrigger>
+    <TabsTrigger value="view">View</TabsTrigger>
+  </TabsList>
+)
+
+function SettingsFields({
+  tabsAtBottom = false,
+}: {
+  tabsAtBottom?: boolean
+}) {
+  const activeTab = useControlState(previewSettingsTabControl)
+
+  return (
+    <div className="flex flex-col gap-3">
+      <Tabs
+        className={tabsAtBottom ? "gap-3" : undefined}
+        value={activeTab.value}
+        onValueChange={(value) => {
+          if (value === "motion" || value === "view") {
+            previewSettingsTabControl.commit(value)
+          }
+        }}
+      >
+        {tabsAtBottom ? null : SETTINGS_TABS_LIST}
+        <TabsContent value="motion" keepMounted>
+          <MotionSettingsSection />
+        </TabsContent>
+        <TabsContent value="view" keepMounted>
+          <ViewSettingsFields />
+        </TabsContent>
+        {tabsAtBottom ? (
+          <>
+            <Separator />
+            <ModelCacheControl />
+            {SETTINGS_TABS_LIST}
+          </>
+        ) : null}
+      </Tabs>
+      {tabsAtBottom ? null : (
+        <>
+          <Separator />
+          <ModelCacheControl />
+        </>
+      )}
+    </div>
+  )
+}
+
+function SettingsSection({
   isMobile,
-  onMobileOpen,
 }: {
   isMobile: boolean
-  onMobileOpen: () => void
 }) {
   const state = useControlState(previewSettingsControl)
   const [stagingHost, setStagingHost] = useState<HTMLDivElement | null>(null)
@@ -1229,13 +1103,8 @@ function PreviewSettingsSection({
   const [drawerHost, setDrawerHost] = useState<HTMLDivElement | null>(null)
   const portalContainer = useStablePortal(
     (isMobile ? drawerHost : popoverHost) ?? stagingHost,
-    "view-settings-portal"
+    "settings-portal"
   )
-
-  const handleOpenChange = (open: boolean) => {
-    if (isMobile && open) onMobileOpen()
-    previewSettingsControl.commit(open)
-  }
 
   return (
     <>
@@ -1248,35 +1117,35 @@ function PreviewSettingsSection({
       {isMobile ? (
         <Drawer
           open={state.open}
-          onOpenChange={handleOpenChange}
+          onOpenChange={setPreviewSettingsOpen}
           swipeDirection="down"
           showSwipeHandle
         >
-          <DrawerTrigger
-            id="preview-settings-trigger"
-            render={
-              <Button
-                variant="outline"
-                size="icon-lg"
-                type="button"
-                aria-label="View settings"
-              />
-            }
-          >
-            <IconSettings aria-hidden="true" />
-          </DrawerTrigger>
+          <Tooltip>
+            <TooltipTrigger render={<span className="inline-flex" />}>
+              <DrawerTrigger
+                id="settings-trigger"
+                render={
+                  <Button
+                    variant="outline"
+                    size="icon-lg"
+                    type="button"
+                    aria-label="Settings"
+                  />
+                }
+              >
+                <IconSettings aria-hidden="true" />
+              </DrawerTrigger>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">Settings</TooltipContent>
+          </Tooltip>
           <DrawerContent
             ref={drawerContentRef}
             id={previewSettingsControl.id}
             initialFocus={drawerContentRef}
             tabIndex={-1}
           >
-            <DrawerHeader>
-              <DrawerTitle>View settings</DrawerTitle>
-              <DrawerDescription>
-                Avatar and preview display options.
-              </DrawerDescription>
-            </DrawerHeader>
+            <DrawerTitle className="sr-only">Settings</DrawerTitle>
             <div
               ref={setDrawerHost}
               className="flex-1 overflow-y-auto p-4"
@@ -1286,100 +1155,77 @@ function PreviewSettingsSection({
       ) : (
         <Popover
           open={state.open}
-          onOpenChange={handleOpenChange}
-          triggerId="preview-settings-trigger"
+          onOpenChange={setPreviewSettingsOpen}
+          triggerId="settings-trigger"
         >
-          <PopoverTrigger
-            id="preview-settings-trigger"
-            render={
-              <Button
-                variant="outline"
-                size="icon-lg"
-                type="button"
-                aria-label="View settings"
-              />
-            }
-          >
-            <IconSettings aria-hidden="true" />
-          </PopoverTrigger>
+          <Tooltip>
+            <TooltipTrigger render={<span className="inline-flex" />}>
+              <PopoverTrigger
+                id="settings-trigger"
+                render={
+                  <Button
+                    variant="outline"
+                    size="icon-lg"
+                    type="button"
+                    aria-label="Settings"
+                  />
+                }
+              >
+                <IconSettings aria-hidden="true" />
+              </PopoverTrigger>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">Settings</TooltipContent>
+          </Tooltip>
           <PopoverContent
             id={previewSettingsControl.id}
             align="end"
             side="bottom"
             keepMounted
           >
-            <PopoverHeader>
-              <PopoverTitle>View settings</PopoverTitle>
-            </PopoverHeader>
+            <PopoverTitle className="sr-only">Settings</PopoverTitle>
             <div ref={setPopoverHost} />
           </PopoverContent>
         </Popover>
       )}
-      {createPortal(<ViewSettingsFields />, portalContainer)}
+      {portalContainer
+        ? createPortal(
+            <SettingsFields tabsAtBottom={isMobile} />,
+            portalContainer
+          )
+        : null}
     </>
   )
 }
 
-function GenerationPanel({
-  modelActionRef,
-}: {
-  modelActionRef: RefObject<HTMLButtonElement | null>
-}) {
-  return (
-    <aside
-      className="panel generation-panel"
-      id="generator-panel"
-      aria-labelledby="motion-controls-title"
-      tabIndex={-1}
-    >
-      <h2 className="sr-only" id="motion-controls-title">
-        Motion controls
-      </h2>
-
-      <form id="generation-form" noValidate>
-        <ModelCacheSection actionRef={modelActionRef} />
-
-        <MotionSettingsSection />
-
-        <SessionActionsSection />
-      </form>
-    </aside>
-  )
-}
-
 export function App() {
-  const modelActionRef = useRef<HTMLButtonElement>(null)
+  const modelState = useModelUiState()
   const [isMobile, setIsMobile] = useState(
     () => window.matchMedia(MOBILE_LAYOUT_QUERY).matches
   )
-  const [sidebarExpanded, setSidebarExpanded] = useState(true)
-  const [motionDrawerOpen, setMotionDrawerOpen] = useState(false)
-  const [desktopMotionHost, setDesktopMotionHost] =
-    useState<HTMLDivElement | null>(null)
-  const [drawerMotionHost, setDrawerMotionHost] =
-    useState<HTMLDivElement | null>(null)
-  const [stagingMotionHost, setStagingMotionHost] =
-    useState<HTMLDivElement | null>(null)
-  const motionControlsPortal = useStablePortal(
-    (isMobile ? drawerMotionHost : desktopMotionHost) ??
-      stagingMotionHost,
-    "generation-panel-portal"
+  const [appReady, setAppReady] = useState(
+    () =>
+      modelState.runtime === "ready" &&
+      modelState.cache === "ready"
   )
-
-  const handleMotionDrawerOpenChange = (open: boolean) => {
-    if (open) previewSettingsControl.commit(false)
-    setMotionDrawerOpen(open)
-  }
 
   useEffect(() => {
     const mediaQuery = window.matchMedia(MOBILE_LAYOUT_QUERY)
     const updateLayout = () => {
       setIsMobile(mediaQuery.matches)
-      if (!mediaQuery.matches) setMotionDrawerOpen(false)
+      previewSettingsControl.commit(false)
     }
     mediaQuery.addEventListener("change", updateLayout)
     return () => mediaQuery.removeEventListener("change", updateLayout)
   }, [])
+
+  useEffect(() => {
+    if (
+      modelState.runtime === "ready" &&
+      modelState.cache === "ready"
+    ) {
+      setAppReady(true)
+    }
+  }, [modelState.cache, modelState.runtime])
 
   useEffect(() => {
     let cleanup: (() => void) | undefined
@@ -1395,7 +1241,11 @@ export function App() {
   return (
     <TooltipProvider delay={250}>
       <div id="app">
-        <a className="skip-link" href="#motion-canvas">
+        <a
+          className="skip-link"
+          href="#motion-canvas"
+          hidden={!appReady}
+        >
           Skip to motion preview
         </a>
 
@@ -1409,39 +1259,18 @@ export function App() {
 
         <VrmDropTarget />
         <UnsupportedDeviceDialog />
-        <ModelDownloadDialog actionRef={modelActionRef} />
+        <ModelStartupDialog appReady={appReady} />
 
         <main
           className="workspace"
-          data-sidebar={sidebarExpanded ? "expanded" : "collapsed"}
+          data-ready={appReady}
+          aria-hidden={!appReady || undefined}
+          inert={!appReady}
         >
           <h1 className="sr-only">ARDY browser motion workspace</h1>
 
-          <div
-            ref={setDesktopMotionHost}
-            className="generation-panel-host"
-          />
-
-          <ViewportPanel
-            isMobile={isMobile}
-            sidebarExpanded={sidebarExpanded}
-            onSidebarExpandedChange={setSidebarExpanded}
-            motionDrawerOpen={motionDrawerOpen}
-            onMotionDrawerOpenChange={handleMotionDrawerOpenChange}
-            motionDrawerHostRef={setDrawerMotionHost}
-          />
+          <ViewportPanel isMobile={isMobile} />
         </main>
-
-        <div
-          ref={setStagingMotionHost}
-          className="portal-staging"
-          aria-hidden="true"
-          inert
-        />
-        {createPortal(
-          <GenerationPanel modelActionRef={modelActionRef} />,
-          motionControlsPortal
-        )}
       </div>
     </TooltipProvider>
   )

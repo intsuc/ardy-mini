@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 
-import type { Page } from "@playwright/test";
+import type { Page, Route } from "@playwright/test";
 
 import {
   GRAPH_PRECISION_CONTRACT,
@@ -33,6 +33,65 @@ export interface MockModelFiles {
   manifest: BrowserModelManifest;
   manifestTransport: Uint8Array;
   transports: Readonly<Record<string, Uint8Array>>;
+}
+
+function openEndedRangeStart(
+  header: string | undefined,
+  size: number,
+): number | null | undefined {
+  if (header === undefined) return undefined;
+  const match = /^bytes=(\d+)-$/i.exec(header.trim());
+  if (match === null) return null;
+  const start = Number(match[1]);
+  return Number.isSafeInteger(start) && start < size ? start : null;
+}
+
+async function fulfillModelFile(
+  route: Route,
+  bytes: Uint8Array,
+): Promise<void> {
+  const start = openEndedRangeStart(
+    route.request().method() === "GET"
+      ? route.request().headers().range
+      : undefined,
+    bytes.byteLength,
+  );
+  const commonHeaders = {
+    "Accept-Ranges": "bytes",
+  };
+  if (start === null) {
+    await route.fulfill({
+      status: 416,
+      contentType: "application/gzip",
+      headers: {
+        ...commonHeaders,
+        "Content-Length": "0",
+        "Content-Range": `bytes */${bytes.byteLength}`,
+      },
+      body: "",
+    });
+    return;
+  }
+
+  const offset = start ?? 0;
+  const responseBytes = bytes.subarray(offset);
+  await route.fulfill({
+    status: start === undefined ? 200 : 206,
+    contentType: "application/gzip",
+    headers: {
+      ...commonHeaders,
+      "Content-Length": String(responseBytes.byteLength),
+      ...(start === undefined
+        ? {}
+        : {
+            "Content-Range":
+              `bytes ${start}-${bytes.byteLength - 1}/${bytes.byteLength}`,
+          }),
+    },
+    ...(route.request().method() === "HEAD"
+      ? {}
+      : { body: Buffer.from(responseBytes) }),
+  });
 }
 
 export function createMockModelFiles(): MockModelFiles {
@@ -273,16 +332,7 @@ export async function routeMockModelFiles(
         requestPath ===
         `${developmentModelPath}model.json.gz`
       ) {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/gzip",
-          headers: {
-            "Content-Length": String(
-              files.manifestTransport.byteLength,
-            ),
-          },
-          body: Buffer.from(files.manifestTransport),
-        });
+        await fulfillModelFile(route, files.manifestTransport);
         return;
       }
       const relativePath = requestPath.slice(
@@ -290,14 +340,7 @@ export async function routeMockModelFiles(
       );
       const transport = files.transports[relativePath];
       if (transport !== undefined) {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/gzip",
-          headers: {
-            "Content-Length": String(transport.byteLength),
-          },
-          body: Buffer.from(transport),
-        });
+        await fulfillModelFile(route, transport);
         return;
       }
       await route.fulfill({ status: 404, body: "Not found" });
@@ -366,14 +409,37 @@ export async function installMockModelWorker(
                     });
                   },
                 );
+                this.emit({
+                  type: "progress",
+                  requestId: command.requestId,
+                  stage: "loading-tokenizer",
+                  completed: 0,
+                  total: 1,
+                });
                 await Promise.all(
                   Object.keys(model.files).map((path) =>
                     assets.read(path),
                   ),
                 );
                 await new Promise((resolve) =>
-                  setTimeout(resolve, 100),
+                  setTimeout(resolve, 200),
                 );
+                this.emit({
+                  type: "progress",
+                  requestId: command.requestId,
+                  stage: "loading-tokenizer",
+                  completed: 1,
+                  total: 1,
+                });
+                for (let completed = 1; completed <= 3; completed += 1) {
+                  this.emit({
+                    type: "progress",
+                    requestId: command.requestId,
+                    stage: "loading-sessions",
+                    completed,
+                    total: 3,
+                  });
+                }
                 await markModelCacheComplete(assets);
                 this.emit({
                   type: "modelLoaded",

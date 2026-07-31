@@ -48,22 +48,30 @@ export async function allowRequiredWebGpuFeatureForPreflight(
 }
 
 export async function waitForPreviewReady(page: Page): Promise<void> {
-  await expect(page.locator("#model-cache-state")).not.toHaveText(
-    "Checking",
-    { timeout: 15_000 }
-  )
-  const downloadDialog = page.getByRole("alertdialog", {
-    name: "Download model files?",
+  const startupDialog = page.getByRole("alertdialog")
+  const confirmDownload = page.locator("#confirm-model-download")
+
+  // Cache discovery starts only after the WebGPU preview has initialized.
+  // Preview-only specs stop at that boundary so they do not load the large
+  // inference model merely to exercise the viewer.
+  await expect(startupDialog).toBeVisible({ timeout: 15_000 })
+  await expect(confirmDownload).toBeVisible({ timeout: 15_000 })
+  await page.evaluate(async () => {
+    const { modelUiControl } = await import("/src/ui-control-store.ts")
+    const state = modelUiControl.getSnapshot()
+    modelUiControl.dispatch({
+      type: "cache-ready",
+      totalFiles: state.totalFiles,
+      totalBytes: state.totalBytes,
+    })
+    modelUiControl.dispatch({ type: "runtime-ready" })
   })
-  if (await downloadDialog.isVisible()) {
-    await downloadDialog
-      .getByRole("button", { name: "Not now", exact: true })
-      .click()
-  }
-  await expect(page.locator("#model-runtime-state")).toHaveText(
-    /^(?:Not loaded|Unavailable)$/,
-    { timeout: 15_000 }
+
+  await expect(page.locator(".workspace")).toHaveAttribute(
+    "data-ready",
+    "true"
   )
+  await expect(startupDialog).toBeHidden()
   await expect(page.locator("#import-vrm")).toBeEnabled()
 }
 
@@ -124,10 +132,18 @@ export async function setCheckedState(
 }
 
 export async function openPreviewSettings(page: Page): Promise<void> {
-  const trigger = page.locator("#preview-settings-trigger")
+  const trigger = page.locator("#settings-trigger")
   await expect(trigger).toBeVisible()
   if ((await trigger.getAttribute("aria-expanded")) !== "true") {
     await trigger.click()
   }
   await expect(trigger).toHaveAttribute("aria-expanded", "true")
+  await expect(page.locator("#preview-settings")).toBeVisible()
+}
+
+export async function openViewSettings(page: Page): Promise<void> {
+  await openPreviewSettings(page)
+  const viewTab = page.getByRole("tab", { name: "View", exact: true })
+  await viewTab.click()
+  await expect(viewTab).toHaveAttribute("aria-selected", "true")
 }

@@ -220,7 +220,7 @@ describe("individual browser model files", () => {
     expect(await globalThis.caches.has(staleCacheName)).toBe(false);
   });
 
-  it("reuses valid partial transports and resumes only missing downloads", async () => {
+  it("reuses complete cached transports and downloads only missing files", async () => {
     const fixture = await createModelTestFixture();
     const requested: string[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -255,6 +255,138 @@ describe("individual browser model files", () => {
       `${baseUrl}model.json.gz`,
       `${baseUrl}decoder.onnx.gz`,
     ]);
+  });
+
+  it("persists an interrupted file prefix and resumes it with an HTTP range request", async () => {
+    const fixture = await createModelTestFixture();
+    const [targetPath] = Object.keys(fixture.manifest.files);
+    const targetTransportPath =
+      fixture.manifest.files[targetPath].transport.path;
+    const targetTransport = fixture.transports.get(targetTransportPath)!;
+    const prefixBytes = Math.max(
+      1,
+      Math.floor(targetTransport.byteLength / 2),
+    );
+    const controller = new AbortController();
+    let interruptTarget = true;
+    let resumedRange: string | null = null;
+
+    const fetchMock = vi.fn(
+      async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ): Promise<Response> => {
+        const url = requestUrl(input);
+        if (url === `${baseUrl}model.json.gz`) {
+          return responseFor(fixture.manifestTransportBytes);
+        }
+        const path = decodeURIComponent(
+          new URL(url).pathname.split("/").slice(-2).join("/"),
+        );
+        const bytes =
+          fixture.transports.get(path) ??
+          fixture.transports.get(
+            new URL(url).pathname.split("/").at(-1)!,
+          );
+        if (bytes === undefined) {
+          return new Response(null, { status: 404 });
+        }
+        const range = new Headers(init?.headers).get("range");
+        if (range !== null) {
+          resumedRange = range;
+          const match = /^bytes=(\d+)-$/.exec(range);
+          expect(match).not.toBeNull();
+          const offset = Number(match![1]);
+          const suffix = bytes.slice(offset);
+          return new Response(suffix, {
+            status: 206,
+            headers: {
+              "content-length": String(suffix.byteLength),
+              "content-range":
+                `bytes ${offset}-${bytes.byteLength - 1}/${bytes.byteLength}`,
+            },
+          });
+        }
+        if (
+          interruptTarget &&
+          path === targetTransportPath
+        ) {
+          interruptTarget = false;
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(streamController) {
+                streamController.enqueue(
+                  bytes.slice(0, prefixBytes),
+                );
+              },
+            }),
+            {
+              headers: {
+                "content-length": String(bytes.byteLength),
+              },
+            },
+          );
+        }
+        return responseFor(bytes);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const source = await fetchModelManifest(baseUrl);
+    await expect(
+      loadModelAssets(
+        baseUrl,
+        (progress) => {
+          if (
+            progress.stage === "downloading-model" &&
+            progress.message === targetPath &&
+            progress.completed === prefixBytes
+          ) {
+            controller.abort(
+              new DOMException("Paused", "AbortError"),
+            );
+          }
+        },
+        controller.signal,
+      ),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(await inspectModelCache(source)).toMatchObject({
+      complete: false,
+      cachedFileCount: 0,
+      cachedTransportSizeBytes: prefixBytes,
+    });
+
+    const resumedProgress: number[] = [];
+    await loadModelAssets(baseUrl, (progress) => {
+      if (
+        progress.stage === "downloading-model" &&
+        progress.message === targetPath
+      ) {
+        resumedProgress.push(progress.completed);
+      }
+    });
+
+    expect(resumedRange).toBe(`bytes=${prefixBytes}-`);
+    expect(resumedProgress.length).toBeGreaterThan(0);
+    expect(
+      resumedProgress.every(
+        (completed) => completed >= prefixBytes,
+      ),
+    ).toBe(true);
+    expect(await inspectModelCache(source)).toMatchObject({
+      complete: false,
+      cachedFileCount: 5,
+      cachedTransportSizeBytes: modelTransportSize(
+        fixture.manifest,
+      ),
+    });
+    const cache = await globalThis.caches.open(source.cacheName);
+    expect(
+      (await cache.keys()).some((request) =>
+        request.url.includes("ardy-model-partial"),
+      ),
+    ).toBe(false);
   });
 
   it("rejects compressed and raw corruption without writing a completion marker", async () => {

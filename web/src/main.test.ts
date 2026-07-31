@@ -12,11 +12,9 @@ import {
   formatTime,
   isVrmFile,
   livePromptBranchFrame,
-  resolveGenerationProgressState,
   resolvePromptActionState,
   shouldAutoplayMotion,
   shouldResetMotionPresentation,
-  shouldShowIdleGenerationStatus,
   validateGenerationForm,
 } from "./main";
 
@@ -126,18 +124,6 @@ describe("display formatting", () => {
   it("does not autoplay generated motion when reduced motion is requested", () => {
     expect(shouldAutoplayMotion(false)).toBe(true);
     expect(shouldAutoplayMotion(true)).toBe(false);
-  });
-});
-
-describe("generation progress presentation", () => {
-  it("preserves partial playback-only motion instead of resetting to idle", () => {
-    expect(resolveGenerationProgressState(false, true, 0.35)).toBe(
-      "playback-only",
-    );
-    expect(
-      shouldShowIdleGenerationStatus(false, "playback-only"),
-    ).toBe(false);
-    expect(shouldShowIdleGenerationStatus(false, "idle")).toBe(true);
   });
 });
 

@@ -4,19 +4,16 @@
 import * as React from "react"
 
 import { Checkbox } from "@/components/ui/checkbox"
-import { Progress } from "@/components/ui/progress"
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
 import {
   type CheckedControlState,
   type ExternalControl,
-  type ProgressControlState,
   type SliderControlState,
   useControlState,
 } from "@/ui-control-store"
 
 type CheckedControl = ExternalControl<CheckedControlState, boolean>
-type ProgressControl = ExternalControl<ProgressControlState, number>
 type SliderControl = ExternalControl<SliderControlState, number>
 
 type BoundCheckboxProps = Omit<
@@ -67,28 +64,6 @@ function BoundSwitch({
   )
 }
 
-type BoundProgressProps = Omit<
-  React.ComponentProps<typeof Progress>,
-  "id" | "value"
-> & {
-  control: ProgressControl
-}
-
-function BoundProgress({
-  control,
-  ...props
-}: BoundProgressProps) {
-  const state = useControlState(control)
-
-  return (
-    <Progress
-      {...props}
-      id={control.id}
-      value={state.value}
-    />
-  )
-}
-
 type BoundSliderProps = Omit<
   React.ComponentProps<typeof Slider>,
   | "aria-valuetext"
@@ -127,4 +102,4 @@ function BoundSlider({
   )
 }
 
-export { BoundCheckbox, BoundProgress, BoundSlider, BoundSwitch }
+export { BoundCheckbox, BoundSlider, BoundSwitch }

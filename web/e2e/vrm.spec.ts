@@ -5,7 +5,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 import {
   allowRequiredWebGpuFeatureForPreflight,
-  openPreviewSettings,
+  openViewSettings,
   setCheckedState,
   waitForPreviewReady,
 } from "./control-helpers";
@@ -356,7 +356,7 @@ test("loads, hides, replaces, and removes a local VRM avatar", async ({
   });
   await page.goto("/");
   await waitForPreviewReady(page);
-  await openPreviewSettings(page);
+  await openViewSettings(page);
 
   const settings = page.locator("#preview-settings");
   const card = page.locator("#vrm-card");
@@ -451,7 +451,10 @@ test("preserves the current avatar and focuses an error for an invalid VRM drop"
   await page.goto("/");
   await waitForPreviewReady(page);
   const settings = page.locator("#preview-settings");
-  await expect(page.locator("#preview-settings-trigger")).toHaveAttribute(
+  const settingsTrigger = page.locator("#settings-trigger");
+  await openViewSettings(page);
+  await settingsTrigger.click();
+  await expect(settingsTrigger).toHaveAttribute(
     "aria-expanded",
     "false",
   );
@@ -486,11 +489,14 @@ test("preserves the current avatar and focuses an error for an invalid VRM drop"
 
   const error = page.locator("#vrm-error-banner");
   await expect(dropTarget).toBeHidden();
-  await expect(page.locator("#preview-settings-trigger")).toHaveAttribute(
+  await expect(settingsTrigger).toHaveAttribute(
     "aria-expanded",
     "true",
   );
   await expect(settings).toBeVisible();
+  await expect(
+    page.getByRole("tab", { name: "View", exact: true }),
+  ).toHaveAttribute("aria-selected", "true");
   await expect(error).toBeVisible();
   await expect(error).toBeFocused();
   await expect(page.locator("#vrm-error-message")).toHaveText(

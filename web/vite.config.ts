@@ -25,6 +25,26 @@ const modelContentTypes: Readonly<Record<string, string>> = {
   ".json": "application/json; charset=utf-8",
 };
 
+type ModelFileRange =
+  | { kind: "full" }
+  | { kind: "partial"; start: number; end: number }
+  | { kind: "unsatisfiable" };
+
+function modelFileRange(
+  header: string | string[] | undefined,
+  size: number,
+): ModelFileRange {
+  if (header === undefined) return { kind: "full" };
+  if (Array.isArray(header)) return { kind: "unsatisfiable" };
+  const match = /^bytes=(\d+)-$/i.exec(header.trim());
+  if (match === null) return { kind: "unsatisfiable" };
+  const start = Number(match[1]);
+  if (!Number.isSafeInteger(start) || start >= size) {
+    return { kind: "unsatisfiable" };
+  }
+  return { kind: "partial", start, end: size - 1 };
+}
+
 function developmentModelFiles(): Plugin {
   return {
     name: "ardy-development-model-files",
@@ -88,20 +108,46 @@ function developmentModelFiles(): Plugin {
             return;
           }
 
-          response.statusCode = 200;
           response.setHeader(
             "Content-Type",
             modelContentTypes[extname(canonicalFile)] ??
               "application/octet-stream",
           );
-          response.setHeader("Content-Length", fileStats.size);
           response.setHeader("Cache-Control", "no-store");
           response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
-          if (request.method === "HEAD") {
+          response.setHeader("Accept-Ranges", "bytes");
+          const range = modelFileRange(
+            request.method === "GET" ? request.headers.range : undefined,
+            fileStats.size,
+          );
+          if (range.kind === "unsatisfiable") {
+            response.statusCode = 416;
+            response.setHeader("Content-Range", `bytes */${fileStats.size}`);
+            response.setHeader("Content-Length", 0);
             response.end();
             return;
           }
-          createReadStream(canonicalFile).pipe(response);
+
+          const start = range.kind === "partial" ? range.start : 0;
+          const end =
+            range.kind === "partial" ? range.end : fileStats.size - 1;
+          response.statusCode = range.kind === "partial" ? 206 : 200;
+          response.setHeader("Content-Length", end - start + 1);
+          if (range.kind === "partial") {
+            response.setHeader(
+              "Content-Range",
+              `bytes ${start}-${end}/${fileStats.size}`,
+            );
+          }
+          if (request.method === "HEAD" || fileStats.size === 0) {
+            response.end();
+            return;
+          }
+          const stream =
+            range.kind === "partial"
+              ? createReadStream(canonicalFile, { start, end })
+              : createReadStream(canonicalFile);
+          stream.pipe(response);
         } catch (error) {
           const code =
             typeof error === "object" &&

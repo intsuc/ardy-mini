@@ -3,7 +3,10 @@
 
 import { expect, test, type Page } from "@playwright/test";
 
-import { setSliderValue } from "./control-helpers";
+import {
+  openPreviewSettings,
+  setSliderValue,
+} from "./control-helpers";
 
 const configuredModelDirectory = process.env.ARDY_BROWSER_MODEL_DIR;
 const reducedMotion = process.env.ARDY_BROWSER_REDUCED_MOTION === "1";
@@ -15,16 +18,17 @@ async function runGeneration(
   expectedFrames: number,
 ): Promise<number> {
   const started = performance.now();
+  const generate = page.locator("#generate");
+  const diagnostics = page.locator("#preview-diagnostics");
   await trigger();
-  await expect(page.locator("#generate")).toHaveAttribute("aria-busy", "true");
-  await expect(page.locator("#generate-label")).not.toContainText("%");
-  await expect(page.locator("#generate")).toHaveAttribute("aria-busy", "false", {
+  await expect(generate).toHaveAttribute("aria-busy", "true");
+  await expect(generate).not.toContainText("%");
+  await expect(generate).toHaveAttribute("aria-busy", "false", {
     timeout: operationTimeout,
   });
-  await expect(page.locator("#generation-stage")).toHaveText(
-    `${expectedFrames} frames`,
+  await expect(diagnostics).toHaveText(
+    new RegExp(`^${expectedFrames} frames · \\d+ ms$`),
   );
-  await expect(page.locator("#generation-percent")).toHaveText(/^\d+ ms$/);
   await expect(page.locator("#app-status")).toContainText(
     `session contains ${expectedFrames} frames`,
   );
@@ -107,27 +111,24 @@ test.describe("real browser model files", () => {
       "The real mixed-precision model requires a WebGPU adapter with shader-f16.",
     );
 
-    const downloadDialog = page.getByRole("alertdialog", {
-      name: "Download model files?",
-    });
-    await expect(downloadDialog).toBeVisible({
+    const startupDialog = page.getByRole("alertdialog");
+    const confirmDownload = page.locator("#confirm-model-download");
+    await expect(startupDialog).toBeVisible({
       timeout: operationTimeout,
     });
-    await expect(page.locator("#model-cache-state")).toHaveText(
-      "Not cached",
+    await expect(startupDialog).toHaveAccessibleName(
+      "Download model files?",
     );
-    await expect(page.locator("#model-runtime-state")).toHaveText(
-      "Not loaded",
-    );
+    await expect(confirmDownload).toHaveText("Download model");
 
     const loadStart = performance.now();
-    await downloadDialog
-      .getByRole("button", { name: "Download model", exact: true })
-      .click();
-    await expect(page.locator("#model-runtime-state")).toHaveText("Ready", {
-      timeout: operationTimeout,
-    });
-    await expect(page.locator("#model-cache-state")).toHaveText("Cached");
+    await confirmDownload.click();
+    await expect(page.locator(".workspace")).toHaveAttribute(
+      "data-ready",
+      "true",
+      { timeout: operationTimeout },
+    );
+    await expect(startupDialog).toBeHidden();
     const loadWallMs = performance.now() - loadStart;
     for (const file of [
       "model.json.gz",
@@ -144,6 +145,13 @@ test.describe("real browser model files", () => {
       ).toBe(true);
     }
     const prompt = page.getByLabel("Motion description");
+    await openPreviewSettings(page);
+    const motionTab = page.getByRole("tab", {
+      name: "Motion",
+      exact: true,
+    });
+    await motionTab.click();
+    await expect(motionTab).toHaveAttribute("aria-selected", "true");
     const seed = page.getByRole("spinbutton", { name: "Seed" });
     await prompt.fill("人物が歩く。");
     await seed.fill("-1");
@@ -177,41 +185,6 @@ test.describe("real browser model files", () => {
     await expect(page.locator("#seed-error")).toBeEmpty();
 
     await setSliderValue(page, "#target-buffer", 40);
-    await page.evaluate(() => {
-      const stage = document.querySelector("#generation-stage");
-      const progress = document.querySelector("#generation-progress");
-      if (!stage || !progress) {
-        throw new Error("Missing generation UI");
-      }
-      const stages = [stage.textContent ?? ""];
-      new MutationObserver(() => stages.push(stage.textContent ?? "")).observe(
-        stage,
-        { childList: true, characterData: true, subtree: true },
-      );
-      let hiddenMutations = 0;
-      new MutationObserver((records) => {
-        hiddenMutations += records.length;
-        (
-          window as typeof window & {
-            __ardyGenerationProgressHiddenMutations?: number;
-          }
-        ).__ardyGenerationProgressHiddenMutations = hiddenMutations;
-      }).observe(progress, {
-        attributes: true,
-        attributeFilter: ["hidden"],
-      });
-      (
-        window as typeof window & {
-          __ardyGenerationStages?: string[];
-          __ardyGenerationProgressHiddenMutations?: number;
-        }
-      ).__ardyGenerationStages = stages;
-      (
-        window as typeof window & {
-          __ardyGenerationProgressHiddenMutations?: number;
-        }
-      ).__ardyGenerationProgressHiddenMutations = 0;
-    });
 
     const timings: Record<string, number> = {};
     timings.initialGenerationWallMs = await runGeneration(
@@ -220,44 +193,22 @@ test.describe("real browser model files", () => {
       40,
     );
     await expect(page.locator("#generate")).toBeFocused();
-    const firstGenerationUi = await page.evaluate(() => ({
-      stages:
-        (
-          window as typeof window & { __ardyGenerationStages?: string[] }
-        ).__ardyGenerationStages ?? [],
-    }));
-    expect(firstGenerationUi.stages).toContain("Received 40 frames");
-    await expect(page.locator("#generation-stage")).toHaveText("40 frames");
-    await expect(page.locator("#generation-percent")).toHaveText(/^\d+ ms$/);
-    await expect(page.locator("#generation-progress")).toHaveAttribute(
-      "data-state",
-      "complete",
+    const firstGenerationUi = {
+      diagnostics:
+        (await page.locator("#preview-diagnostics").textContent()) ?? "",
+    };
+    expect(firstGenerationUi.diagnostics).toMatch(
+      /^40 frames · \d+ ms$/,
     );
-    await expect(page.locator("#generation-progress")).toBeVisible();
     await expect(page.locator("#error-banner")).toHaveCount(0);
-    expect(
-      await page.evaluate(
-        () =>
-          (
-            window as typeof window & {
-              __ardyGenerationProgressHiddenMutations?: number;
-            }
-          ).__ardyGenerationProgressHiddenMutations ?? 0,
-      ),
-    ).toBe(0);
     expect(pageErrors).toEqual([]);
     expect(
       consoleMessages.filter((message) => message.startsWith("error:")),
     ).toEqual([]);
 
     const ui = await page.evaluate(() => ({
-      cache:
-        document.querySelector("#model-cache-state")?.textContent ?? "",
-      modelRuntime:
-        document.querySelector("#model-runtime-state")?.textContent ?? "",
-      frames: document.querySelector("#generation-stage")?.textContent ?? "",
-      runtime:
-        document.querySelector("#generation-percent")?.textContent ?? "",
+      diagnostics:
+        document.querySelector("#preview-diagnostics")?.textContent ?? "",
       status: document.querySelector("#app-status")?.textContent ?? "",
     }));
     await testInfo.attach("real-model-metrics.json", {

@@ -9,6 +9,10 @@ import {
   normalizeModelPath,
   validateModelManifest,
 } from "./manifest";
+import {
+  inspectResumableTransport,
+  loadResumableTransport,
+} from "./resumable-transport";
 
 export const MODEL_CACHE_PREFIX = "ardy-mini-model-files-v1-";
 
@@ -380,6 +384,29 @@ async function fetchResponse(
   return response;
 }
 
+async function fetchTransportRangeResponse(
+  url: string,
+  offset: number,
+  signal?: AbortSignal,
+): Promise<Response> {
+  throwIfAborted(signal);
+  const response = await fetch(url, {
+    cache: "no-cache",
+    credentials: "omit",
+    headers:
+      offset > 0
+        ? {
+            Range: `bytes=${offset}-`,
+          }
+        : undefined,
+    mode: "cors",
+    redirect: "follow",
+    signal,
+  });
+  throwIfAborted(signal);
+  return response;
+}
+
 function markerFor(source: ModelManifestSource): CacheCompletionMarker {
   return {
     schema_version: MODEL_CACHE_MARKER_VERSION,
@@ -629,19 +656,32 @@ async function cachedInventory(
   let cachedFileCount = 0;
   let cachedTransportSizeBytes = 0;
   const descriptions = Object.values(source.manifest.files);
-  const responses = await Promise.all(
-    descriptions.map((description) =>
-      cache.match(
-        new URL(description.transport.path, source.baseUrl).href,
-      ),
-    ),
+  const inventory = await Promise.all(
+    descriptions.map(async (description) => {
+      const transportUrl = new URL(
+        description.transport.path,
+        source.baseUrl,
+      ).href;
+      const response = await cache.match(transportUrl);
+      if (response !== undefined) {
+        return {
+          complete: true,
+          sizeBytes: description.transport.size_bytes,
+        };
+      }
+      return {
+        complete: false,
+        sizeBytes: await inspectResumableTransport(
+          cache,
+          transportUrl,
+          description,
+        ),
+      };
+    }),
   );
-  for (let index = 0; index < descriptions.length; index += 1) {
-    const description = descriptions[index];
-    const response = responses[index];
-    if (response === undefined) continue;
-    cachedFileCount += 1;
-    cachedTransportSizeBytes += description.transport.size_bytes;
+  for (const entry of inventory) {
+    if (entry.complete) cachedFileCount += 1;
+    cachedTransportSizeBytes += entry.sizeBytes;
   }
   return { cachedFileCount, cachedTransportSizeBytes };
 }
@@ -655,8 +695,8 @@ export async function inspectModelCache(
     return emptyCacheStatus(source, true);
   }
   const cache = await storage.open(source.cacheName);
-  const inventory = await cachedInventory(cache, source);
-  const [markerResponse, manifestResponse] = await Promise.all([
+  const [inventory, markerResponse, manifestResponse] = await Promise.all([
+    cachedInventory(cache, source),
     cache.match(cacheMarkerUrl(source.baseUrl)),
     cache.match(source.manifestUrl),
   ]);
@@ -1039,32 +1079,45 @@ export async function loadModelAssets(
             path,
             signal,
           );
-        } catch {
+        } catch (error) {
+          if (signal?.aborted) throw error;
           await cache.delete(transportUrl);
         }
       }
     }
     if (transport === undefined) {
-      const response = await fetchResponse(transportUrl, signal);
       const fileStart = completedBytes;
-      transport = await readTransportResponse(
-        response,
-        description,
-        path,
-        signal,
-        (fileBytes) =>
-          onProgress?.({
-            stage: "downloading-model",
-            completed: fileStart + fileBytes,
-            total: totalBytes,
-            message: path,
-          }),
-      );
-      if (cache !== null) {
-        await cache.put(
-          transportUrl,
-          cachedResponse(transport, "application/gzip"),
+      const reportFileProgress = (fileBytes: number) =>
+        onProgress?.({
+          stage: "downloading-model",
+          completed: fileStart + fileBytes,
+          total: totalBytes,
+          message: path,
+        });
+      if (cache === null) {
+        const response = await fetchResponse(transportUrl, signal);
+        transport = await readTransportResponse(
+          response,
+          description,
+          path,
+          signal,
+          reportFileProgress,
         );
+      } else {
+        transport = await loadResumableTransport({
+          cache,
+          transportUrl,
+          description,
+          fetchRange: (offset, rangeSignal) =>
+            fetchTransportRangeResponse(
+              transportUrl,
+              offset,
+              rangeSignal ?? signal,
+            ),
+          signal,
+          onProgress: reportFileProgress,
+          label: path,
+        });
       }
     } else {
       onProgress?.({
@@ -1106,9 +1159,9 @@ export async function markModelCacheComplete(
       "Cannot complete model cache before every model file is verified",
     );
   }
-  const cache = await storage.open(source.cacheName);
   const status = await inspectModelCache(source);
   if (status.complete) return;
+  const cache = await storage.open(source.cacheName);
   const descriptions = Object.values(source.manifest.files);
   const cachedTransports = await Promise.all(
     descriptions.map((description) =>

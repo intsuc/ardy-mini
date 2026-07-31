@@ -14,6 +14,7 @@ import {
   loadModelAssets,
   markModelCacheComplete,
 } from "./runtime/model-assets";
+import { createRuntimeProgressCoalescer } from "./runtime/progress-coalescer";
 import { assertWebGpuAvailable } from "./runtime/sessions";
 import {
   parseWorkerCommand,
@@ -248,9 +249,12 @@ function motionTransfers(
 function load(command: Extract<WorkerCommand, { type: "loadModel" }>): void {
   startOperation(command.requestId, "loading", async (operation) => {
     await assertWebGpuAvailable();
+    const reportProgress = createRuntimeProgressCoalescer(
+      (progress) => postProgress(command.requestId, progress),
+    );
     const assets = await loadModelAssets(
       command.baseUrl,
-      (progress) => postProgress(command.requestId, progress),
+      reportProgress,
       operation.controller.signal,
     );
     if (runtime !== null) {
@@ -260,10 +264,16 @@ function load(command: Extract<WorkerCommand, { type: "loadModel" }>): void {
     }
     const loaded = await BrowserArdyRuntime.create(assets, {
       signal: operation.controller.signal,
-      onProgress: (progress) => postProgress(command.requestId, progress),
+      onProgress: reportProgress,
     });
     try {
+      if (operation.controller.signal.aborted) {
+        throw new RuntimeCancelledError();
+      }
       await markModelCacheComplete(assets);
+      if (operation.controller.signal.aborted) {
+        throw new RuntimeCancelledError();
+      }
     } catch (error) {
       await loaded.dispose();
       throw error;

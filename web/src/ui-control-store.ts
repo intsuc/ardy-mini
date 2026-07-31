@@ -17,7 +17,9 @@ export type ModelCacheState =
   | "checking"
   | "missing"
   | "downloading"
+  | "cancelling"
   | "verifying"
+  | "initializing"
   | "ready"
   | "clearing"
   | "error"
@@ -28,7 +30,10 @@ export type ModelRuntimeState =
   | "ready"
   | "error"
 
-export type ModelCacheErrorOperation = "download" | "clear"
+export type ModelCacheErrorOperation =
+  | "download"
+  | "initialization"
+  | "clear"
 
 export interface ModelUiState {
   cache: ModelCacheState
@@ -38,7 +43,9 @@ export interface ModelUiState {
   totalFiles: number
   cachedBytes: number
   totalBytes: number
-  downloadDialogOpen: boolean
+  verifiedFiles: number
+  initializationSteps: number
+  totalInitializationSteps: number
 }
 
 interface ModelAssetProgress {
@@ -51,15 +58,22 @@ interface ModelAssetProgress {
 export type ModelUiEvent =
   | { type: "reset" }
   | { type: "cache-check-started" }
-  | ({
-      type: "cache-missing"
-      showDownloadPrompt: boolean
-    } & ModelAssetProgress)
-  | { type: "download-prompt-opened" }
-  | { type: "download-prompt-dismissed" }
+  | ({ type: "cache-missing" } & ModelAssetProgress)
   | { type: "download-started" }
+  | { type: "download-cancel-requested" }
   | ({ type: "download-progress" } & ModelAssetProgress)
-  | { type: "verification-started" }
+  | { type: "download-completed" }
+  | {
+      type: "verification-progress"
+      completedFiles: number
+      totalFiles: number
+    }
+  | { type: "initialization-started" }
+  | {
+      type: "initialization-progress"
+      completedSteps: number
+      totalSteps: number
+    }
   | ({
       type: "cache-ready"
     } & Pick<ModelAssetProgress, "totalFiles" | "totalBytes">)
@@ -164,7 +178,9 @@ const INITIAL_MODEL_UI_STATE: ModelUiState = Object.freeze({
   totalFiles: 0,
   cachedBytes: 0,
   totalBytes: 0,
-  downloadDialogOpen: false,
+  verifiedFiles: 0,
+  initializationSteps: 0,
+  totalInitializationSteps: 0,
 })
 
 function finiteWholeNumber(value: number): number {
@@ -205,9 +221,9 @@ function reduceModelUiState(
         ...state,
         cache: "checking",
         errorOperation: null,
-        cachedFiles: 0,
-        cachedBytes: 0,
-        downloadDialogOpen: false,
+        verifiedFiles: 0,
+        initializationSteps: 0,
+        totalInitializationSteps: 0,
       }
     case "cache-missing": {
       const progress = modelAssetProgress(event)
@@ -216,28 +232,19 @@ function reduceModelUiState(
         ...progress,
         cache: "missing",
         errorOperation: null,
-        downloadDialogOpen: event.showDownloadPrompt,
+        verifiedFiles: 0,
+        initializationSteps: 0,
+        totalInitializationSteps: 0,
       }
     }
-    case "download-prompt-opened":
-      if (
-        state.downloadDialogOpen ||
-        (state.cache !== "missing" &&
-          !(
-            state.cache === "error" &&
-            state.errorOperation === "download"
-          ))
-      ) {
-        return state
-      }
-      return { ...state, downloadDialogOpen: true }
-    case "download-prompt-dismissed":
-      if (!state.downloadDialogOpen) return state
-      return { ...state, downloadDialogOpen: false }
     case "download-started":
       if (
         state.cache !== "missing" &&
-        !(state.cache === "error" && state.errorOperation === "download")
+        !(
+          state.cache === "error" &&
+          (state.errorOperation === "download" ||
+            state.errorOperation === "initialization")
+        )
       ) {
         return state
       }
@@ -245,22 +252,98 @@ function reduceModelUiState(
         ...state,
         cache: "downloading",
         errorOperation: null,
-        downloadDialogOpen: false,
+        verifiedFiles: 0,
+        initializationSteps: 0,
+        totalInitializationSteps: 0,
       }
-    case "download-progress":
+    case "download-cancel-requested":
       if (state.cache !== "downloading") return state
+      return { ...state, cache: "cancelling" }
+    case "download-progress": {
+      if (state.cache !== "downloading") return state
+      const progress = modelAssetProgress(event)
       return {
         ...state,
-        ...modelAssetProgress(event),
+        ...progress,
+        cachedFiles: Math.min(
+          progress.totalFiles,
+          Math.max(state.cachedFiles, progress.cachedFiles)
+        ),
+        cachedBytes: Math.min(
+          progress.totalBytes,
+          Math.max(state.cachedBytes, progress.cachedBytes)
+        ),
       }
-    case "verification-started":
+    }
+    case "download-completed":
       if (state.cache !== "downloading") return state
       return {
         ...state,
         cache: "verifying",
         cachedFiles: state.totalFiles,
         cachedBytes: state.totalBytes,
+        verifiedFiles: 0,
+        initializationSteps: 0,
+        totalInitializationSteps: 0,
       }
+    case "verification-progress":
+      if (
+        state.cache !== "downloading" &&
+        state.cache !== "verifying" &&
+        state.cache !== "initializing"
+      ) {
+        return state
+      }
+      return {
+        ...state,
+        cache:
+          state.cache === "initializing"
+            ? "initializing"
+            : "verifying",
+        totalFiles: finiteWholeNumber(event.totalFiles),
+        cachedBytes: state.totalBytes,
+        verifiedFiles: Math.min(
+          finiteWholeNumber(event.completedFiles),
+          finiteWholeNumber(event.totalFiles)
+        ),
+      }
+    case "initialization-started":
+      if (
+        state.cache !== "downloading" &&
+        state.cache !== "verifying" &&
+        state.cache !== "ready"
+      ) {
+        return state
+      }
+      return {
+        ...state,
+        cache: "initializing",
+        verifiedFiles: 0,
+        initializationSteps: 0,
+        totalInitializationSteps: 0,
+      }
+    case "initialization-progress": {
+      if (
+        state.cache !== "downloading" &&
+        state.cache !== "verifying" &&
+        state.cache !== "initializing" &&
+        state.cache !== "ready"
+      ) {
+        return state
+      }
+      const totalInitializationSteps = finiteWholeNumber(
+        event.totalSteps
+      )
+      return {
+        ...state,
+        cache: "initializing",
+        initializationSteps: Math.min(
+          finiteWholeNumber(event.completedSteps),
+          totalInitializationSteps
+        ),
+        totalInitializationSteps,
+      }
+    }
     case "cache-ready": {
       const totalFiles = finiteWholeNumber(event.totalFiles)
       const totalBytes = finiteWholeNumber(event.totalBytes)
@@ -272,7 +355,6 @@ function reduceModelUiState(
         totalFiles,
         cachedBytes: totalBytes,
         totalBytes,
-        downloadDialogOpen: false,
       }
     }
     case "clear-started":
@@ -280,7 +362,9 @@ function reduceModelUiState(
         state.cachedBytes === 0 ||
         state.cache === "checking" ||
         state.cache === "downloading" ||
+        state.cache === "cancelling" ||
         state.cache === "verifying" ||
+        state.cache === "initializing" ||
         state.cache === "clearing"
       ) {
         return state
@@ -289,7 +373,6 @@ function reduceModelUiState(
         ...state,
         cache: "clearing",
         errorOperation: null,
-        downloadDialogOpen: false,
       }
     case "cache-cleared":
       if (state.cache !== "clearing") return state
@@ -299,11 +382,13 @@ function reduceModelUiState(
         errorOperation: null,
         cachedFiles: 0,
         cachedBytes: 0,
-        downloadDialogOpen: false,
+        verifiedFiles: 0,
+        initializationSteps: 0,
+        totalInitializationSteps: 0,
       }
     case "cache-error":
       if (
-        (event.operation === "download" &&
+        (event.operation !== "clear" &&
           state.cache === "clearing") ||
         (event.operation === "clear" && state.cache !== "clearing")
       ) {
@@ -313,7 +398,6 @@ function reduceModelUiState(
         ...state,
         cache: "error",
         errorOperation: event.operation,
-        downloadDialogOpen: false,
       }
     case "runtime-loading":
       if (state.runtime === "loading") return state
@@ -369,12 +453,27 @@ export interface PressedControlState {
   disabled: boolean
 }
 
-export interface ProgressControlState {
-  value: number
+export interface GenerationActionsState {
+  primaryLabel: "Start motion" | "Update motion"
+  activeLabel:
+    | "Starting…"
+    | "Updating…"
+    | "Regenerating…"
+    | null
+  primaryDisabled: boolean
+  menuDisabled: boolean
+  regenerateDisabled: boolean
+  newMotionDisabled: boolean
 }
 
 export interface DisclosureControlState {
   open: boolean
+}
+
+export type PreviewSettingsTab = "motion" | "view"
+
+export interface PreviewSettingsTabState {
+  value: PreviewSettingsTab
 }
 
 export interface SelectControlState {
@@ -476,6 +575,15 @@ export const previewSettingsControl = createExternalControl<
   (open) => ({ open })
 )
 
+export const previewSettingsTabControl = createExternalControl<
+  PreviewSettingsTabState,
+  PreviewSettingsTab
+>(
+  "preview-settings-tab",
+  { value: "motion" },
+  (value) => ({ value })
+)
+
 export const playbackSpeedControl = createExternalControl<
   SelectControlState,
   string
@@ -499,24 +607,33 @@ export const unsupportedDeviceControl = createExternalControl<
   (state) => state
 )
 
-function createProgressControl(id: string) {
-  return createExternalControl<ProgressControlState, number>(
-    id,
-    { value: 0 },
-    (value) => ({
-      value: Math.max(0, Math.min(100, Math.round(value))),
-    })
-  )
-}
-
-export const generationProgressControl =
-  createProgressControl("generation-progressbar")
+export const generationActionsControl = createExternalControl<
+  GenerationActionsState,
+  GenerationActionsState
+>(
+  "generation-actions",
+  {
+    primaryLabel: "Start motion",
+    activeLabel: null,
+    primaryDisabled: true,
+    menuDisabled: true,
+    regenerateDisabled: true,
+    newMotionDisabled: true,
+  },
+  (state) => state
+)
 
 export const modelUiControl = createModelUiControl()
 
 export const modelDownloadAction = createUiAction()
 
+export const modelDownloadCancelAction = createUiAction()
+
 export const clearModelCacheAction = createUiAction()
+
+export const regenerateMotionAction = createUiAction()
+
+export const startNewMotionAction = createUiAction()
 
 export function useModelUiState(): ModelUiState {
   return useSyncExternalStore(
