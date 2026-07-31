@@ -203,8 +203,19 @@ uv run --extra browser python scripts/export_browser_models.py \
 
 cd web
 npm ci
+npm run dev:https:setup
 npm run dev
 ```
+
+The one-time HTTPS setup requires
+[`mkcert`](https://github.com/FiloSottile/mkcert). It creates an ignored
+development certificate for localhost, the machine hostname, and its current
+network addresses. To test from a phone or tablet, install the printed
+`rootCA.pem` on that device, trust it, and open the HTTPS network URL printed by
+Vite. Never copy or share `rootCA-key.pem`. Rerun the setup command when the
+machine's network address changes; see the
+[browser demo guide](docs/browser_demo.md#trusted-https-for-physical-devices)
+for platform notes and overrides.
 
 During development, Vite exposes that ignored directory one file at a time.
 After WebGPU validation, the app asks before downloading the files and stores

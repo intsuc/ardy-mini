@@ -3,9 +3,10 @@
 
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 
@@ -19,6 +20,12 @@ const defaultDevelopmentModelDirectory = new URL(
   "../artifacts/browser/ardy-minilm-core40-browser-v1/",
   import.meta.url,
 ).pathname;
+const defaultDevelopmentCertificatePath = fileURLToPath(
+  new URL("./.cert/ardy-mini-dev.pem", import.meta.url),
+);
+const defaultDevelopmentPrivateKeyPath = fileURLToPath(
+  new URL("./.cert/ardy-mini-dev-key.pem", import.meta.url),
+);
 
 const modelContentTypes: Readonly<Record<string, string>> = {
   ".gz": "application/gzip",
@@ -167,31 +174,73 @@ function developmentModelFiles(): Plugin {
   };
 }
 
-export default defineConfig({
-  base: "./",
-  plugins: [developmentModelFiles(), react(), tailwindcss()],
-  resolve: {
-    alias: {
-      "@": new URL("./src", import.meta.url).pathname,
+function developmentHttpsOptions(): {
+  cert: Buffer;
+  key: Buffer;
+} {
+  const certificatePath =
+    process.env.ARDY_DEV_HTTPS_CERT ??
+    defaultDevelopmentCertificatePath;
+  const privateKeyPath =
+    process.env.ARDY_DEV_HTTPS_KEY ??
+    defaultDevelopmentPrivateKeyPath;
+  try {
+    return {
+      cert: readFileSync(certificatePath),
+      key: readFileSync(privateKeyPath),
+    };
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      throw new Error(
+        "HTTPS development certificate not found. Run `npm run dev:https:setup` before `npm run dev`.",
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+}
+
+export default defineConfig(({ command, isPreview, mode }) => {
+  const useDevelopmentHttps =
+    command === "serve" &&
+    !isPreview &&
+    mode !== "test" &&
+    process.env.ARDY_DEV_HTTPS !== "0";
+
+  return {
+    base: "./",
+    plugins: [developmentModelFiles(), react(), tailwindcss()],
+    resolve: {
+      alias: {
+        "@": new URL("./src", import.meta.url).pathname,
+      },
+      conditions: ["onnxruntime-web-use-extern-wasm"],
     },
-    conditions: ["onnxruntime-web-use-extern-wasm"],
-  },
-  build: {
-    license: {
-      fileName: "third-party-licenses.md",
+    build: {
+      license: {
+        fileName: "third-party-licenses.md",
+      },
+      target: "es2022",
+      sourcemap: true,
     },
-    target: "es2022",
-    sourcemap: true,
-  },
-  server: {
-    headers: crossOriginIsolationHeaders,
-  },
-  preview: {
-    headers: crossOriginIsolationHeaders,
-  },
-  test: {
-    environment: "jsdom",
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
-    restoreMocks: true,
-  },
+    server: {
+      headers: crossOriginIsolationHeaders,
+      https: useDevelopmentHttps
+        ? developmentHttpsOptions()
+        : undefined,
+    },
+    preview: {
+      headers: crossOriginIsolationHeaders,
+    },
+    test: {
+      environment: "jsdom",
+      include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+      restoreMocks: true,
+    },
+  };
 });
