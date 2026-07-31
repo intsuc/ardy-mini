@@ -1,0 +1,61 @@
+diff --git a/node_modules/@pixiv/three-vrm/lib/nodes/index.module.js b/node_modules/@pixiv/three-vrm/lib/nodes/index.module.js
+index 9d9c8ba..4e35bdf 100644
+--- a/node_modules/@pixiv/three-vrm/lib/nodes/index.module.js
++++ b/node_modules/@pixiv/three-vrm/lib/nodes/index.module.js
+@@ -13,11 +13,9 @@ import * as THREE2 from "three/webgpu";
+ import { cos, mat2, sin, uv, vec2, vec4 } from "three/tsl";
+ import { materialReference } from "three/tsl";
+ import * as THREE4 from "three/webgpu";
+-import { BRDF_Lambert, diffuseColor, float, mix, transformedNormalView, vec3 } from "three/tsl";
++import { BRDF_Lambert, diffuseColor, float, mix, normalView, vec3 } from "three/tsl";
+ import * as THREE3 from "three/webgpu";
+-import { nodeImmutable } from "three/tsl";
+-import * as THREE_TSL from "three/tsl";
+-import * as THREE_WEBGPU from "three/webgpu";
++import { Fn, nodeImmutable } from "three/tsl";
+ import * as THREE5 from "three/webgpu";
+ import {
+   cameraProjectionMatrix,
+@@ -35,7 +33,7 @@ import {
+   vec3 as vec32,
+   vec4 as vec42
+ } from "three/tsl";
+-import { float as float2, modelViewPosition, transformedNormalView as transformedNormalView2 } from "three/tsl";
++import { float as float2, modelViewPosition, normalView as normalView2 } from "three/tsl";
+ var threeRevision = parseInt(THREE.REVISION, 10);
+ if (threeRevision < 167) {
+   console.warn(
+@@ -98,14 +96,7 @@ var rimLightingMix = nodeImmutable(THREE3.PropertyNode, "float").toVar("RimLight
+ var rimMultiply = nodeImmutable(THREE3.PropertyNode, "vec3").toVar("RimMultiply");
+ var matcap = nodeImmutable(THREE3.PropertyNode, "vec3").toVar("matcap");
+ var parametricRim = nodeImmutable(THREE3.PropertyNode, "vec3").toVar("ParametricRim");
+-var FnCompat = (jsFunc) => {
+-  const threeRevision2 = parseInt(THREE_WEBGPU.REVISION, 10);
+-  if (threeRevision2 >= 168) {
+-    return THREE_TSL.Fn(jsFunc);
+-  } else {
+-    return THREE_WEBGPU.tslFn(jsFunc);
+-  }
+-};
++var FnCompat = Fn;
+ var linearstep = FnCompat(
+   ({
+     a,
+@@ -145,7 +136,7 @@ var MToonLightingModel = class extends THREE4.LightingModel {
+     lightColor,
+     reflectedLight
+   }) {
+-    const dotNL = transformedNormalView.dot(lightDirection).clamp(-1, 1);
++    const dotNL = normalView.dot(lightDirection).clamp(-1, 1);
+     const shading = getShading({
+       dotNL
+     });
+@@ -191,7 +182,7 @@ var mtoonParametricRim = FnCompat(
+     parametricRimColor
+   }) => {
+     const viewDir = modelViewPosition.normalize();
+-    const dotNV = transformedNormalView2.dot(viewDir.negate());
++    const dotNV = normalView2.dot(viewDir.negate());
+     const rim = float2(1).sub(dotNV).add(parametricRimLift).clamp().pow(parametricRimFresnelPower);
+     return rim.mul(parametricRimColor);
+   }

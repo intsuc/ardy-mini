@@ -153,10 +153,6 @@ body {
   border-top: 1px solid var(--border);
 }
 
-.speed-control {
-  width: 4.5rem;
-}
-
 @media (any-pointer: coarse) {
   [data-slot="button"],
   [data-slot="input"],
@@ -237,11 +233,6 @@ body {
   #total-time {
     display: none;
   }
-
-  .speed-control {
-    grid-column: 3;
-  }
-
 }
 
 @media (prefers-reduced-motion: reduce) {

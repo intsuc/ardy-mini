@@ -235,7 +235,7 @@ function PromptExampleCombobox() {
       >
         Examples
       </ComboboxTrigger>
-      <ComboboxContent>
+      <ComboboxContent className="w-72 min-w-0">
         <ComboboxInput
           id="prompt-example"
           placeholder="Search examples"
@@ -785,12 +785,16 @@ function PlaybackSpeedSelect() {
     >
       <SelectTrigger
         id={playbackSpeedControl.id}
-        className="speed-control"
+        className="max-[520px]:col-start-3"
         aria-label="Playback speed"
       >
         <SelectValue />
       </SelectTrigger>
-      <SelectContent align="end" alignItemWithTrigger={false}>
+      <SelectContent
+        className="min-w-0"
+        align="end"
+        alignItemWithTrigger={false}
+      >
         <SelectGroup>
           {PLAYBACK_SPEED_OPTIONS.map((option) => (
             <SelectItem key={option.value} value={option.value}>
@@ -936,11 +940,14 @@ function VrmAvatarSection() {
       <FieldLegend variant="label">VRM avatar</FieldLegend>
 
       <Card id="vrm-card" size="sm">
-        <CardHeader>
+        <CardHeader className="min-w-0">
           <CardTitle className="truncate" id="vrm-name">
             No avatar loaded
           </CardTitle>
-          <CardDescription id="vrm-detail">
+          <CardDescription
+            className="min-w-0 [overflow-wrap:anywhere]"
+            id="vrm-detail"
+          >
             Load a VRM 0.x or 1.0 file.
           </CardDescription>
         </CardHeader>

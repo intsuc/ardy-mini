@@ -1294,6 +1294,13 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
   await expect(promptExample).toHaveAttribute("placeholder", "Search examples");
   const promptExampleContent = page.locator('[data-slot="combobox-content"]');
   await expect(promptExampleContent).toBeVisible();
+  const promptExampleContentBox = await promptExampleContent.boundingBox();
+  expect(promptExampleContentBox).not.toBeNull();
+  expect(promptExampleContentBox!.width).toBeCloseTo(288, 0);
+  expect(promptExampleContentBox!.x).toBeGreaterThanOrEqual(0);
+  expect(
+    promptExampleContentBox!.x + promptExampleContentBox!.width,
+  ).toBeLessThanOrEqual(page.viewportSize()!.width);
   const promptOptions = promptExampleContent.getByRole("option");
   await expect(promptOptions).toHaveCount(100);
   await expect(promptOptions.first()).toHaveAttribute(
@@ -1301,7 +1308,13 @@ test("exposes deterministic inputs and enforces the prompt contract", async ({
     "combobox-item",
   );
 
-  await promptExample.fill("Joyful dance");
+  const promptBeforeSearch = await prompt.inputValue();
+  await promptExample.click();
+  await expect(promptExample).toBeFocused();
+  await page.keyboard.type("Joyful dance");
+  await expect(promptExample).toBeFocused();
+  await expect(promptExample).toHaveValue("Joyful dance");
+  await expect(prompt).toHaveValue(promptBeforeSearch);
   await expect(promptOptions).toHaveCount(1);
   await expect(promptOptions).toHaveText("Joyful dance");
   await promptExample.press("ArrowDown");
@@ -1384,6 +1397,24 @@ test("uses the Select control to update runtime playback speed", async ({
   await expect(speed).toHaveAttribute("data-slot", "select-trigger");
   await expect(page.locator("select#playback-speed")).toHaveCount(0);
   await speed.click();
+  const speedContent = page.locator('[data-slot="select-content"]');
+  await expect(speedContent).toBeVisible();
+  const [speedBox, speedContentBox] = await Promise.all([
+    speed.boundingBox(),
+    speedContent.boundingBox(),
+  ]);
+  expect(speedBox).not.toBeNull();
+  expect(speedContentBox).not.toBeNull();
+  expect(Math.abs(speedContentBox!.width - speedBox!.width)).toBeLessThanOrEqual(
+    2,
+  );
+  expect(
+    Math.abs(
+      speedContentBox!.x +
+        speedContentBox!.width -
+        (speedBox!.x + speedBox!.width),
+    ),
+  ).toBeLessThanOrEqual(2);
   const doubleSpeed = page.getByRole("option", { name: "2×" });
   await expect(doubleSpeed).toHaveAttribute("data-slot", "select-item");
   await doubleSpeed.click();
@@ -1399,6 +1430,22 @@ test("uses the Select control to update runtime playback speed", async ({
       ),
     )
     .toContain(2);
+});
+
+test("fits the example prompt popup within a narrow viewport", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 270, height: 844 });
+  await gotoReadyApp(page);
+  await openPromptExamples(page);
+
+  const content = page.locator('[data-slot="combobox-content"]');
+  const box = await content.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.width).toBeGreaterThanOrEqual(240);
+  expect(box!.width).toBeLessThanOrEqual(288);
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(270);
 });
 
 test("keeps labels, keyboard focus, and canvas controls accessible", async ({

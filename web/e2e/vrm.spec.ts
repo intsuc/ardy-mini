@@ -348,8 +348,10 @@ test("loads, hides, replaces, and removes a local VRM avatar", async ({
   page.on("pageerror", (error) => renderErrors.push(error.message));
   page.on("console", (message) => {
     if (
-      message.type() === "error" &&
-      /(?:WebGPU|WGSL|shader|validation)/i.test(message.text())
+      (message.type() === "error" &&
+        /(?:WebGPU|WGSL|shader|validation)/i.test(message.text())) ||
+      (message.type() === "warning" &&
+        message.text().includes('"transformedNormalView" is deprecated'))
     ) {
       renderErrors.push(message.text());
     }
@@ -443,6 +445,59 @@ test("loads, hides, replaces, and removes a local VRM avatar", async ({
     "Removed the VRM avatar.",
   );
   expect(renderErrors).toEqual([]);
+});
+
+test("wraps a long unbroken VRM author without horizontal overflow", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  await waitForPreviewReady(page);
+  await openViewSettings(page);
+
+  const author = "ExtremelyLongUnbrokenVrmAuthorName".repeat(20);
+  await page.locator("#vrm-file-input").setInputFiles({
+    name: "long-author.vrm",
+    mimeType: "model/gltf-binary",
+    buffer: createTestVrm({
+      name: "Long Author Avatar",
+      version: "1.0",
+      author,
+    }),
+  });
+
+  const detail = page.locator("#vrm-detail");
+  await expect(detail).toHaveText(`VRM 1.0 · model 1.0 · by ${author}`);
+  const geometry = await detail.evaluate((element) => {
+    const card = element.closest<HTMLElement>("#vrm-card");
+    if (!card) throw new Error("VRM card is missing.");
+    const detailRect = element.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    return {
+      cardClientWidth: card.clientWidth,
+      cardScrollWidth: card.scrollWidth,
+      detailClientWidth: element.clientWidth,
+      detailScrollWidth: element.scrollWidth,
+      detailLeft: detailRect.left,
+      detailRight: detailRect.right,
+      cardLeft: cardRect.left,
+      cardRight: cardRect.right,
+      documentScrollWidth: document.documentElement.scrollWidth,
+      viewportWidth: window.innerWidth,
+    };
+  });
+
+  expect(geometry.cardScrollWidth).toBeLessThanOrEqual(
+    geometry.cardClientWidth + 1,
+  );
+  expect(geometry.detailScrollWidth).toBeLessThanOrEqual(
+    geometry.detailClientWidth + 1,
+  );
+  expect(geometry.detailLeft).toBeGreaterThanOrEqual(geometry.cardLeft - 1);
+  expect(geometry.detailRight).toBeLessThanOrEqual(geometry.cardRight + 1);
+  expect(geometry.documentScrollWidth).toBeLessThanOrEqual(
+    geometry.viewportWidth,
+  );
 });
 
 test("preserves the current avatar and focuses an error for an invalid VRM drop", async ({

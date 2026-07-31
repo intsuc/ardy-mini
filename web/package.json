@@ -9,6 +9,7 @@
     "dev": "vite --host 0.0.0.0",
     "prebuild": "npm run copy:ort",
     "build": "tsc --noEmit && vite build",
+    "postinstall": "patch-package",
     "prepreview": "npm run copy:ort",
     "preview": "vite preview --host 0.0.0.0",
     "test": "vitest run",
@@ -43,6 +44,7 @@
     "@types/three": "0.185.1",
     "@vitejs/plugin-react": "^6.0.4",
     "jsdom": "29.0.1",
+    "patch-package": "8.0.1",
     "typescript": "7.0.2",
     "vite": "8.1.5",
     "vitest": "4.1.10"
