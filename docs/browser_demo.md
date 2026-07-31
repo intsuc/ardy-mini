@@ -45,11 +45,12 @@ The app follows this startup sequence:
 6. Download, decompress, and verify each file separately. Create each ONNX
    session and release its source bytes before reading the next large graph.
 
-The download dialog is a storage and network confirmation, not a model-license
-acceptance flow. Model terms are not currently shown or accepted in the app.
-The **Model** section reports cache status and lets the user retry a download or
-remove cached files. Removing the cache does not interrupt a model that is
-already loaded in the current tab; the files are needed again after reload.
+The download dialog states the transfer size, displays the Meta Llama 3
+attribution, and links to the model terms and intended-use limits at the same
+immutable Hub revision. Continuing acknowledges that notice and starts the
+download. Cache removal is available under **Settings**. Removing the cache
+does not interrupt a model that is already loaded in the current tab; the
+files are needed again after reload.
 
 Compressed data is stored in Cache Storage. Large transports are retained as
 verified 8 MiB block responses so browsers do not have to accept a single
@@ -193,13 +194,25 @@ change requires the selected model variant—652.52 MiB for mixed FP16 or
 684.29 MiB for FP32—to be cached again. A stable mDNS hostname or DHCP
 reservation avoids unnecessary origin changes.
 
-The eventual hosted build is expected to set its production model base URL to
-an immutable Hugging Face Model Hub model-family revision. Development and
-production share the `fp16/` and `fp32/` layout, per-file gzip, verification,
-and cache path; only the family base URL changes. Set `VITE_MODEL_BASE_URL` to
-that family root at build time, not to either precision subdirectory.
-Production has no fallback to the development route. The repository does not
-yet configure or publish a Hub repository.
+The public [ARDY Mini Static Space](https://huggingface.co/spaces/intsuc/ardy-mini)
+reads `ARDY_MODEL_BASE_URL` from `window.huggingface.variables`. The deployed
+value is the public Model Hub family's immutable `resolve/<commit>/` root, not
+either precision subdirectory. `VITE_MODEL_BASE_URL` is the build-time fallback
+for other production hosts. Development and production share the `fp16/` and
+`fp32/` layout, per-file gzip, verification, and cache path; only the family
+base URL changes. Production has no fallback to the development model route.
+
+The Space release is built locally and staged as static files, avoiding a
+hosted build job:
+
+```bash
+uv run python scripts/prepare_static_space_release.py
+```
+
+The allowlisted output is written to
+`artifacts/huggingface/space/ardy-mini/`. It contains the prebuilt app,
+dependency/source notices, Space card, and a clean-source marker, but no model
+files, package manager tree, token, or private key.
 
 ## Generation and playback
 
@@ -314,6 +327,12 @@ In the recorded environment the inference adapter did not expose
 sessions, and generated 40 frames from the real graphs. The complete
 Playwright test took about 15 seconds across repeated runs.
 
+The public `v1.0.0` deployment was also exercised anonymously from its Static
+Space origin. The production Chromium run selected FP32, downloaded and
+initialized the model in about 79 seconds, and generated 80 frames in 2,635 ms
+without a console warning or error. Model requests used only the pinned Hub
+commit recorded in [the release guide](model_hub_release.md).
+
 ## Privacy, distribution, and trust
 
 Prompts, seeds, selected VRM avatars, generation state, and generated motion
@@ -325,7 +344,9 @@ retained notices and attributions. That source license does not grant rights to
 redistribute the ARDY checkpoint, trained MiniLM weights, training data,
 teacher artifacts, or generated model files. Keep local exports under ignored
 `artifacts/` unless every applicable model and data term has been reviewed.
-See [THIRD_PARTY_MODELS_AND_DATA.md](../THIRD_PARTY_MODELS_AND_DATA.md).
+See [THIRD_PARTY_MODELS_AND_DATA.md](../THIRD_PARTY_MODELS_AND_DATA.md). The
+published browser weights have a separate
+[Model Card and composite terms](https://huggingface.co/intsuc/Llama-3-ARDY-Mini-Core40-Browser).
 
 The SHA-256 digests detect corruption and substitution relative to the
 decompressed manifest; they are not a digital signature. Download model files

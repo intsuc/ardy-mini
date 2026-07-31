@@ -6,6 +6,14 @@ repository as the composite model
 The source tree does not track generated ONNX files or a generated Hub staging
 directory.
 
+The `v1.0.0` production deployment is pinned to:
+
+- model commit
+  [`2a169e1af6c089354315406f7a0dbd8fcb0d62ee`](https://huggingface.co/intsuc/Llama-3-ARDY-Mini-Core40-Browser/tree/2a169e1af6c089354315406f7a0dbd8fcb0d62ee);
+- Static Space commit
+  [`92ede2abd2de5b1bdb7a4961f4de4914ece683cb`](https://huggingface.co/spaces/intsuc/ardy-mini/tree/92ede2abd2de5b1bdb7a4961f4de4914ece683cb); and
+- the public [ARDY Mini app](https://huggingface.co/spaces/intsuc/ardy-mini).
+
 ## Prepare a release
 
 Start from a clean, committed source revision. Export and verify both browser
@@ -70,6 +78,27 @@ repository as the browser download origin. Verify the actual Hub URL through
 the application's cross-origin-isolated production build, including CORS,
 byte ranges, cancel/resume, SHA-256 validation, cache restore, mixed-FP16
 selection, and FP32 fallback.
+
+## Stage and upload the Static Space
+
+Set the public Space Variable `ARDY_MODEL_BASE_URL` to the validated model
+repository's full immutable `resolve/<commit-sha>/` URL. Do not add a client
+token. The app derives its model-terms link from the same revision.
+
+Build the web app and create the allowlisted prebuilt deployment from a clean
+source commit:
+
+```bash
+uv run python scripts/prepare_static_space_release.py
+```
+
+Upload only `artifacts/huggingface/space/ardy-mini/` to the `intsuc/ardy-mini`
+Space. The Space card uses `sdk: static` and `app_file: index.html` without an
+`app_build_command`: dependencies are built locally from `package-lock.json`,
+and Hugging Face serves the committed output directly. Verify the exact remote
+file set and hashes before changing the Space from private staging to public.
+The production response must include COEP `require-corp`, COOP `same-origin`,
+and CORP `cross-origin`.
 
 ## Update policy
 

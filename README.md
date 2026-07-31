@@ -22,6 +22,9 @@ from their official providers. See [NOTICE](NOTICE) for the modification scope
 and [third-party model and data notices](THIRD_PARTY_MODELS_AND_DATA.md) before
 downloading external resources or training an artifact.
 
+- [Try ARDY Mini in the browser](https://huggingface.co/spaces/intsuc/ardy-mini)
+- [Browser model files and composite terms](https://huggingface.co/intsuc/Llama-3-ARDY-Mini-Core40-Browser)
+
 ## Setup
 > This repo has mainly been tested on Ubuntu Linux 22.04 with RTX 4090, nvidia-driver-575, and Python 3.11.
 
@@ -159,10 +162,9 @@ the user; only the download size changes.
 WordPiece tokenization, text conditioning, DDIM diffusion, autoregressive
 recentering/requantization, structured motion decoding, and three.js playback
 all remain on the user's device. The app is deliberately presented as a simple
-technical demo: model-cache and motion controls are in a collapsible side
-panel, while the prompt composer, 3D preview, view settings, and playback
-timeline share the main workspace. On mobile the side controls open in a
-bottom drawer.
+technical demo: the prompt composer and playback timeline stay attached to the
+3D preview, while infrequent view, motion, and cache controls open from the
+settings overlay. The settings surface uses a bottom drawer on mobile.
 
 The UI uses React and shadcn/ui preset `buFzUhO` (Lyra, neutral, Noto Sans,
 Tabler icons, and Tailwind CSS v4). Stock shadcn styling is retained for
@@ -229,10 +231,12 @@ totals 684,221,164 bytes (652.52 MiB); the FP32 transport totals 717,533,539
 bytes (684.29 MiB). Brotli and Zstandard reduced the gzip result by only a
 further 0.10–0.15%, while lacking interoperable browser stream decompression,
 so both variants use deterministic per-file gzip. The static production build
-contains no model weights. Its model-source boundary is ready to be pointed at
-an immutable Model Hub model-family revision; that production route is not
-configured yet. Inference does not upload prompts, model files, VRM files,
-generation state, or motion.
+contains no model weights. The public
+[Static Space](https://huggingface.co/spaces/intsuc/ardy-mini) downloads from an
+immutable revision of the separate
+[Model Hub repository](https://huggingface.co/intsuc/Llama-3-ARDY-Mini-Core40-Browser).
+Inference does not upload prompts, model files, VRM files, generation state, or
+motion.
 
 VRM animation requires the current structured-output model files. The
 decompressed manifest in each variant uses the `ardy-browser-model-files`
@@ -462,9 +466,12 @@ rights to ARDY checkpoints, Meta Llama 3, LLM2Vec model adapters, MiniLM model
 weights, separately obtained datasets, locally trained student weights, or
 generated training and evaluation artifacts.
 
-Those resources have separate terms and are not distributed here. Review
+Those resources have separate terms and are not distributed by this source
+repository. Review
 [THIRD_PARTY_MODELS_AND_DATA.md](THIRD_PARTY_MODELS_AND_DATA.md) before use or
-redistribution.
+redistribution. The browser weights are released separately under the
+[composite model terms](https://huggingface.co/intsuc/Llama-3-ARDY-Mini-Core40-Browser/blob/main/MODEL_TERMS.md)
+published with their Model Card, notices, license texts, and provenance.
 
 ## Acknowledgments
 
