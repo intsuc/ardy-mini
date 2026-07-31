@@ -40,6 +40,8 @@ PUBLIC_REPORTS = (
     "browser_fp16_ablation.json",
     "minilm_core40_summary.json",
 )
+SOURCE_REPORT_TERMS_PATH = "../THIRD_PARTY_MODELS_AND_DATA.md"
+PUBLIC_REPORT_TERMS_PATH = "../MODEL_TERMS.md"
 STATIC_RELEASE_FILES = (
     "MODEL_TERMS.md",
     "NOTICE",
@@ -83,6 +85,39 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ReleaseValidationError(f"Expected a JSON object in {path}")
     return value
+
+
+def _public_report_bytes(
+    filename: str,
+    source_bytes: bytes,
+) -> tuple[bytes, dict[str, Any]]:
+    """Prepare an aggregate report for the Model Hub directory layout."""
+
+    try:
+        document = json.loads(source_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReleaseValidationError(f"Could not parse public report {filename}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ReleaseValidationError(f"Expected a JSON object in public report {filename}")
+
+    if filename == "minilm_core40_summary.json":
+        distribution = document.get("distribution")
+        if not isinstance(distribution, dict):
+            raise ReleaseValidationError("MiniLM summary has no distribution metadata")
+        if distribution.get("third_party_notices") != SOURCE_REPORT_TERMS_PATH:
+            raise ReleaseValidationError(
+                "MiniLM summary third-party notice path changed; review the public release transformation"
+            )
+        source_fragment = json.dumps(SOURCE_REPORT_TERMS_PATH).encode("utf-8")
+        public_fragment = json.dumps(PUBLIC_REPORT_TERMS_PATH).encode("utf-8")
+        if source_bytes.count(source_fragment) != 1:
+            raise ReleaseValidationError(
+                "MiniLM summary must contain exactly one source third-party notice path"
+            )
+        source_bytes = source_bytes.replace(source_fragment, public_fragment)
+        distribution["third_party_notices"] = PUBLIC_REPORT_TERMS_PATH
+
+    return source_bytes, document
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -484,10 +519,20 @@ def stage_model_hub_release(config: ReleaseConfig) -> Path:
 
     reports: dict[str, dict[str, Any]] = {}
     report_documents: dict[str, dict[str, Any]] = {}
+    report_payloads: dict[str, bytes] = {}
     for filename in PUBLIC_REPORTS:
         path = reports_directory / filename
-        report_documents[filename] = _load_json(path)
-        reports[filename] = {"sha256": _sha256_file(path), "size_bytes": path.stat().st_size}
+        try:
+            source_bytes = path.read_bytes()
+        except OSError as exc:
+            raise ReleaseValidationError(f"Could not read public report {path}: {exc}") from exc
+        payload, document = _public_report_bytes(filename, source_bytes)
+        report_payloads[filename] = payload
+        report_documents[filename] = document
+        reports[filename] = {
+            "sha256": _sha256_bytes(payload),
+            "size_bytes": len(payload),
+        }
     evaluation_binding = _validate_report_bindings(variants, report_documents)
 
     license_document, license_entries = _validate_license_sources(config.license_sources_path.resolve())
@@ -511,7 +556,9 @@ def stage_model_hub_release(config: ReleaseConfig) -> Path:
                     use_hardlinks=config.use_hardlinks,
                 )
         for filename in PUBLIC_REPORTS:
-            _copy_file(reports_directory / filename, staging / "reports" / filename, use_hardlinks=False)
+            report_path = staging / "reports" / filename
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_bytes(report_payloads[filename])
         for filename in STATIC_RELEASE_FILES:
             _copy_file(template_directory / filename, staging / filename, use_hardlinks=False)
 

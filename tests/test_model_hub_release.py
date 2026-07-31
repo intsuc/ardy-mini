@@ -135,6 +135,9 @@ class ModelHubReleaseTests(unittest.TestCase):
             },
         }
         summary = {
+            "distribution": {
+                "third_party_notices": "../THIRD_PARTY_MODELS_AND_DATA.md",
+            },
             "test_evaluation": {"motion_fidelity": {"scope": {"checkpoint_sha256": "c" * 64}}},
             "winner": {"artifact_fingerprint": "a" * 64},
         }
@@ -156,12 +159,26 @@ class ModelHubReleaseTests(unittest.TestCase):
     def test_stages_only_allowlisted_files_with_provenance_and_checksums(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            output = stage_model_hub_release(self.make_fixture(root))
+            config = self.make_fixture(root)
+            output = stage_model_hub_release(config)
 
             self.assertEqual(json.loads((output / "config.json").read_text())["hub_repository"], MODEL_REPOSITORY)
             self.assertTrue((output / "MODEL_PROVENANCE.json").is_file())
             self.assertEqual((output / "LICENSES/FIXTURE.txt").read_bytes(), b"fixture license\n")
             self.assertFalse((output / "README.md").read_text().find("${") >= 0)
+            public_summary = json.loads(
+                (output / "reports/minilm_core40_summary.json").read_text()
+            )
+            self.assertEqual(
+                public_summary["distribution"]["third_party_notices"],
+                "../MODEL_TERMS.md",
+            )
+            self.assertEqual(
+                json.loads(
+                    (config.reports_directory / "minilm_core40_summary.json").read_text()
+                )["distribution"]["third_party_notices"],
+                "../THIRD_PARTY_MODELS_AND_DATA.md",
+            )
 
             checksum_lines = (output / "SHA256SUMS").read_text().splitlines()
             checksum_paths = {line.split("  ", 1)[1] for line in checksum_lines}

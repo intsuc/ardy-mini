@@ -28,6 +28,9 @@ The release builder performs the following checks before producing output:
   compressed manifest—unexpected files, symlinks, and unsafe paths fail;
 - compressed and decompressed sizes and SHA-256 hashes match every manifest;
 - the two aggregate public reports are valid JSON;
+- the MiniLM summary's source-distribution notice link is rewritten to the
+  release-local `MODEL_TERMS.md`, and the published bytes are hashed in
+  provenance;
 - official license texts match hash-pinned upstream copies; and
 - the tracked source worktree is clean.
 
