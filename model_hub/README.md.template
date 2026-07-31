@@ -1,0 +1,178 @@
+---
+language:
+  - en
+datasets:
+  - nvidia/SEED-Timeline-Annotations
+base_model:
+  - nvidia/ARDY-Core-RP-20FPS-Horizon40
+  - sentence-transformers/all-MiniLM-L6-v2
+license: other
+license_name: ardy-mini-composite-model-terms
+license_link: ./MODEL_TERMS.md
+tags:
+  - motion-generation
+  - text-to-motion
+  - onnx
+  - onnxruntime-web
+  - webgpu
+  - browser
+  - minilm
+---
+
+# Llama 3 ARDY Mini Core40 Browser
+
+**Built with Meta Llama 3.**
+
+Browser-ready ONNX files for ARDY Mini, a browser-ready derivative of NVIDIA
+ARDY's Core40 text-to-motion model. Its Llama 3 + LLM2Vec text-conditioning
+path is distilled into an all-MiniLM-L6-v2-based encoder that emits the same
+1,024-dimensional root and 1,024-dimensional body conditions. The ARDY motion
+generator is converted, not distilled, and runs locally with ONNX Runtime
+Web's WebGPU execution provider.
+
+- Interactive app: [ARDY Mini](https://intsuc-ardy-mini.hf.space)
+- Source and reproducibility code: [intsuc/ardy-mini](https://github.com/intsuc/ardy-mini)
+- Publisher/contact: intsuc, [i@intsuc.dev](mailto:i@intsuc.dev)
+
+## Files and browser selection
+
+The app selects one variant automatically. It downloads only the selected
+variant and stores verified files in the browser cache.
+
+| Variant | WebGPU requirement | Compressed transfer size |
+| --- | --- | ---: |
+| `fp16/` | `shader-f16`; mixed FP16 decoder, FP32 denoiser and text encoder | ${fp16_size_mib} MiB |
+| `fp32/` | WebGPU; no optional shader feature | ${fp32_size_mib} MiB |
+
+Each directory contains `model.json.gz` plus individually gzip-compressed ONNX
+and tokenizer transports declared by that manifest. Raw and compressed byte
+sizes and SHA-256 hashes are embedded in the manifests. Top-level
+`SHA256SUMS` covers every published file other than itself.
+
+The production app should resolve files from an immutable Hub commit, not
+from `main`:
+
+```text
+https://huggingface.co/intsuc/Llama-3-ARDY-Mini-Core40-Browser/resolve/<commit>/
+```
+
+## Intended use
+
+This release is intended for local, interactive generation and preview of
+human character motion from clear English descriptions. It supports the
+`ARDY-Core-RP-20FPS-Horizon40` architecture, generates at 20 FPS, and is
+designed for the accompanying WebGPU browser runtime.
+
+Reasonable uses include animation prototyping, character previews, games,
+creative tools, and motion-generation research consistent with the applicable
+licenses and acceptable-use policies.
+
+## Out-of-scope use
+
+This is not intended as a safety-critical physical controller. Do not deploy
+it where failure could cause death, bodily injury, or material damage,
+including transportation, heavy machinery, critical infrastructure, or
+weapons. Simulation and non-safety-critical robotics research are not excluded
+by this statement. Uses prohibited by the Meta Llama 3 Acceptable Use Policy,
+the NVIDIA Trustworthy AI terms, or applicable law are outside scope.
+
+## Training corpus and transformations
+
+The MiniLM condition encoder was trained and evaluated exclusively on English
+motion descriptions from NVIDIA Corporation's
+[`nvidia/SEED-Timeline-Annotations`](https://huggingface.co/datasets/nvidia/SEED-Timeline-Annotations),
+revision `b2cf916d8ef7a1e49fc4f0ce9e00c1981d3b9d8f`, published under CC BY 4.0.
+The pinned `timelines.jsonl` has SHA-256
+`379d6a5b86cea06b7201d485d19ee53512cc58449352b3cf113a95d1d27603d8`.
+
+Preparation selects `overview_description` and `events.description`, applies
+Unicode NFKC and whitespace normalization, removes descriptions over 512
+characters, deduplicates case- and punctuation-insensitively, groups related
+recordings, and creates deterministic disjoint train/validation/test groups.
+The resulting 64,287 unique descriptions comprise 51,482 train, 6,710
+validation, and 6,095 test prompts. Dataset records and derived prompt text are
+not distributed in this repository.
+
+## Model lineage
+
+- Motion base: `nvidia/ARDY-Core-RP-20FPS-Horizon40`, pinned in
+  `MODEL_PROVENANCE.json`
+- Student base: `sentence-transformers/all-MiniLM-L6-v2` at
+  `1110a243fdf4706b3f48f1d95db1a4f5529b4d41`
+- Teacher foundation: `meta-llama/Meta-Llama-3-8B-Instruct` at
+  `8afb486c1db24fe5011ec46dfbe5b5dccdb575c2`
+- Teacher MNTP adapter:
+  `McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp` at
+  `31474e395ada192e8ed1586db6be79fb3b70c9c0`
+- Teacher supervised adapter:
+  `McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised` at
+  `baa8ebf04a1c2500e61288e7dad65e8ae42601a7`
+
+The Llama, LLM2Vec, source MiniLM, original ARDY checkpoint, teacher cache,
+and dataset records are not included as separate files. The distributed
+graphs contain the converted motion model and trained student parameters
+needed by the browser runtime.
+
+## Evaluation
+
+The selected 100-epoch student was chosen on the validation split. On all
+6,095 held-out test descriptions, its 2,048-dimensional teacher-condition
+cosine was `0.97557` overall (`0.97861` root and `0.97033` body).
+
+Matched motion evaluation uses 64 held-out prompts, three seeds, 80 frames at
+20 FPS, identical ARDY weights and noise, and no post-processing:
+
+| MiniLM vs teacher, same seed | Result |
+| --- | ---: |
+| Global MPJPE | 0.06475 m |
+| Root-aligned MPJPE | 0.03140 m |
+| Root ADE / FDE | 0.04776 m / 0.08181 m |
+| Motion cosine | 0.99635 |
+| Foot-contact agreement | 0.96898 |
+
+These metrics measure replacement fidelity to the Llama 3 + LLM2Vec teacher,
+not semantic quality against ground-truth motion. They are not comparable to
+paper FID or R-precision results.
+
+The adopted mixed-FP16 policy keeps the autoregressive denoiser and text
+encoder byte-identical to FP32 and converts only reviewed decoder regions. In
+a 64-prompt × 3-seed × 5-window comparison against the FP32 browser graphs,
+accumulated 200-frame MPJPE was 0.265 mm mean / 0.350 mm p95, with 99.998%
+contact agreement. Full aggregate inputs and environment details are included
+under `reports/`.
+
+The FP16 ablation report retains the browser model's internal pre-release ID
+and the manifest hashes used during that evaluation. Public-release metadata
+changes those manifest bytes but not the evaluated ONNX or tokenizer payloads.
+`MODEL_PROVENANCE.json` binds the report to this release using exact raw graph
+and tokenizer SHA-256 hashes plus the checkpoint and student identities.
+
+## Limitations
+
+- English motion prompts are the evaluated input domain. Unusual wording,
+  misspellings, non-English text, or motion concepts absent from training may
+  reduce prompt adherence.
+- Generated motion may exhibit foot sliding, contact errors, implausible
+  transitions, self-intersections, drift, or prompt mismatch.
+- The model is limited to the Core40 representation and the browser runtime's
+  fixed generation schedule.
+- Results are based on one deterministic training seed and the recorded
+  hardware/software environment.
+- FP16 and FP32 refer to browser graph precision, not an assurance of identical
+  motion in every continuation; see the ablation report for measured bounds.
+
+## Terms
+
+This is a composite model release, not a single Apache-2.0 work. Read
+[`MODEL_TERMS.md`](MODEL_TERMS.md), [`NOTICE`](NOTICE), and the complete texts
+under [`LICENSES/`](LICENSES/) before use or redistribution.
+
+This model is not affiliated with or endorsed by NVIDIA, Meta, McGill
+University, Hugging Face, or sentence-transformers.
+
+## Reproducibility
+
+`MODEL_PROVENANCE.json` records the source commit, exact upstream revisions,
+artifact identities, manifest hashes, and report hashes. `SHA256SUMS` provides
+a flat integrity index for the published repository. Export and release
+commands are documented in the source repository.

@@ -9,7 +9,9 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
+import subprocess
 import tempfile
 import threading
 import zlib
@@ -42,7 +44,8 @@ from .wrappers import (
 
 BROWSER_MODEL_FILES_FORMAT = "ardy-browser-model-files"
 BROWSER_MODEL_FILES_SCHEMA_VERSION = 1
-DEFAULT_MODEL_ID = "ardy-minilm-core40-browser-v1"
+DEFAULT_MODEL_ID = "Llama-3-ARDY-Mini-Core40-Browser"
+DEFAULT_MODEL_DISPLAY_NAME = "Llama 3 ARDY Mini Core40 Browser"
 FP16_VARIANT_DIRECTORY = "fp16"
 FP32_VARIANT_DIRECTORY = "fp32"
 DEFAULT_MAX_TOKENS = 20
@@ -90,6 +93,26 @@ _LOCAL_CHECKPOINT_FILES = (
     "config.yaml",
     "denoiser.safetensors",
     "tokenizer.safetensors",
+    "stats/motion/mean.npy",
+    "stats/motion/std.npy",
+    "stats/post_quantization/mean.npy",
+    "stats/post_quantization/std.npy",
+    "stats/pre_quantization/mean.npy",
+    "stats/pre_quantization/std.npy",
+)
+_HF_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+_GIT_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_ARDY_HUB_OWNER = "nvidia"
+_SOURCE_REPOSITORY = "https://github.com/intsuc/ardy-mini"
+_SOURCE_COMMIT_ENVIRONMENT_VARIABLE = "ARDY_SOURCE_GIT_COMMIT"
+_NVIDIA_MODEL_NOTICE = (
+    "Licensed by NVIDIA Corporation under the NVIDIA Open Model License"
+)
+_META_LLAMA_3_ATTRIBUTION = "Built with Meta Llama 3"
+_META_LLAMA_3_NOTICE = (
+    "Meta Llama 3 is licensed under the Meta Llama 3 Community License, "
+    "Copyright © Meta Platforms, Inc. All Rights Reserved."
 )
 
 
@@ -149,6 +172,357 @@ def _file_record(path: Path) -> dict[str, Any]:
     }
 
 
+def _json_copy(value: Any, field: str) -> Any:
+    """Detach portable public metadata and reject non-JSON values."""
+
+    try:
+        return json.loads(
+            json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"{field} must be finite JSON data.") from error
+
+
+def _required_object(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TypeError(f"{field} must be a JSON object.")
+    return value
+
+
+def _required_string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be a non-empty string.")
+    return value
+
+
+def _required_revision(value: Any, field: str) -> str:
+    revision = _required_string(value, field)
+    if _HF_COMMIT_PATTERN.fullmatch(revision) is None:
+        raise ValueError(
+            f"{field} must be a resolved 40-character lowercase hexadecimal revision."
+        )
+    return revision
+
+
+def _required_sha256(value: Any, field: str) -> str:
+    digest = _required_string(value, field)
+    if _SHA256_PATTERN.fullmatch(digest) is None:
+        raise ValueError(f"{field} must be a lowercase SHA-256 digest.")
+    return digest
+
+
+def _hugging_face_checkpoint_source(
+    checkpoint_dir: Path,
+    resolved_model: str,
+) -> dict[str, str] | None:
+    """Read the common Hub revision recorded by ``huggingface_hub``.
+
+    The local cache paths, ETags, and download timestamps are intentionally not
+    included in the portable identity.  If Hugging Face metadata is present at
+    all, require it for every checkpoint input and require one common commit.
+    """
+
+    metadata_root = checkpoint_dir / ".cache" / "huggingface" / "download"
+    if not metadata_root.exists():
+        return None
+    if not metadata_root.is_dir() or metadata_root.is_symlink():
+        raise ValueError(
+            f"ARDY Hugging Face metadata directory is invalid: {metadata_root}"
+        )
+
+    revisions: set[str] = set()
+    for filename in _LOCAL_CHECKPOINT_FILES:
+        metadata_path = metadata_root / f"{filename}.metadata"
+        if not metadata_path.is_file() or metadata_path.is_symlink():
+            raise FileNotFoundError(
+                "ARDY Hugging Face source metadata is missing for required "
+                f"checkpoint file: {filename}"
+            )
+        lines = metadata_path.read_text(encoding="utf-8").splitlines()
+        if not lines:
+            raise ValueError(
+                f"ARDY Hugging Face source metadata is empty for {filename}."
+            )
+        revisions.add(
+            _required_revision(
+                lines[0],
+                f"ARDY Hugging Face source revision for {filename}",
+            )
+        )
+
+    if len(revisions) != 1:
+        raise ValueError(
+            "ARDY checkpoint files came from different Hugging Face revisions: "
+            f"{sorted(revisions)}"
+        )
+    return {
+        "provider": "huggingface",
+        "repo_id": f"{_ARDY_HUB_OWNER}/{resolved_model}",
+        "revision": revisions.pop(),
+    }
+
+
+def _source_code_identity() -> dict[str, str]:
+    """Resolve the source commit that produced the ONNX export."""
+
+    commit = os.environ.get(_SOURCE_COMMIT_ENVIRONMENT_VARIABLE)
+    if commit is None:
+        repository_root = Path(__file__).resolve().parents[2]
+        result = subprocess.run(
+            ["git", "-C", str(repository_root), "rev-parse", "--verify", "HEAD^{commit}"],
+            check=False,
+            capture_output=True,
+            encoding="utf-8",
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "Unable to determine the ARDY Mini source commit. Export from "
+                "a Git checkout or set "
+                f"{_SOURCE_COMMIT_ENVIRONMENT_VARIABLE}."
+            )
+        commit = result.stdout.strip()
+        status = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository_root),
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+            ],
+            check=False,
+            capture_output=True,
+            encoding="utf-8",
+        )
+        if status.returncode != 0:
+            raise RuntimeError("Unable to verify the ARDY Mini source worktree.")
+        if status.stdout.strip():
+            raise RuntimeError(
+                "Refusing to record an inaccurate source commit from a dirty "
+                "worktree. Commit tracked export-source changes first, or set "
+                f"{_SOURCE_COMMIT_ENVIRONMENT_VARIABLE} when exporting a "
+                "verified source archive."
+            )
+    if _GIT_COMMIT_PATTERN.fullmatch(commit) is None:
+        raise ValueError(
+            f"{_SOURCE_COMMIT_ENVIRONMENT_VARIABLE} must resolve to a 40- or "
+            "64-character lowercase hexadecimal Git commit."
+        )
+    return {
+        "repository": _SOURCE_REPOSITORY,
+        "commit": commit,
+    }
+
+
+def _public_minilm_lineage(
+    artifact_config: dict[str, Any],
+    *,
+    resolved_model: str,
+    checkpoint_identity: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Extract publication-safe student, teacher, and corpus lineage.
+
+    The artifact fingerprint already binds the complete training metadata.  The
+    browser manifest publishes only the fields needed to identify and audit the
+    training inputs, deliberately omitting local paths, hardware details, and
+    the large teacher-shard inventory.
+    """
+
+    artifact_fingerprint = _required_sha256(
+        artifact_config.get("artifact_fingerprint"),
+        "MiniLM artifact fingerprint",
+    )
+    metadata = _required_object(
+        artifact_config.get("metadata"),
+        "MiniLM artifact metadata",
+    )
+    training = _required_object(
+        metadata.get("training"),
+        "MiniLM artifact metadata.training",
+    )
+    teacher = _required_object(
+        metadata.get("teacher_cache_lineage"),
+        "MiniLM artifact metadata.teacher_cache_lineage",
+    )
+    corpus = _required_object(
+        teacher.get("corpus_provenance"),
+        "MiniLM teacher corpus_provenance",
+    )
+    dataset = _required_object(
+        corpus.get("dataset"),
+        "MiniLM teacher corpus_provenance.dataset",
+    )
+    prompt_manifest = _required_object(
+        corpus.get("manifest"),
+        "MiniLM teacher corpus_provenance.manifest",
+    )
+
+    student_base_model = _required_string(
+        artifact_config.get("base_model"),
+        "MiniLM artifact base_model",
+    )
+    training_base_model = _required_string(
+        training.get("base_model"),
+        "MiniLM training base_model",
+    )
+    if student_base_model != training_base_model:
+        raise ValueError(
+            "MiniLM artifact and training metadata identify different base models."
+        )
+    training_ardy_model = _required_string(
+        training.get("ardy_model"),
+        "MiniLM training ardy_model",
+    )
+    if training_ardy_model != resolved_model:
+        raise ValueError(
+            "MiniLM training lineage targets a different ARDY checkpoint: "
+            f"{training_ardy_model!r} != {resolved_model!r}."
+        )
+
+    teacher_checkpoint_sha256 = _required_sha256(
+        teacher.get("checkpoint_sha256"),
+        "MiniLM teacher checkpoint_sha256",
+    )
+    if checkpoint_identity is None:
+        raise ValueError("ARDY checkpoint identity is required for MiniLM lineage.")
+    checkpoint_files = _required_object(
+        checkpoint_identity.get("files"),
+        "ARDY checkpoint identity files",
+    )
+    denoiser_record = _required_object(
+        checkpoint_files.get("denoiser.safetensors"),
+        "ARDY checkpoint denoiser record",
+    )
+    if teacher_checkpoint_sha256 != denoiser_record.get("sha256"):
+        raise ValueError(
+            "MiniLM teacher lineage was projected from a different ARDY "
+            "denoiser checkpoint."
+        )
+
+    dataset_repo = _required_string(dataset.get("repo_id"), "dataset repo_id")
+    dataset_license = _required_string(dataset.get("license"), "dataset license")
+    if dataset_repo != "nvidia/SEED-Timeline-Annotations":
+        raise ValueError(
+            "Browser publication requires the NVIDIA SEED Timeline training corpus."
+        )
+    if dataset_license != "CC BY 4.0":
+        raise ValueError("NVIDIA SEED Timeline lineage must declare CC BY 4.0.")
+
+    foundation_model = _required_string(
+        teacher.get("foundation_model_name_or_path"),
+        "teacher foundation_model_name_or_path",
+    )
+    if foundation_model != "meta-llama/Meta-Llama-3-8B-Instruct":
+        raise ValueError(
+            "Browser publication terms are prepared for Meta Llama 3 8B Instruct."
+        )
+
+    public_dataset = {
+        field: dataset[field]
+        for field in (
+            "repo_id",
+            "revision",
+            "filename",
+            "sha256",
+            "size_bytes",
+            "license",
+            "owner",
+            "url",
+        )
+        if field in dataset
+    }
+    _required_revision(public_dataset.get("revision"), "dataset revision")
+    _required_sha256(public_dataset.get("sha256"), "dataset SHA-256")
+
+    result = {
+        "student": {
+            "artifact_format_version": artifact_config.get("format_version"),
+            "artifact_fingerprint": artifact_fingerprint,
+            "base_model": {
+                "repo_id": student_base_model,
+                "revision": _required_revision(
+                    training.get("base_model_revision"),
+                    "MiniLM training base_model_revision",
+                ),
+            },
+            "compatible_ardy_models": artifact_config.get(
+                "compatible_ardy_models"
+            ),
+            "teacher_cache_fingerprint": _required_sha256(
+                metadata.get("teacher_cache_fingerprint"),
+                "MiniLM teacher-cache fingerprint",
+            ),
+        },
+        "teacher": {
+            "foundation_model": {
+                "repo_id": foundation_model,
+                "revision": _required_revision(
+                    teacher.get("foundation_model_revision"),
+                    "teacher foundation_model_revision",
+                ),
+            },
+            "embedding_model": {
+                "repo_id": _required_string(
+                    teacher.get("base_model_name_or_path"),
+                    "teacher base_model_name_or_path",
+                ),
+                "revision": _required_revision(
+                    teacher.get("base_model_revision"),
+                    "teacher base_model_revision",
+                ),
+            },
+            "supervised_adapter": {
+                "repo_id": _required_string(
+                    teacher.get("peft_model_name_or_path"),
+                    "teacher peft_model_name_or_path",
+                ),
+                "revision": _required_revision(
+                    teacher.get("peft_model_revision"),
+                    "teacher peft_model_revision",
+                ),
+            },
+            "ardy_projection_checkpoint_sha256": teacher_checkpoint_sha256,
+            "target_definition": _required_string(
+                metadata.get("target_definition"),
+                "MiniLM target_definition",
+            ),
+            "bias_applied": teacher.get("bias_applied"),
+        },
+        "dataset": {
+            **public_dataset,
+            "prompt_manifest": {
+                "filename": _required_string(
+                    prompt_manifest.get("filename"),
+                    "prompt manifest filename",
+                ),
+                "sha256": _required_sha256(
+                    prompt_manifest.get("sha256"),
+                    "prompt manifest SHA-256",
+                ),
+            },
+            "preparation": corpus.get("preparation"),
+            "counts": corpus.get("counts"),
+        },
+    }
+    if result["teacher"]["bias_applied"] is not False:
+        raise ValueError("MiniLM teacher lineage must declare bias_applied=false.")
+    compatible_models = result["student"]["compatible_ardy_models"]
+    if (
+        not isinstance(compatible_models, list)
+        or resolved_model not in compatible_models
+    ):
+        raise ValueError(
+            "MiniLM artifact compatible_ardy_models does not include the export model."
+        )
+    return _json_copy(result, "MiniLM public lineage")
+
+
 def _local_checkpoint_identity(
     checkpoints_dir: Path | None,
     resolved_model: str,
@@ -166,10 +540,15 @@ def _local_checkpoint_identity(
                 f"ARDY checkpoint payload is missing required file: {path}"
             )
         files[filename] = _file_record(path)
+    hub_source = _hugging_face_checkpoint_source(
+        checkpoint_dir,
+        resolved_model,
+    )
     unsigned = {
         "format": "ardy-local-checkpoint-files",
-        "format_version": 1,
+        "format_version": 2,
         "files": files,
+        **({"source": hub_source} if hub_source is not None else {}),
     }
     encoded = json.dumps(
         unsigned,
@@ -187,8 +566,9 @@ def _model_revision(
     resolved_model: str,
     minilm_artifact_fingerprint: Any,
     checkpoint_identity: dict[str, Any] | None,
+    source_code_identity: dict[str, str],
 ) -> str:
-    """Derive an immutable revision from both sets of exported weights."""
+    """Derive an immutable revision from the inputs and exporter source."""
 
     if not isinstance(minilm_artifact_fingerprint, str):
         raise TypeError("MiniLM artifact fingerprint must be a string.")
@@ -207,13 +587,20 @@ def _model_revision(
             or any(character not in "0123456789abcdef" for character in fingerprint)
         ):
             raise ValueError(f"{label} fingerprint must be a lowercase SHA-256.")
+    source_commit = _required_string(
+        source_code_identity.get("commit"),
+        "source code commit",
+    )
+    if _GIT_COMMIT_PATTERN.fullmatch(source_commit) is None:
+        raise ValueError("Source code commit must be a Git SHA-1 or SHA-256 object ID.")
 
     identity = {
         "format": "ardy-browser-model-identity",
-        "schema_version": 1,
+        "schema_version": 2,
         "ardy_model": resolved_model,
         "ardy_checkpoint_fingerprint": checkpoint_fingerprint,
         "minilm_artifact_fingerprint": minilm_artifact_fingerprint,
+        "source_code_commit": source_commit,
     }
     encoded = json.dumps(
         identity,
@@ -254,6 +641,11 @@ def _validate_config(config: BrowserExportConfig) -> None:
         raise ValueError("max_prompt_tokens must be positive.")
     if config.max_output_frames <= 0:
         raise ValueError("max_output_frames must be positive.")
+    if config.model_id != DEFAULT_MODEL_ID:
+        raise ValueError(
+            "The distributable browser model ID is fixed to "
+            f"{DEFAULT_MODEL_ID!r}."
+        )
     if not config.minilm_artifact.is_dir():
         raise FileNotFoundError(f"MiniLM artifact directory not found: {config.minilm_artifact}")
     if config.checkpoints_dir is None:
@@ -1077,6 +1469,7 @@ def _build_manifest(
     verification: dict[str, Any] | None,
     precision_reports: dict[str, MixedPrecisionReport],
     checkpoint_identity: dict[str, Any] | None,
+    source_code_identity: dict[str, str],
 ) -> dict[str, Any]:
     motion_rep = model.motion_rep
     autoencoder = model.autoencoder
@@ -1101,6 +1494,12 @@ def _build_manifest(
         resolved_model=resolved_model,
         minilm_artifact_fingerprint=artifact_fingerprint,
         checkpoint_identity=checkpoint_identity,
+        source_code_identity=source_code_identity,
+    )
+    minilm_lineage = _public_minilm_lineage(
+        artifact_config,
+        resolved_model=resolved_model,
+        checkpoint_identity=checkpoint_identity,
     )
 
     manifest: dict[str, Any] = {
@@ -1108,8 +1507,9 @@ def _build_manifest(
         "schema_version": BROWSER_MODEL_FILES_SCHEMA_VERSION,
         "model": {
             "id": config.model_id,
+            "display_name": DEFAULT_MODEL_DISPLAY_NAME,
             "revision": revision,
-            "variant": "MiniLM Core40 interactive",
+            "variant": DEFAULT_MODEL_DISPLAY_NAME,
             "ardy_model": resolved_model,
             "minilm_artifact_fingerprint": artifact_fingerprint,
             **(
@@ -1117,6 +1517,27 @@ def _build_manifest(
                 if checkpoint_identity is not None
                 else {}
             ),
+        },
+        "license": {
+            "type": "multiple-license-terms",
+            "identifier": "ardy-mini-composite-model-terms",
+            "repository_document": "MODEL_TERMS.md",
+            "copyright_holder": "intsuc",
+            "contact": "i@intsuc.dev",
+        },
+        "provenance": {
+            "source_code": source_code_identity,
+            "ardy_checkpoint": {
+                "model": resolved_model,
+                "fingerprint": checkpoint_identity["fingerprint"],
+                **(
+                    {"source": checkpoint_identity["source"]}
+                    if checkpoint_identity is not None
+                    and "source" in checkpoint_identity
+                    else {}
+                ),
+            },
+            **minilm_lineage,
         },
         "files": files,
         "tokenizer": {
@@ -1220,12 +1641,10 @@ def _build_manifest(
             "global_translation_y_must_be_zero": False,
         },
         "notices": [
-            "Licensed by NVIDIA Corporation under the NVIDIA Open Model License.",
-            ("The specialized text encoder is based on sentence-transformers/all-MiniLM-L6-v2."),
-            (
-                "Review THIRD_PARTY_MODELS_AND_DATA.md and all source "
-                "model/data terms before distributing these model files."
-            ),
+            _NVIDIA_MODEL_NOTICE,
+            _META_LLAMA_3_ATTRIBUTION,
+            _META_LLAMA_3_NOTICE,
+            "The specialized text encoder is based on sentence-transformers/all-MiniLM-L6-v2.",
         ],
         "license_notices": [
             {
@@ -1236,7 +1655,7 @@ def _build_manifest(
             {
                 "component": "ARDY model",
                 "license": "NVIDIA Open Model License",
-                "notice": ("Licensed by NVIDIA Corporation under the NVIDIA Open Model License."),
+                "notice": _NVIDIA_MODEL_NOTICE,
             },
             {
                 "component": "sentence-transformers/all-MiniLM-L6-v2",
@@ -1244,12 +1663,32 @@ def _build_manifest(
                 "notice": ("The specialized text encoder is based on sentence-transformers/all-MiniLM-L6-v2."),
             },
             {
-                "component": "specialized MiniLM condition weights",
-                "license": "review-required-before-redistribution",
+                "component": "Meta Llama 3 teacher lineage",
+                "license": "Meta Llama 3 Community License",
+                "notice": _META_LLAMA_3_NOTICE,
+            },
+            {
+                "component": "LLM2Vec teacher lineage",
+                "license": "MIT",
                 "notice": (
-                    "This local export contains trained weights. Review "
-                    "THIRD_PARTY_MODELS_AND_DATA.md and all source model/data "
-                    "terms before distributing these model files."
+                    "LLM2Vec teacher components are identified in provenance; "
+                    "their weights are not included in these browser files."
+                ),
+            },
+            {
+                "component": "nvidia/SEED-Timeline-Annotations",
+                "license": "CC BY 4.0",
+                "notice": (
+                    "Training prompts were prepared from NVIDIA SEED Timeline "
+                    "Annotations; the dataset is not included in these browser files."
+                ),
+            },
+            {
+                "component": "Llama 3 ARDY Mini Core40 Browser",
+                "license": "ardy-mini-composite-model-terms",
+                "notice": (
+                    "Copyright (c) 2026 intsuc. See MODEL_TERMS.md for the "
+                    "terms that apply to each component."
                 ),
             },
         ],
@@ -1330,6 +1769,7 @@ def _export_browser_model_files_working_directory(
     list[Path],
 ]:
     """Export and validate the three browser graphs in a temporary directory."""
+    source_code_identity = _source_code_identity()
     device = _resolve_device(config.device)
 
     resolved_model = resolve_model_name(
@@ -1539,6 +1979,7 @@ def _export_browser_model_files_working_directory(
         verification=verification,
         precision_reports=precision_reports,
         checkpoint_identity=checkpoint_identity,
+        source_code_identity=source_code_identity,
     )
     fp32_manifest, fp32_payload_paths = _build_fp32_payload(
         candidate_manifest=manifest,

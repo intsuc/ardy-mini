@@ -1,0 +1,41 @@
+{
+  "format": "ardy-model-license-sources",
+  "format_version": 1,
+  "licenses": [
+    {
+      "filename": "NVIDIA_OPEN_MODEL_LICENSE.txt",
+      "name": "NVIDIA Open Model License Agreement",
+      "sha256": "11ccdcb47db87ac30b63765b5e5154403026c4fbb52c19919d99d912ec454e19",
+      "size_bytes": 10229,
+      "url": "https://huggingface.co/nvidia/ARDY-Core-RP-20FPS-Horizon40/resolve/abe6c43beb28c867c950acb824b9c4ef3d63fb76/LICENSE"
+    },
+    {
+      "filename": "META_LLAMA_3_COMMUNITY_LICENSE.txt",
+      "name": "Meta Llama 3 Community License Agreement and Acceptable Use Policy",
+      "sha256": "4fa551d4f938f68b8c1e6afa9d28befb70e3f33f75d0753248d530364aeea40f",
+      "size_bytes": 12403,
+      "url": "https://raw.githubusercontent.com/meta-llama/llama3/a0940f9cf7065d45bb6675660f80d305c041a754/LICENSE"
+    },
+    {
+      "filename": "APACHE-2.0.txt",
+      "name": "Apache License 2.0",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size_bytes": 11358,
+      "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
+    },
+    {
+      "filename": "LLM2VEC-MIT.txt",
+      "name": "LLM2Vec MIT License",
+      "sha256": "e69268828e67ffd1d3393a2d3530f97df6deaa0b961039fc971abea28cec8715",
+      "size_bytes": 1067,
+      "url": "https://raw.githubusercontent.com/McGill-NLP/llm2vec/6bbd52528bee4936786ff0e9eb8a569698b1c731/LICENSE"
+    },
+    {
+      "filename": "CC-BY-4.0.txt",
+      "name": "Creative Commons Attribution 4.0 International",
+      "sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
+      "size_bytes": 18657,
+      "url": "https://creativecommons.org/licenses/by/4.0/legalcode.txt"
+    }
+  ]
+}

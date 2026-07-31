@@ -25,7 +25,9 @@ from ardy.browser.export import (
     _graph_contracts,
     _local_checkpoint_identity,
     _model_revision,
+    _public_minilm_lineage,
     _publish_directory_set,
+    _source_code_identity,
     _specialize_denoiser_position_tables,
     _validate_config,
     _write_model_files_directory,
@@ -411,6 +413,16 @@ def test_browser_export_validates_model_family_output(tmp_path: Path):
             )
         )
 
+    with pytest.raises(ValueError, match="model ID is fixed"):
+        _validate_config(
+            BrowserExportConfig(
+                output_directory=tmp_path / "output",
+                minilm_artifact=artifact,
+                checkpoints_dir=checkpoints,
+                model_id="ardy-without-required-llama-prefix",
+            )
+        )
+
 
 def _without_file_specific_metadata(manifest: dict) -> dict:
     contract = copy.deepcopy(manifest)
@@ -551,14 +563,23 @@ def test_local_checkpoint_identity_binds_all_source_files_without_local_path(
         "config.yaml": b"model: test\n",
         "denoiser.safetensors": b"denoiser",
         "tokenizer.safetensors": b"tokenizer",
+        "stats/motion/mean.npy": b"motion-mean",
+        "stats/motion/std.npy": b"motion-std",
+        "stats/post_quantization/mean.npy": b"post-mean",
+        "stats/post_quantization/std.npy": b"post-std",
+        "stats/pre_quantization/mean.npy": b"pre-mean",
+        "stats/pre_quantization/std.npy": b"pre-std",
     }
     for filename, payload in payloads.items():
-        (checkpoint_dir / filename).write_bytes(payload)
+        path = checkpoint_dir / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
 
     identity = _local_checkpoint_identity(tmp_path, model_name)
 
     assert identity is not None
     assert identity["format"] == "ardy-local-checkpoint-files"
+    assert identity["format_version"] == 2
     assert set(identity["files"]) == set(payloads)
     assert len(identity["fingerprint"]) == 64
     encoded = json.dumps(identity)
@@ -574,17 +595,191 @@ def test_local_checkpoint_identity_binds_all_source_files_without_local_path(
     assert changed is not None
     assert changed["fingerprint"] != identity["fingerprint"]
 
+    (checkpoint_dir / "stats/post_quantization/std.npy").write_bytes(b"changed-stats")
+    changed_stats = _local_checkpoint_identity(tmp_path, model_name)
+    assert changed_stats is not None
+    assert changed_stats["fingerprint"] != changed["fingerprint"]
+
+
+def test_local_checkpoint_identity_records_one_common_hub_revision(tmp_path: Path):
+    model_name = "ARDY-Core-RP-20FPS-Horizon40"
+    checkpoint_dir = tmp_path / model_name
+    revision = "a" * 40
+    filenames = (
+        "config.yaml",
+        "denoiser.safetensors",
+        "tokenizer.safetensors",
+        "stats/motion/mean.npy",
+        "stats/motion/std.npy",
+        "stats/post_quantization/mean.npy",
+        "stats/post_quantization/std.npy",
+        "stats/pre_quantization/mean.npy",
+        "stats/pre_quantization/std.npy",
+    )
+    for filename in filenames:
+        payload = checkpoint_dir / filename
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_bytes(filename.encode())
+        metadata = (
+            checkpoint_dir
+            / ".cache"
+            / "huggingface"
+            / "download"
+            / f"{filename}.metadata"
+        )
+        metadata.parent.mkdir(parents=True, exist_ok=True)
+        metadata.write_text(
+            f"{revision}\nopaque-etag\n1234.5\n",
+            encoding="utf-8",
+        )
+
+    identity = _local_checkpoint_identity(tmp_path, model_name)
+
+    assert identity is not None
+    assert identity["source"] == {
+        "provider": "huggingface",
+        "repo_id": "nvidia/ARDY-Core-RP-20FPS-Horizon40",
+        "revision": revision,
+    }
+    assert str(checkpoint_dir / ".cache") not in json.dumps(identity)
+
+    mismatched = (
+        checkpoint_dir
+        / ".cache"
+        / "huggingface"
+        / "download"
+        / "stats/motion/std.npy.metadata"
+    )
+    mismatched.write_text(f"{'b' * 40}\netag\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="different Hugging Face revisions"):
+        _local_checkpoint_identity(tmp_path, model_name)
+
+
+def _public_lineage_fixture() -> tuple[dict, dict]:
+    denoiser_hash = "d" * 64
+    artifact_config = {
+        "format_version": 2,
+        "artifact_fingerprint": "a" * 64,
+        "base_model": "sentence-transformers/all-MiniLM-L6-v2",
+        "compatible_ardy_models": ["ARDY-Core-RP-20FPS-Horizon40"],
+        "metadata": {
+            "target_definition": "[W_root @ teacher, W_body @ teacher]",
+            "teacher_cache_fingerprint": "b" * 64,
+            "training": {
+                "ardy_model": "ARDY-Core-RP-20FPS-Horizon40",
+                "base_model": "sentence-transformers/all-MiniLM-L6-v2",
+                "base_model_revision": "1" * 40,
+            },
+            "teacher_cache_lineage": {
+                "checkpoint_sha256": denoiser_hash,
+                "foundation_model_name_or_path": (
+                    "meta-llama/Meta-Llama-3-8B-Instruct"
+                ),
+                "foundation_model_revision": "2" * 40,
+                "base_model_name_or_path": (
+                    "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp"
+                ),
+                "base_model_revision": "3" * 40,
+                "peft_model_name_or_path": (
+                    "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised"
+                ),
+                "peft_model_revision": "4" * 40,
+                "bias_applied": False,
+                "device": {"name": "private-machine-detail"},
+                "shard_sha256": {"teacher-00000.pt": "e" * 64},
+                "corpus_provenance": {
+                    "dataset": {
+                        "repo_id": "nvidia/SEED-Timeline-Annotations",
+                        "revision": "5" * 40,
+                        "filename": "timelines.jsonl",
+                        "sha256": "6" * 64,
+                        "size_bytes": 123,
+                        "license": "CC BY 4.0",
+                        "owner": "NVIDIA",
+                        "url": (
+                            "https://huggingface.co/datasets/"
+                            "nvidia/SEED-Timeline-Annotations"
+                        ),
+                        "local_path": "/private/timelines.jsonl",
+                    },
+                    "manifest": {
+                        "filename": "prompts.jsonl",
+                        "sha256": "7" * 64,
+                    },
+                    "preparation": {"normalization": "NFKC"},
+                    "counts": {"written": 10},
+                },
+            },
+        },
+    }
+    checkpoint_identity = {
+        "fingerprint": "c" * 64,
+        "files": {
+            "denoiser.safetensors": {
+                "sha256": denoiser_hash,
+                "size_bytes": 10,
+            }
+        },
+    }
+    return artifact_config, checkpoint_identity
+
+
+def test_public_minilm_lineage_is_pinned_and_excludes_private_cache_details():
+    artifact_config, checkpoint_identity = _public_lineage_fixture()
+
+    lineage = _public_minilm_lineage(
+        artifact_config,
+        resolved_model="ARDY-Core-RP-20FPS-Horizon40",
+        checkpoint_identity=checkpoint_identity,
+    )
+
+    assert lineage["student"]["base_model"] == {
+        "repo_id": "sentence-transformers/all-MiniLM-L6-v2",
+        "revision": "1" * 40,
+    }
+    assert lineage["teacher"]["foundation_model"]["repo_id"] == (
+        "meta-llama/Meta-Llama-3-8B-Instruct"
+    )
+    assert lineage["dataset"]["revision"] == "5" * 40
+    encoded = json.dumps(lineage)
+    assert "private-machine-detail" not in encoded
+    assert "/private/timelines.jsonl" not in encoded
+    assert "teacher-00000.pt" not in encoded
+
+    artifact_config["metadata"]["teacher_cache_lineage"][
+        "checkpoint_sha256"
+    ] = "f" * 64
+    with pytest.raises(ValueError, match="different ARDY denoiser"):
+        _public_minilm_lineage(
+            artifact_config,
+            resolved_model="ARDY-Core-RP-20FPS-Horizon40",
+            checkpoint_identity=checkpoint_identity,
+        )
+
+
+def test_source_code_identity_accepts_pinned_archive_commit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("ARDY_SOURCE_GIT_COMMIT", "8" * 40)
+
+    assert _source_code_identity() == {
+        "repository": "https://github.com/intsuc/ardy-mini",
+        "commit": "8" * 40,
+    }
+
 
 def test_model_revision_is_canonical_and_changes_with_either_weight_identity():
     minilm_fingerprint = "1" * 64
     checkpoint_fingerprint = "2" * 64
+    source_commit = "5" * 40
     checkpoint_identity = {"fingerprint": checkpoint_fingerprint}
     identity = {
         "format": "ardy-browser-model-identity",
-        "schema_version": 1,
+        "schema_version": 2,
         "ardy_model": "ARDY-Core-RP-20FPS-Horizon40",
         "ardy_checkpoint_fingerprint": checkpoint_fingerprint,
         "minilm_artifact_fingerprint": minilm_fingerprint,
+        "source_code_commit": source_commit,
     }
     expected = hashlib.sha256(
         json.dumps(
@@ -599,6 +794,7 @@ def test_model_revision_is_canonical_and_changes_with_either_weight_identity():
         resolved_model=identity["ardy_model"],
         minilm_artifact_fingerprint=minilm_fingerprint,
         checkpoint_identity=checkpoint_identity,
+        source_code_identity={"commit": source_commit},
     )
 
     assert actual == expected
@@ -607,6 +803,7 @@ def test_model_revision_is_canonical_and_changes_with_either_weight_identity():
             resolved_model=identity["ardy_model"],
             minilm_artifact_fingerprint="3" * 64,
             checkpoint_identity=checkpoint_identity,
+            source_code_identity={"commit": source_commit},
         )
         != actual
     )
@@ -615,6 +812,16 @@ def test_model_revision_is_canonical_and_changes_with_either_weight_identity():
             resolved_model=identity["ardy_model"],
             minilm_artifact_fingerprint=minilm_fingerprint,
             checkpoint_identity={"fingerprint": "4" * 64},
+            source_code_identity={"commit": source_commit},
+        )
+        != actual
+    )
+    assert (
+        _model_revision(
+            resolved_model=identity["ardy_model"],
+            minilm_artifact_fingerprint=minilm_fingerprint,
+            checkpoint_identity=checkpoint_identity,
+            source_code_identity={"commit": "6" * 40},
         )
         != actual
     )

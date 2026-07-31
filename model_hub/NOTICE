@@ -1,0 +1,26 @@
+Llama 3 ARDY Mini Core40 Browser
+Copyright 2026 intsuc
+
+Contact: i@intsuc.dev
+Source: https://github.com/intsuc/ardy-mini
+Model repository: https://huggingface.co/intsuc/Llama-3-ARDY-Mini-Core40-Browser
+
+Built with Meta Llama 3
+
+Meta Llama 3 is licensed under the Meta Llama 3 Community License, Copyright © Meta Platforms, Inc. All Rights Reserved.
+
+Licensed by NVIDIA Corporation under the NVIDIA Open Model License
+
+This model is an unofficial derivative of ARDY-Core-RP-20FPS-Horizon40 and is
+not affiliated with or endorsed by NVIDIA, Meta, McGill University, Hugging
+Face, or sentence-transformers.
+
+ARDY source: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. Licensed under Apache-2.0.
+
+The text encoder is derived from sentence-transformers/all-MiniLM-L6-v2.
+Training and evaluation descriptions are derived from
+nvidia/SEED-Timeline-Annotations, published by NVIDIA Corporation under CC BY
+4.0. The teacher pipeline uses LLM2Vec components from McGill NLP under MIT.
+
+See MODEL_TERMS.md and the files under LICENSES/ for complete applicable
+terms and MODEL_PROVENANCE.json for revision-pinned provenance.
