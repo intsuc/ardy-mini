@@ -3,6 +3,7 @@
 
 import { sha256Hex } from "./hash";
 import {
+  FP32_PRECISION_FORMAT,
   GRAPH_PRECISION_CONTRACT,
   MIXED_PRECISION_FORMAT,
   MIXED_PRECISION_POLICY_VERSION,
@@ -42,7 +43,9 @@ export interface ModelTestFixture {
   transports: Map<string, Uint8Array>;
 }
 
-export async function createModelTestFixture(): Promise<ModelTestFixture> {
+export async function createModelTestFixture(
+  variant: "fp16" | "fp32" = "fp16",
+): Promise<ModelTestFixture> {
   const rawFiles = new Map<string, Uint8Array>([
     ["tokenizer/tokenizer.json", encoder.encode('{"fixture":"tokenizer"}')],
     [
@@ -153,6 +156,55 @@ export async function createModelTestFixture(): Promise<ModelTestFixture> {
     0.99, 0.95, 0.88, 0.78, 0.66, 0.53, 0.4, 0.28, 0.17, 0.08,
   ];
 
+  const precision: BrowserModelManifest["precision"] =
+    variant === "fp16"
+      ? {
+          format: MIXED_PRECISION_FORMAT,
+          policy_version: MIXED_PRECISION_POLICY_VERSION,
+          public_io_dtype: MIXED_PRECISION_PUBLIC_IO_DTYPE,
+          required_webgpu_features: [REQUIRED_WEBGPU_FEATURE],
+          source_onnx_bytes: sourceBytes,
+          mixed_onnx_bytes: mixedBytes,
+          saved_onnx_bytes: sourceBytes - mixedBytes,
+          saved_onnx_fraction: (sourceBytes - mixedBytes) / sourceBytes,
+          toolchain: {
+            torch: "fixture",
+            onnx: "fixture",
+            onnxruntime: "fixture",
+          },
+          graphs: precisionGraphs,
+        }
+      : {
+          format: FP32_PRECISION_FORMAT,
+          public_io_dtype: MIXED_PRECISION_PUBLIC_IO_DTYPE,
+          required_webgpu_features: [],
+          onnx_bytes: [...rawFiles]
+            .filter(([path]) => path.endsWith(".onnx"))
+            .reduce((total, [, bytes]) => total + bytes.byteLength, 0),
+          toolchain: {
+            torch: "fixture",
+            onnx: "fixture",
+            onnxruntime: "fixture",
+          },
+          graphs: {
+            text_encoder: {
+              model: "text_encoder.onnx",
+              sha256: files["text_encoder.onnx"].sha256,
+              size_bytes: files["text_encoder.onnx"].size_bytes,
+            },
+            denoiser: {
+              model: "denoiser.onnx",
+              sha256: files["denoiser.onnx"].sha256,
+              size_bytes: files["denoiser.onnx"].size_bytes,
+            },
+            decoder: {
+              model: "decoder.onnx",
+              sha256: files["decoder.onnx"].sha256,
+              size_bytes: files["decoder.onnx"].size_bytes,
+            },
+          },
+        };
+
   const manifest: BrowserModelManifest = {
     format: MODEL_FILES_FORMAT,
     schema_version: MODEL_FILES_SCHEMA_VERSION,
@@ -208,22 +260,7 @@ export async function createModelTestFixture(): Promise<ModelTestFixture> {
         },
       },
     },
-    precision: {
-      format: MIXED_PRECISION_FORMAT,
-      policy_version: MIXED_PRECISION_POLICY_VERSION,
-      public_io_dtype: MIXED_PRECISION_PUBLIC_IO_DTYPE,
-      required_webgpu_features: [REQUIRED_WEBGPU_FEATURE],
-      source_onnx_bytes: sourceBytes,
-      mixed_onnx_bytes: mixedBytes,
-      saved_onnx_bytes: sourceBytes - mixedBytes,
-      saved_onnx_fraction: (sourceBytes - mixedBytes) / sourceBytes,
-      toolchain: {
-        torch: "fixture",
-        onnx: "fixture",
-        onnxruntime: "fixture",
-      },
-      graphs: precisionGraphs,
-    },
+    precision,
     dimensions: {
       fps: 20,
       num_frames_per_token: 4,
@@ -267,7 +304,8 @@ export async function createModelTestFixture(): Promise<ModelTestFixture> {
     runtime: {
       contract_revision: 3,
       text_only: true,
-      required_webgpu_features: [REQUIRED_WEBGPU_FEATURE],
+      required_webgpu_features:
+        variant === "fp16" ? [REQUIRED_WEBGPU_FEATURE] : [],
     },
     notices: ["fixture only"],
     license_notices: [

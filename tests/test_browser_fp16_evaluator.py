@@ -221,7 +221,8 @@ def _model_runtime(directory: Path, *, candidate: bool) -> ModelFilesRuntime:
         "runtime": {
             "contract_revision": 3,
             "text_only": True,
-            "required_webgpu_features": ["shader-f16"],
+            "required_webgpu_features":
+                ["shader-f16"] if candidate else [],
         },
     }
     if candidate:
@@ -272,10 +273,10 @@ def test_model_compatibility_allows_only_precision_metadata(tmp_path: Path):
         _validate_compatible_models(reference, incompatible)
 
     incompatible = copy.deepcopy(candidate)
-    incompatible.manifest["runtime"]["required_webgpu_features"] = []
+    incompatible.manifest["runtime"]["contract_revision"] = 2
     with pytest.raises(
         ValueError,
-        match=r"non-precision contracts differ.*runtime\.required_webgpu_features",
+        match=r"non-precision contracts differ.*runtime\.contract_revision",
     ):
         _validate_compatible_models(reference, incompatible)
 

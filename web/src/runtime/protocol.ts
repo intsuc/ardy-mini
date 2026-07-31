@@ -10,7 +10,7 @@ import type { PortableRandomState } from "./random";
 import type { BrowserModelManifest } from "./manifest";
 import { normalizeModelBaseUrl } from "./model-assets";
 
-export const WORKER_PROTOCOL_VERSION = 5;
+export const WORKER_PROTOCOL_VERSION = 6;
 
 export const MAX_WORKER_REQUEST_ID_LENGTH = 256;
 export const MAX_WORKER_PROMPT_LENGTH = 4_096;
@@ -101,6 +101,10 @@ export interface GetStatusCommand extends RequestMessage {
   type: "getStatus";
 }
 
+export interface GetWebGpuCapabilitiesCommand extends RequestMessage {
+  type: "getWebGpuCapabilities";
+}
+
 export type WorkerCommand =
   | LoadModelCommand
   | GenerateCommand
@@ -108,7 +112,8 @@ export type WorkerCommand =
   | RestoreContinuationCommand
   | CancelCommand
   | DisposeCommand
-  | GetStatusCommand;
+  | GetStatusCommand
+  | GetWebGpuCapabilitiesCommand;
 
 export interface WorkerReadyEvent {
   type: "workerReady";
@@ -193,6 +198,11 @@ export interface RuntimeStatusEvent extends RequestMessage {
       };
 }
 
+export interface WebGpuCapabilitiesEvent extends RequestMessage {
+  type: "webGpuCapabilities";
+  shaderF16: boolean;
+}
+
 export interface WorkerErrorEvent extends RequestMessage {
   type: "error";
   error: {
@@ -214,6 +224,7 @@ export type WorkerEvent =
   | CancelledEvent
   | DisposedEvent
   | RuntimeStatusEvent
+  | WebGpuCapabilitiesEvent
   | WorkerErrorEvent;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -589,6 +600,8 @@ export function parseWorkerCommand(value: unknown): WorkerCommand {
       return { type: "dispose", requestId: id };
     case "getStatus":
       return { type: "getStatus", requestId: id };
+    case "getWebGpuCapabilities":
+      return { type: "getWebGpuCapabilities", requestId: id };
     default:
       throw new TypeError(`Unknown worker command type ${String(value.type)}`);
   }

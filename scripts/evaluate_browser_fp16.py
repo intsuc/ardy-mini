@@ -937,9 +937,12 @@ def _validate_common_manifest(
         raise ValueError(
             f"manifest.runtime.contract_revision must be {_RUNTIME_CONTRACT_REVISION}."
         )
-    if runtime.get("required_webgpu_features") != _REQUIRED_WEBGPU_FEATURES:
+    if runtime.get("required_webgpu_features") not in (
+        [],
+        _REQUIRED_WEBGPU_FEATURES,
+    ):
         raise ValueError(
-            "manifest.runtime.required_webgpu_features must be ['shader-f16']."
+            "manifest.runtime.required_webgpu_features must be [] or ['shader-f16']."
         )
     if runtime.get("text_only") is not True:
         raise ValueError("manifest.runtime.text_only must be true.")
@@ -1025,6 +1028,8 @@ def _validate_fp32_precision(
         raise ValueError("Reference precision.public_io_dtype must be 'float32'.")
     if precision.get("required_webgpu_features") != []:
         raise ValueError("Reference precision.required_webgpu_features must be empty.")
+    if manifest["runtime"].get("required_webgpu_features") != []:
+        raise ValueError("Reference runtime.required_webgpu_features must be empty.")
     toolchain = _object(precision.get("toolchain"), "reference.precision.toolchain")
     for package in ("torch", "onnx", "onnxruntime"):
         if not isinstance(toolchain.get(package), str) or not toolchain[package]:
@@ -1084,6 +1089,13 @@ def _validate_mixed_precision(
     if precision.get("required_webgpu_features") != _REQUIRED_WEBGPU_FEATURES:
         raise ValueError(
             "Candidate precision.required_webgpu_features must be ['shader-f16']."
+        )
+    if (
+        manifest["runtime"].get("required_webgpu_features")
+        != _REQUIRED_WEBGPU_FEATURES
+    ):
+        raise ValueError(
+            "Candidate runtime.required_webgpu_features must be ['shader-f16']."
         )
     toolchain = _object(precision.get("toolchain"), "candidate.precision.toolchain")
     for package in ("torch", "onnx", "onnxruntime"):
@@ -1252,6 +1264,9 @@ def _without_precision_metadata(manifest: dict[str, Any]) -> dict[str, Any]:
     contract = copy.deepcopy(manifest)
     for key in ("files", "precision", "verification"):
         contract.pop(key, None)
+    runtime = contract.get("runtime")
+    if isinstance(runtime, dict):
+        runtime.pop("required_webgpu_features", None)
     return contract
 
 

@@ -10,6 +10,7 @@ import {
 } from "./control-helpers";
 import {
   createMockModelFiles,
+  developmentModelPath,
   installMockModelWorker,
   missingDevelopmentModelRoute,
   routeMockModelFiles,
@@ -21,6 +22,16 @@ test.beforeEach(async ({ page }) => {
     await route.fulfill({ status: 404, body: "Not found" });
   });
 });
+
+function formatModelBytes(bytes: number): string {
+  const units = ["B", "KiB", "MiB", "GiB"];
+  const exponent = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    units.length - 1,
+  );
+  const value = bytes / 1024 ** exponent;
+  return `${value >= 10 || exponent === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[exponent]}`;
+}
 
 interface CameraMovementProbeState {
   initialPosition: [number, number, number] | null;
@@ -433,6 +444,78 @@ test("blocks model loading with a non-dismissible dialog when WebGPU is unavaila
   await expect(dialog.getByRole("button")).toHaveCount(0);
 });
 
+test("uses the worker's FP32 capability result even when main-thread preflight reports shader-f16", async ({
+  page,
+}) => {
+  const fp16ModelFiles = createMockModelFiles({ variant: "fp16" });
+  const fp32ModelFiles = createMockModelFiles({ variant: "fp32" });
+  expect(fp32ModelFiles.transportSizeBytes).toBeGreaterThan(
+    fp16ModelFiles.transportSizeBytes,
+  );
+
+  const modelRequests: string[] = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path.includes("/models/ardy-minilm-core40-browser-v1/")) {
+      modelRequests.push(path);
+    }
+  });
+  await page.unroute(missingDevelopmentModelRoute);
+  await routeMockModelFiles(page, fp32ModelFiles);
+  await installMockModelWorker(page, fp32ModelFiles.manifest);
+
+  await page.goto("/");
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          globalThis as typeof globalThis & {
+            __ardyE2eMainPreflightShaderF16?: boolean;
+          }
+        ).__ardyE2eMainPreflightShaderF16,
+    ),
+  ).toBe(true);
+
+  const startupDialog = page.getByRole("alertdialog", {
+    name: "Download model files?",
+  });
+  await expect(startupDialog).toBeVisible();
+  await expect(
+    page.getByRole("alertdialog", {
+      name: "WebGPU is required",
+    }),
+  ).toHaveCount(0);
+  await expect(startupDialog).toContainText(
+    `ARDY Mini needs a ${formatModelBytes(fp32ModelFiles.transportSizeBytes)} model download.`,
+  );
+  await expect(startupDialog).not.toContainText(
+    /(?:FP16|FP32|shader-f16|precision)/i,
+  );
+  expect(modelRequests).toContain(
+    `${developmentModelPath("fp32")}model.json.gz`,
+  );
+  expect(
+    modelRequests.some((path) =>
+      path.startsWith(developmentModelPath("fp16")),
+    ),
+  ).toBe(false);
+
+  await page.locator("#confirm-model-download").click();
+  await expect(page.locator("main.workspace")).toHaveAttribute(
+    "data-ready",
+    "true",
+  );
+  expect(
+    modelRequests.filter((path) =>
+      path.startsWith(developmentModelPath("fp32")) &&
+      !path.endsWith("model.json.gz"),
+    ),
+  ).toHaveLength(5);
+  expect(await page.locator("body").innerText()).not.toMatch(
+    /(?:FP16|FP32|shader-f16|precision)/i,
+  );
+});
+
 test("gates startup through model download and manages the browser cache", async ({
   page,
 }) => {
@@ -456,6 +539,12 @@ test("gates startup through model download and manages the browser cache", async
       name: "Download model files?",
     }),
   ).toBeVisible();
+  await expect(startupDialog).toContainText(
+    `ARDY Mini needs a ${formatModelBytes(modelFiles.transportSizeBytes)} model download.`,
+  );
+  expect(modelRequests).toContain(
+    `${developmentModelPath("fp16")}model.json.gz`,
+  );
   await expect(
     startupDialog.getByRole("button", {
       name: "Not now",

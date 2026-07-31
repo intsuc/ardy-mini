@@ -24,6 +24,14 @@ export async function allowRequiredWebGpuFeatureForPreflight(
         const adapter = await requestAdapter(...options)
         if (!adapter || !preflightPending) return adapter
         preflightPending = false
+        Object.defineProperty(
+          globalThis,
+          "__ardyE2eMainPreflightShaderF16",
+          {
+            configurable: true,
+            value: true,
+          }
+        )
 
         const features = new Proxy(adapter.features, {
           get(target, property) {

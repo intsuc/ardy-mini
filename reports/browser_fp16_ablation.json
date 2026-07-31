@@ -36,7 +36,7 @@
       "text_encoder"
     ],
     "non_precision_contract_equal": true,
-    "non_precision_contract_sha256": "7d74f21dffa4449b8a0ab4d9c822559313f06cb575c4cca09d6c087143c11c08",
+    "non_precision_contract_sha256": "fa5cb308c36543d9f335c26dbd101593260efeca0d1b5553774d77b513efd84c",
     "reference_graph_sha256": {
       "decoder": "1fcd909b2997002edca559ba016ab3accc5b2d5e5ba0c7e85a6ab54d2100a80f",
       "denoiser": "7fd49903ec65c0831e2fa692081fd64d8818c6d1f62320d2f2b5e71467a3ca64",
@@ -49,11 +49,11 @@
     "tokenizer_payloads_equal": true
   },
   "cpu_timing": {
-    "candidate_mean_seconds_per_case": 1.3178601198693893,
-    "candidate_total_seconds": 253.02914301492274,
+    "candidate_mean_seconds_per_case": 1.3008700043089145,
+    "candidate_total_seconds": 249.76704082731158,
     "note": "CPU FP16 timing is diagnostic only; the deployment backend is WebGPU. Each case includes every consecutive window.",
-    "reference_mean_seconds_per_case": 1.2888454483181704,
-    "reference_total_seconds": 247.4583260770887,
+    "reference_mean_seconds_per_case": 1.2313923729343514,
+    "reference_total_seconds": 236.42733560339548,
     "windows_per_case": 5
   },
   "format": "ardy-browser-fp16-aggregate",
@@ -82,6 +82,26 @@
       20260729
     ],
     "window_count": 5
+  },
+  "models": {
+    "candidate": {
+      "id": "ardy-minilm-core40-browser-v1",
+      "manifest_sha256": "07a0cb3984cc324e9318549d03494d3fa7193727367ae45b2087ca8a978b6d0b",
+      "raw_size_bytes": 740128936,
+      "revision": "82059e1b3e8c861d1f11128184c58ce17a62795e0e24289a295c0a70cd78befe",
+      "transport_size_bytes": 684221164
+    },
+    "raw_saved_bytes": 35450964,
+    "raw_saved_fraction": 0.04570897724399514,
+    "reference": {
+      "id": "ardy-minilm-core40-browser-v1",
+      "manifest_sha256": "982095622886845ed985f353ab5e3806db5da74f3aa0b85acb0415e81e48e5a1",
+      "raw_size_bytes": 775579900,
+      "revision": "82059e1b3e8c861d1f11128184c58ce17a62795e0e24289a295c0a70cd78befe",
+      "transport_size_bytes": 717533539
+    },
+    "transport_saved_bytes": 33312375,
+    "transport_saved_fraction": 0.04642622705333921
   },
   "motion_fidelity": {
     "contact_agreement": {
@@ -464,26 +484,6 @@
       "window_index": 4
     }
   ],
-  "models": {
-    "candidate": {
-      "id": "ardy-minilm-core40-browser-v1",
-      "manifest_sha256": "1a6434946d8db8a6e18d9be53995e376e4ee1b4b2a650e90ab79f3c30ad48bf1",
-      "raw_size_bytes": 740125267,
-      "revision": "82059e1b3e8c861d1f11128184c58ce17a62795e0e24289a295c0a70cd78befe",
-      "transport_size_bytes": 684220414
-    },
-    "raw_saved_bytes": 35453521,
-    "raw_saved_fraction": 0.04571233967270394,
-    "reference": {
-      "id": "ardy-minilm-core40-browser-v1",
-      "manifest_sha256": "1c073d6ddfc5f5258c35eb0987bc674c9fa62c10bf6bf0e2ecb00f638defc7d0",
-      "raw_size_bytes": 775578788,
-      "revision": "82059e1b3e8c861d1f11128184c58ce17a62795e0e24289a295c0a70cd78befe",
-      "transport_size_bytes": 717533184
-    },
-    "transport_saved_bytes": 33312770,
-    "transport_saved_fraction": 0.04642680051993242
-  },
   "prompt_manifest": {
     "filename": "prompts-core40-timeline.jsonl",
     "provenance_sidecar": {

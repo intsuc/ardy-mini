@@ -16,7 +16,6 @@ import {
 } from "./model-assets.test-fixture";
 import { sha256Hex } from "./hash";
 import {
-  MODEL_CACHE_PREFIX,
   clearModelCache,
   fetchModelManifest,
   formatModelBytes,
@@ -153,6 +152,106 @@ describe("individual browser model files", () => {
     expect(formatModelBytes(1024 ** 3)).toBe("1.0 GiB");
   });
 
+  it("keeps FP16 and FP32 model-family caches isolated", async () => {
+    const fp16BaseUrl = `${baseUrl}fp16/`;
+    const fp32BaseUrl = `${baseUrl}fp32/`;
+    const fp16Fixture = await createModelTestFixture("fp16");
+    const fp32Fixture = await createModelTestFixture("fp32");
+    const fixtures = new Map([
+      [fp16BaseUrl, fp16Fixture],
+      [fp32BaseUrl, fp32Fixture],
+    ]);
+    const requested: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        requested.push(url);
+        const entry = [...fixtures].find(([variantBaseUrl]) =>
+          url.startsWith(variantBaseUrl),
+        );
+        if (entry === undefined) {
+          return new Response(null, { status: 404 });
+        }
+        const [variantBaseUrl, fixture] = entry;
+        const path = decodeURIComponent(url.slice(variantBaseUrl.length));
+        if (path === "model.json.gz") {
+          return responseFor(fixture.manifestTransportBytes);
+        }
+        const transport = fixture.transports.get(path);
+        return transport === undefined
+          ? new Response(null, { status: 404 })
+          : responseFor(transport);
+      }),
+    );
+
+    const fp16Assets = await loadModelAssets(fp16BaseUrl);
+    await Promise.all(
+      Object.keys(fp16Assets.manifest.files).map((path) =>
+        fp16Assets.read(path),
+      ),
+    );
+    await markModelCacheComplete(fp16Assets);
+    const fp32Source = await fetchModelManifest(fp32BaseUrl);
+
+    expect(fp32Source.manifest.model).toEqual(
+      fp16Assets.source.manifest.model,
+    );
+    expect(fp16Assets.source.manifest.precision.format).toBe(
+      "mixed-fp16",
+    );
+    expect(fp32Source.manifest.precision.format).toBe("fp32");
+    expect(fp32Source.cacheName).not.toBe(fp16Assets.source.cacheName);
+    expect(await globalThis.caches.has(fp16Assets.source.cacheName)).toBe(
+      true,
+    );
+    expect(await globalThis.caches.has(fp32Source.cacheName)).toBe(false);
+    expect(await inspectModelCache(fp32Source)).toMatchObject({
+      cached: false,
+      cachedFileCount: 0,
+      cachedTransportSizeBytes: 0,
+    });
+
+    requested.length = 0;
+    const fp32Assets = await loadModelAssets(fp32BaseUrl);
+    expect(
+      requested.filter((url) => !url.endsWith("model.json.gz")),
+    ).toHaveLength(Object.keys(fp32Fixture.manifest.files).length);
+    expect(requested.every((url) => url.startsWith(fp32BaseUrl))).toBe(
+      true,
+    );
+    await Promise.all(
+      Object.keys(fp32Assets.manifest.files).map((path) =>
+        fp32Assets.read(path),
+      ),
+    );
+    await markModelCacheComplete(fp32Assets);
+    expect(await globalThis.caches.has(fp16Assets.source.cacheName)).toBe(
+      true,
+    );
+    expect(await globalThis.caches.has(fp32Assets.source.cacheName)).toBe(
+      true,
+    );
+    await expect(
+      Promise.all([
+        inspectModelCache(fp16Assets.source),
+        inspectModelCache(fp32Assets.source),
+      ]),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        cached: true,
+        complete: true,
+        cachedFileCount: Object.keys(fp16Fixture.manifest.files).length,
+      }),
+      expect.objectContaining({
+        cached: true,
+        complete: true,
+        cachedFileCount: Object.keys(fp32Fixture.manifest.files).length,
+      }),
+    ]);
+  });
+
   it("downloads gzip files cumulatively, verifies once on read, and completes the cache explicitly", async () => {
     const fixture = await createModelTestFixture();
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -209,7 +308,12 @@ describe("individual browser model files", () => {
         .filter((path) => path !== "denoiser.onnx")
         .map((path) => assets.read(path)),
     );
-    const staleCacheName = `${MODEL_CACHE_PREFIX}stale-partial`;
+    const staleCacheName =
+      assets.source.cacheName.slice(
+        0,
+        assets.source.cacheName.length -
+          assets.source.manifestSha256.length,
+      ) + "0".repeat(64);
     await globalThis.caches.open(staleCacheName);
     await markModelCacheComplete(assets);
     expect(await inspectModelCache(assets.source)).toMatchObject({

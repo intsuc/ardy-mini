@@ -15,7 +15,10 @@ import {
   markModelCacheComplete,
 } from "./runtime/model-assets";
 import { createRuntimeProgressCoalescer } from "./runtime/progress-coalescer";
-import { assertWebGpuAvailable } from "./runtime/sessions";
+import {
+  assertWebGpuAvailable,
+  getWebGpuCapabilities,
+} from "./runtime/sessions";
 import {
   parseWorkerCommand,
   serializeWorkerError,
@@ -510,6 +513,21 @@ function status(command: Extract<WorkerCommand, { type: "getStatus" }>): void {
   }
 }
 
+async function webGpuCapabilities(
+  command: Extract<WorkerCommand, { type: "getWebGpuCapabilities" }>,
+): Promise<void> {
+  try {
+    const capabilities = await getWebGpuCapabilities();
+    post({
+      type: "webGpuCapabilities",
+      requestId: command.requestId,
+      shaderF16: capabilities.shaderF16,
+    });
+  } catch (error) {
+    post(serializeWorkerError(command.requestId, error));
+  }
+}
+
 function runSynchronous(requestId: string, task: () => void): void {
   try {
     task();
@@ -551,6 +569,9 @@ port.addEventListener("message", (message) => {
       break;
     case "getStatus":
       status(command);
+      break;
+    case "getWebGpuCapabilities":
+      void webGpuCapabilities(command);
       break;
   }
 });

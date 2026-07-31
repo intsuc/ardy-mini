@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 # SPDX-License-Identifier: Apache-2.0
-"""Export the mixed-FP16 MiniLM Core40 files used by the browser app."""
+"""Export the FP16/FP32 MiniLM Core40 model family used by the browser app."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Export the MiniLM condition encoder, text-conditioned ARDY "
-            "denoiser, and structured motion decoder as a mixed-FP16 model "
-            "directory for ONNX Runtime Web."
+            "denoiser, and structured motion decoder as automatically selected "
+            "FP16 and FP32 model directories for ONNX Runtime Web."
         )
     )
     parser.add_argument(
@@ -35,17 +35,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("artifacts/browser/ardy-minilm-core40-browser-v1"),
         help=(
-            "Destination for model.json.gz and individually compressed assets "
-            "(kept under ignored artifacts/ by default)."
-        ),
-    )
-    parser.add_argument(
-        "--fp32-reference-output-directory",
-        type=Path,
-        default=None,
-        help=(
-            "Optional destination for matching original-FP32 reference files "
-            "used by scripts/evaluate_browser_fp16.py."
+            "Destination model-family directory. The exporter writes complete "
+            "fp16/ and fp32/ subdirectories beneath it."
         ),
     )
     parser.add_argument(
@@ -87,9 +78,6 @@ def main() -> None:
     output_directory = export_browser_model_files(
         BrowserExportConfig(
             output_directory=args.output_directory,
-            fp32_reference_output_directory=(
-                args.fp32_reference_output_directory
-            ),
             minilm_artifact=args.minilm_artifact,
             checkpoints_dir=args.checkpoints_dir,
             model=args.model,
@@ -99,12 +87,9 @@ def main() -> None:
             verify=not args.skip_verify,
         )
     )
-    print(f"Browser model files exported: {output_directory}")
-    if args.fp32_reference_output_directory is not None:
-        print(
-            "FP32 reference model files exported: "
-            f"{args.fp32_reference_output_directory}"
-        )
+    print(f"Browser model family exported: {output_directory}")
+    print(f"Mixed-FP16 model files: {output_directory / 'fp16'}")
+    print(f"FP32 model files: {output_directory / 'fp32'}")
 
 
 if __name__ == "__main__":

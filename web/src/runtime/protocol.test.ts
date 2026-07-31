@@ -10,7 +10,7 @@ import {
   WORKER_PROTOCOL_VERSION,
 } from "./protocol";
 
-describe("worker protocol v5", () => {
+describe("worker protocol v6", () => {
   it("normalizes a model-files base URL and rejects unknown inputs", () => {
     expect(
       parseWorkerCommand({
@@ -47,7 +47,7 @@ describe("worker protocol v5", () => {
   });
 
   it("parses a replace-compatible generation command", () => {
-    expect(WORKER_PROTOCOL_VERSION).toBe(5);
+    expect(WORKER_PROTOCOL_VERSION).toBe(6);
     const command = parseWorkerCommand({
       type: "generate",
       requestId: "legacy",
@@ -65,6 +65,18 @@ describe("worker protocol v5", () => {
       cfgWeight: 2,
     });
     expect(command).not.toHaveProperty("mode");
+  });
+
+  it("parses a WebGPU capability request before model loading", () => {
+    expect(
+      parseWorkerCommand({
+        type: "getWebGpuCapabilities",
+        requestId: "capabilities",
+      }),
+    ).toEqual({
+      type: "getWebGpuCapabilities",
+      requestId: "capabilities",
+    });
   });
 
   it("normalizes a branch command and clones mutable inputs", () => {

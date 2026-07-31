@@ -6,7 +6,7 @@ import type { ManifestFile } from "./manifest";
 
 export const RESUMABLE_TRANSPORT_BLOCK_BYTES = 8 * 1024 * 1024;
 
-const PARTIAL_MARKER_SCHEMA_VERSION = 1;
+const PARTIAL_MARKER_SCHEMA_VERSION = 2;
 const PARTIAL_KIND_QUERY = "ardy-model-partial";
 const PARTIAL_OFFSET_QUERY = "ardy-model-offset";
 const PARTIAL_SHA256_QUERY = "ardy-model-sha256";
@@ -27,6 +27,7 @@ interface PartialTransportMarker {
   transport_size_bytes: number;
   transport_sha256: string;
   block_size_bytes: typeof RESUMABLE_TRANSPORT_BLOCK_BYTES;
+  transport_sha256_verified: boolean;
   blocks: PartialTransportBlock[];
 }
 
@@ -247,6 +248,7 @@ function validateMarker(
       description.transport.size_bytes ||
     candidate.transport_sha256 !== description.transport.sha256 ||
     candidate.block_size_bytes !== RESUMABLE_TRANSPORT_BLOCK_BYTES ||
+    typeof candidate.transport_sha256_verified !== "boolean" ||
     !Array.isArray(candidate.blocks)
   ) {
     return null;
@@ -294,6 +296,12 @@ function validateMarker(
     });
     completed += sizeBytes;
   }
+  if (
+    candidate.transport_sha256_verified &&
+    completed !== description.transport.size_bytes
+  ) {
+    return null;
+  }
 
   return {
     schema_version: PARTIAL_MARKER_SCHEMA_VERSION,
@@ -301,6 +309,7 @@ function validateMarker(
     transport_size_bytes: description.transport.size_bytes,
     transport_sha256: description.transport.sha256,
     block_size_bytes: RESUMABLE_TRANSPORT_BLOCK_BYTES,
+    transport_sha256_verified: candidate.transport_sha256_verified,
     blocks,
   };
 }
@@ -426,6 +435,35 @@ export async function inspectResumableTransport(
   );
 }
 
+export interface ResumableTransportCacheStatus {
+  sizeBytes: number;
+  complete: boolean;
+}
+
+export async function inspectResumableTransportCache(
+  cache: Cache,
+  transportUrlValue: string,
+  description: ManifestFile,
+): Promise<ResumableTransportCacheStatus> {
+  const transportUrl = canonicalTransportUrl(transportUrlValue);
+  const marker = await readMarker(cache, transportUrl, description);
+  if (
+    marker === null ||
+    !(await referencedBlocksExist(cache, transportUrl, marker))
+  ) {
+    await clearResumableTransport(cache, transportUrl);
+    return { sizeBytes: 0, complete: false };
+  }
+  await removeOrphanBlocks(cache, transportUrl, marker);
+  const sizeBytes = markerCompleted(marker);
+  return {
+    sizeBytes,
+    complete:
+      marker.transport_sha256_verified &&
+      sizeBytes === description.transport.size_bytes,
+  };
+}
+
 async function restorePartialTransport(
   cache: Cache,
   transportUrl: string,
@@ -470,6 +508,40 @@ async function restorePartialTransport(
   }
 }
 
+export async function readCachedResumableTransport(options: {
+  cache: Cache;
+  transportUrl: string;
+  description: ManifestFile;
+  signal?: AbortSignal;
+  label?: string;
+}): Promise<Uint8Array | null> {
+  const transportUrl = canonicalTransportUrl(options.transportUrl);
+  const expectedBytes = options.description.transport.size_bytes;
+  const output = new Uint8Array(expectedBytes);
+  const restored = await restorePartialTransport(
+    options.cache,
+    transportUrl,
+    options.description,
+    output,
+    options.signal,
+  );
+  if (restored?.completed !== expectedBytes) return null;
+  if (!restored.marker.transport_sha256_verified) return null;
+  try {
+    await verifyTransport(
+      output,
+      options.description,
+      options.label ?? `${transportUrl} gzip transport`,
+    );
+    throwIfAborted(options.signal);
+    return output;
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    await clearResumableTransport(options.cache, transportUrl);
+    return null;
+  }
+}
+
 function emptyMarker(
   transportUrl: string,
   description: ManifestFile,
@@ -480,6 +552,7 @@ function emptyMarker(
     transport_size_bytes: description.transport.size_bytes,
     transport_sha256: description.transport.sha256,
     block_size_bytes: RESUMABLE_TRANSPORT_BLOCK_BYTES,
+    transport_sha256_verified: false,
     blocks: [],
   };
 }
@@ -520,7 +593,11 @@ async function persistBlock(
       : marker.blocks.map((candidate, index) =>
           index === existingIndex ? block : candidate,
         );
-  const nextMarker = { ...marker, blocks };
+  const nextMarker = {
+    ...marker,
+    transport_sha256_verified: false,
+    blocks,
+  };
   const nextBlockUrl = partialBlockUrl(transportUrl, block);
   await cache.put(
     nextBlockUrl,
@@ -720,15 +797,35 @@ async function promoteTransport(
   cache: Cache,
   transportUrl: string,
   bytes: Uint8Array,
-): Promise<void> {
-  // The complete bytes are verified and held in memory. Removing partial
-  // blocks first prevents the largest model file from temporarily consuming
-  // twice its size in browser storage during promotion.
+): Promise<boolean> {
+  // Chromium may reject very large Cache Storage responses even though the
+  // same total fits when represented by the verified resumable blocks. Keep
+  // any transport larger than one block in that bounded representation.
+  if (bytes.byteLength > RESUMABLE_TRANSPORT_BLOCK_BYTES) return false;
+  try {
+    await cache.put(
+      transportUrl,
+      cachedResponse(bytes, "application/gzip"),
+    );
+  } catch {
+    // The complete block set remains a valid persistent representation.
+    return false;
+  }
   await clearResumableTransport(cache, transportUrl);
-  await cache.put(
-    transportUrl,
-    cachedResponse(bytes, "application/gzip"),
-  );
+  return true;
+}
+
+async function finalizeTransport(
+  cache: Cache,
+  transportUrl: string,
+  marker: PartialTransportMarker,
+  bytes: Uint8Array,
+): Promise<void> {
+  if (await promoteTransport(cache, transportUrl, bytes)) return;
+  await writeMarker(cache, transportUrl, {
+    ...marker,
+    transport_sha256_verified: true,
+  });
 }
 
 async function fetchCleanFullTransport(
@@ -745,8 +842,8 @@ async function fetchCleanFullTransport(
       `${label} clean download failed with HTTP ${response.status}`,
     );
   }
-  const marker = emptyMarker(transportUrl, options.description);
-  await readNetworkResponse({
+  let marker = emptyMarker(transportUrl, options.description);
+  marker = await readNetworkResponse({
     response,
     output,
     start: 0,
@@ -765,7 +862,12 @@ async function fetchCleanFullTransport(
     throw error;
   }
   throwIfAborted(options.signal);
-  await promoteTransport(options.cache, transportUrl, output);
+  await finalizeTransport(
+    options.cache,
+    transportUrl,
+    marker,
+    output,
+  );
   throwIfAborted(options.signal);
   return output;
 }
@@ -774,7 +876,7 @@ async function fetchCleanFullTransport(
  * Restore a verified prefix from Cache Storage and complete the immutable gzip
  * transport with one HTTP range request. The caller owns HTTP request headers;
  * this function owns response validation, partial persistence, integrity, and
- * promotion to the canonical cache key.
+ * finalization into a verified persistent representation.
  */
 export async function loadResumableTransport(
   options: LoadResumableTransportOptions,
@@ -797,9 +899,9 @@ export async function loadResumableTransport(
     reportedBytes = bounded;
     options.onProgress?.(bounded);
   };
-  // The exact terminal value means the verified canonical response is already
-  // in Cache Storage. Keeping streamed progress one byte below that value also
-  // leaves cancellation available during a clean integrity retry.
+  // The exact terminal value means a verified persistent representation is
+  // already in Cache Storage. Keeping streamed progress one byte below that
+  // value also leaves cancellation available during a clean integrity retry.
   const reportStreamingProgress = (completed: number): void => {
     reportProgress(Math.min(completed, expectedBytes - 1));
   };
@@ -840,7 +942,12 @@ export async function loadResumableTransport(
       return cleanFullTransport();
     }
     throwIfAborted(options.signal);
-    await promoteTransport(options.cache, transportUrl, output);
+    await finalizeTransport(
+      options.cache,
+      transportUrl,
+      marker,
+      output,
+    );
     throwIfAborted(options.signal);
     reportProgress(expectedBytes);
     return output;
@@ -888,8 +995,6 @@ export async function loadResumableTransport(
     onProgress: reportStreamingProgress,
     label,
   });
-  void marker;
-
   try {
     await verifyTransport(output, options.description, label);
   } catch (error) {
@@ -900,7 +1005,12 @@ export async function loadResumableTransport(
     throw error;
   }
   throwIfAborted(options.signal);
-  await promoteTransport(options.cache, transportUrl, output);
+  await finalizeTransport(
+    options.cache,
+    transportUrl,
+    marker,
+    output,
+  );
   throwIfAborted(options.signal);
   reportProgress(expectedBytes);
   return output;

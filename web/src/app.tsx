@@ -587,9 +587,9 @@ function ModelCacheControl() {
         <AlertDialogHeader>
           <AlertDialogTitle>Clear cached model files?</AlertDialogTitle>
           <AlertDialogDescription>
-            This removes {formatModelBytes(state.cachedBytes)} from this
-            browser. ARDY Mini will keep working in this tab, but the
-            files must be downloaded again on your next visit.
+            This removes ARDY Mini model files stored by this browser.
+            ARDY Mini will keep working in this tab, but the files must
+            be downloaded again on your next visit.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

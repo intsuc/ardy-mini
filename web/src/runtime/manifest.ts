@@ -5,6 +5,7 @@ export const MODEL_FILES_FORMAT = "ardy-browser-model-files";
 export const MODEL_FILES_SCHEMA_VERSION = 1;
 export const MODEL_MANIFEST_FILE = "model.json.gz";
 export const MIXED_PRECISION_FORMAT = "mixed-fp16";
+export const FP32_PRECISION_FORMAT = "fp32";
 export const MIXED_PRECISION_POLICY_VERSION = 3;
 export const MIXED_PRECISION_PUBLIC_IO_DTYPE = "float32";
 export const REQUIRED_WEBGPU_FEATURE = "shader-f16";
@@ -205,9 +206,9 @@ export interface BrowserStats {
 
 export type BrowserMotionLayout = Record<string, [number, number]>;
 
-export type BrowserRequiredWebGpuFeatures = [
-  typeof REQUIRED_WEBGPU_FEATURE,
-];
+export type BrowserRequiredWebGpuFeatures =
+  | []
+  | [typeof REQUIRED_WEBGPU_FEATURE];
 
 export interface BrowserPrecisionToolchain {
   torch: string;
@@ -258,6 +259,25 @@ export interface BrowserMixedPrecision {
   graphs: BrowserPrecisionGraphSummaries;
 }
 
+export interface BrowserFp32GraphPrecisionSummary {
+  model: string;
+  sha256: Sha256Hex;
+  size_bytes: number;
+}
+
+export interface BrowserFp32Precision {
+  format: typeof FP32_PRECISION_FORMAT;
+  public_io_dtype: typeof MIXED_PRECISION_PUBLIC_IO_DTYPE;
+  required_webgpu_features: [];
+  onnx_bytes: number;
+  toolchain: BrowserPrecisionToolchain;
+  graphs: Record<keyof BrowserGraphSpecs, BrowserFp32GraphPrecisionSummary>;
+}
+
+export type BrowserModelPrecision =
+  | BrowserMixedPrecision
+  | BrowserFp32Precision;
+
 export interface BrowserRuntimeCapabilities {
   onnx_opset?: number;
   contract_revision: 3;
@@ -288,7 +308,7 @@ export interface BrowserModelManifest {
   files: Record<string, ManifestFile>;
   tokenizer: BrowserTokenizerSpec;
   graphs: BrowserGraphSpecs;
-  precision: BrowserMixedPrecision;
+  precision: BrowserModelPrecision;
   dimensions: BrowserDimensions;
   generation: BrowserGenerationConfig;
   diffusion: BrowserDiffusionSchedule;
@@ -391,6 +411,7 @@ function validateFraction(
 function validateRequiredWebGpuFeatures(
   value: unknown,
   path: string,
+  expected: BrowserRequiredWebGpuFeatures,
 ): BrowserRequiredWebGpuFeatures {
   if (!Array.isArray(value)) {
     fail(`${path} must be an array`);
@@ -406,8 +427,11 @@ function validateRequiredWebGpuFeatures(
       fail(`${path} contains unknown WebGPU feature ${JSON.stringify(feature)}`);
     }
   }
-  if (!seen.has(REQUIRED_WEBGPU_FEATURE)) {
-    fail(`${path} must contain ${JSON.stringify(REQUIRED_WEBGPU_FEATURE)}`);
+  if (
+    value.length !== expected.length ||
+    expected.some((feature, index) => value[index] !== feature)
+  ) {
+    fail(`${path} must equal ${JSON.stringify(expected)}`);
   }
   return value as BrowserRequiredWebGpuFeatures;
 }
@@ -727,6 +751,7 @@ function validateMixedPrecision(
   validateRequiredWebGpuFeatures(
     precision.required_webgpu_features,
     "precision.required_webgpu_features",
+    [REQUIRED_WEBGPU_FEATURE],
   );
 
   const toolchain = objectAt(precision.toolchain, "precision.toolchain");
@@ -927,6 +952,102 @@ function validateMixedPrecision(
   }
 
   return precision as unknown as BrowserMixedPrecision;
+}
+
+function validateFp32Precision(
+  value: unknown,
+  graphsValue: unknown,
+  filesValue: unknown,
+): BrowserFp32Precision {
+  const precision = objectAt(value, "precision");
+  if (precision.format !== FP32_PRECISION_FORMAT) {
+    fail(`precision.format must be ${JSON.stringify(FP32_PRECISION_FORMAT)}`);
+  }
+  if (precision.public_io_dtype !== MIXED_PRECISION_PUBLIC_IO_DTYPE) {
+    fail(
+      `precision.public_io_dtype must be ${JSON.stringify(MIXED_PRECISION_PUBLIC_IO_DTYPE)}`,
+    );
+  }
+  validateRequiredWebGpuFeatures(
+    precision.required_webgpu_features,
+    "precision.required_webgpu_features",
+    [],
+  );
+
+  const toolchain = objectAt(precision.toolchain, "precision.toolchain");
+  for (const name of ["torch", "onnx", "onnxruntime"] as const) {
+    stringAt(toolchain[name], `precision.toolchain.${name}`);
+  }
+
+  const declaredTotal = positiveIntegerAt(
+    precision.onnx_bytes,
+    "precision.onnx_bytes",
+  );
+  const summaries = objectAt(precision.graphs, "precision.graphs");
+  const actualGraphNames = Object.keys(summaries);
+  if (
+    actualGraphNames.length !== EXPECTED_GRAPH_NAMES.length ||
+    EXPECTED_GRAPH_NAMES.some((name) => !Object.hasOwn(summaries, name))
+  ) {
+    fail(`precision.graphs must contain exactly ${EXPECTED_GRAPH_NAMES.join(", ")}`);
+  }
+
+  const graphs = objectAt(graphsValue, "graphs");
+  const files = objectAt(filesValue, "files");
+  let graphTotal = 0;
+  for (const graphName of EXPECTED_GRAPH_NAMES) {
+    const path = `precision.graphs.${graphName}`;
+    const summary = objectAt(summaries[graphName], path);
+    const modelPath = normalizeModelPath(
+      stringAt(summary.model, `${path}.model`),
+    );
+    const graph = objectAt(graphs[graphName], `graphs.${graphName}`);
+    const declaredGraphPath = normalizeModelPath(
+      stringAt(graph.model, `graphs.${graphName}.model`),
+    );
+    if (modelPath !== declaredGraphPath) {
+      fail(`${path}.model must match graphs.${graphName}.model`);
+    }
+    const file = objectAt(files[modelPath], `files.${modelPath}`);
+    const sizeBytes = positiveIntegerAt(summary.size_bytes, `${path}.size_bytes`);
+    if (
+      sizeBytes !==
+      nonNegativeIntegerAt(file.size_bytes, `files.${modelPath}.size_bytes`)
+    ) {
+      fail(`${path}.size_bytes must match files.${modelPath}.size_bytes`);
+    }
+    const sha256 = validateSha256(summary.sha256, `${path}.sha256`);
+    if (
+      sha256 !== validateSha256(file.sha256, `files.${modelPath}.sha256`)
+    ) {
+      fail(`${path}.sha256 must match files.${modelPath}.sha256`);
+    }
+    graphTotal += sizeBytes;
+    if (!Number.isSafeInteger(graphTotal)) {
+      fail("precision graph byte total must be a safe integer");
+    }
+  }
+  if (graphTotal !== declaredTotal) {
+    fail("precision.onnx_bytes must equal the precision graph total");
+  }
+  return precision as unknown as BrowserFp32Precision;
+}
+
+function validatePrecision(
+  value: unknown,
+  graphsValue: unknown,
+  filesValue: unknown,
+): BrowserModelPrecision {
+  const precision = objectAt(value, "precision");
+  if (precision.format === MIXED_PRECISION_FORMAT) {
+    return validateMixedPrecision(value, graphsValue, filesValue);
+  }
+  if (precision.format === FP32_PRECISION_FORMAT) {
+    return validateFp32Precision(value, graphsValue, filesValue);
+  }
+  fail(
+    `precision.format must be ${JSON.stringify(MIXED_PRECISION_FORMAT)} or ${JSON.stringify(FP32_PRECISION_FORMAT)}`,
+  );
 }
 
 function validateDimensions(value: unknown): BrowserDimensions {
@@ -1152,7 +1273,11 @@ export function validateModelManifest(value: unknown): BrowserModelManifest {
       fail(`files contains unreferenced asset ${JSON.stringify(file)}`);
     }
   }
-  validateMixedPrecision(manifest.precision, manifest.graphs, manifest.files);
+  const precision = validatePrecision(
+    manifest.precision,
+    manifest.graphs,
+    manifest.files,
+  );
 
   const dimensions = validateDimensions(manifest.dimensions);
   const generation = objectAt(manifest.generation, "generation");
@@ -1375,6 +1500,7 @@ export function validateModelManifest(value: unknown): BrowserModelManifest {
   validateRequiredWebGpuFeatures(
     runtime.required_webgpu_features,
     "runtime.required_webgpu_features",
+    precision.required_webgpu_features,
   );
   for (const key of [
     "detailed_motion_outputs",

@@ -13,12 +13,15 @@ import { sha256Hex } from "./hash";
 import type { ManifestFile } from "./manifest";
 import {
   inspectResumableTransport,
+  inspectResumableTransportCache,
   loadResumableTransport,
+  readCachedResumableTransport,
   RESUMABLE_TRANSPORT_BLOCK_BYTES,
 } from "./resumable-transport";
 
 class MemoryCache {
   readonly entries = new Map<string, Response>();
+  readonly putBodySizes: number[] = [];
   onPut?: (url: string) => void;
 
   async match(request: RequestInfo | URL): Promise<Response | undefined> {
@@ -27,6 +30,10 @@ class MemoryCache {
 
   async put(request: RequestInfo | URL, response: Response): Promise<void> {
     const url = requestUrl(request);
+    const declaredLength = response.headers.get("content-length");
+    if (declaredLength !== null) {
+      this.putBodySizes.push(Number(declaredLength));
+    }
     this.entries.set(url, response.clone());
     this.onPut?.(url);
   }
@@ -261,7 +268,7 @@ describe("resumable model transports", () => {
     ).toEqual(bytes);
   });
 
-  it("extends a retained short tail across fixed-size block boundaries", async () => {
+  it("retains a verified multi-block transport for offline reads", async () => {
     const { bytes, description, transportUrl } = await fixture(
       RESUMABLE_TRANSPORT_BLOCK_BYTES + 257,
     );
@@ -291,7 +298,46 @@ describe("resumable model transports", () => {
     });
 
     expect(loaded).toEqual(bytes);
-    expect(partialRequests(cache, transportUrl)).toEqual([]);
+    expect(await cache.match(transportUrl)).toBeUndefined();
+
+    const retainedRequests = partialRequests(cache, transportUrl);
+    expect(
+      retainedRequests.filter(
+        (url) =>
+          new URL(url).searchParams.get("ardy-model-partial") ===
+          "marker",
+      ),
+    ).toHaveLength(1);
+    expect(
+      retainedRequests.filter(
+        (url) =>
+          new URL(url).searchParams.get("ardy-model-partial") ===
+          "block",
+      ),
+    ).toHaveLength(2);
+    await expect(
+      inspectResumableTransportCache(
+        cache as unknown as Cache,
+        transportUrl,
+        description,
+      ),
+    ).resolves.toEqual({
+      sizeBytes: bytes.byteLength,
+      complete: true,
+    });
+    await expect(
+      readCachedResumableTransport({
+        cache: cache as unknown as Cache,
+        transportUrl,
+        description,
+      }),
+    ).resolves.toEqual(bytes);
+    expect(cache.putBodySizes.length).toBeGreaterThan(0);
+    expect(
+      cache.putBodySizes.every(
+        (sizeBytes) => sizeBytes <= RESUMABLE_TRANSPORT_BLOCK_BYTES,
+      ),
+    ).toBe(true);
   }, 20_000);
 
   it("falls back to the full 200 response when the server ignores Range", async () => {

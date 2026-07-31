@@ -10,8 +10,9 @@ import {
   validateModelManifest,
 } from "./manifest";
 import {
-  inspectResumableTransport,
+  inspectResumableTransportCache,
   loadResumableTransport,
+  readCachedResumableTransport,
 } from "./resumable-transport";
 
 export const MODEL_CACHE_PREFIX = "ardy-mini-model-files-v1-";
@@ -669,13 +670,14 @@ async function cachedInventory(
           sizeBytes: description.transport.size_bytes,
         };
       }
+      const resumable = await inspectResumableTransportCache(
+        cache,
+        transportUrl,
+        description,
+      );
       return {
-        complete: false,
-        sizeBytes: await inspectResumableTransport(
-          cache,
-          transportUrl,
-          description,
-        ),
+        complete: resumable.complete,
+        sizeBytes: resumable.sizeBytes,
       };
     }),
   );
@@ -754,17 +756,15 @@ export async function inspectModelCache(
         ...inventory,
       };
     }
-    for (const description of Object.values(source.manifest.files)) {
-      const response = await cache.match(
-        new URL(description.transport.path, source.baseUrl).href,
-      );
-      if (response === undefined) {
-        return {
-          ...emptyCacheStatus(source, true),
-          cached: true,
-          ...inventory,
-        };
-      }
+    if (
+      inventory.cachedFileCount !==
+      Object.keys(source.manifest.files).length
+    ) {
+      return {
+        ...emptyCacheStatus(source, true),
+        cached: true,
+        ...inventory,
+      };
     }
     return {
       ...emptyCacheStatus(source, true),
@@ -883,11 +883,15 @@ async function removeOlderSourceCaches(
 ): Promise<void> {
   const storage = cacheStorage();
   if (storage === null) return;
+  const sourceRevisionPrefix = source.cacheName.slice(
+    0,
+    source.cacheName.length - source.manifestSha256.length,
+  );
   const removals: Array<Promise<boolean>> = [];
   for (const name of await storage.keys()) {
     if (
       name === source.cacheName ||
-      !name.startsWith(MODEL_CACHE_PREFIX)
+      !name.startsWith(sourceRevisionPrefix)
     ) {
       continue;
     }
@@ -947,24 +951,33 @@ export class ModelAssets {
     if (transport === undefined && this.#cache !== null) {
       const response = await this.#cache.match(transportUrl);
       if (response === undefined) {
-        throw new Error(`Cached model file is missing ${JSON.stringify(path)}`);
-      }
-      if (this.#verifiedTransports.has(path)) {
-        transport = await responseBytes(
-          response,
-          description.transport.size_bytes,
-          `${path} gzip transport`,
-          { signal: this.#signal },
-        );
-        transportVerified = true;
+        transport =
+          (await readCachedResumableTransport({
+            cache: this.#cache,
+            transportUrl,
+            description,
+            signal: this.#signal,
+            label: path,
+          })) ?? undefined;
+        transportVerified = transport !== undefined;
       } else {
-        transport = await readTransportResponse(
-          response,
-          description,
-          path,
-          this.#signal,
-        );
-        transportVerified = true;
+        if (this.#verifiedTransports.has(path)) {
+          transport = await responseBytes(
+            response,
+            description.transport.size_bytes,
+            `${path} gzip transport`,
+            { signal: this.#signal },
+          );
+          transportVerified = true;
+        } else {
+          transport = await readTransportResponse(
+            response,
+            description,
+            path,
+            this.#signal,
+          );
+          transportVerified = true;
+        }
       }
     }
     if (transport === undefined) {
@@ -1162,20 +1175,12 @@ export async function markModelCacheComplete(
   const status = await inspectModelCache(source);
   if (status.complete) return;
   const cache = await storage.open(source.cacheName);
-  const descriptions = Object.values(source.manifest.files);
-  const cachedTransports = await Promise.all(
-    descriptions.map((description) =>
-      cache.match(
-        new URL(description.transport.path, source.baseUrl).href,
-      ),
-    ),
-  );
-  const missingIndex = cachedTransports.findIndex(
-    (response) => response === undefined,
-  );
-  if (missingIndex !== -1) {
+  if (
+    status.cachedFileCount !==
+    Object.keys(source.manifest.files).length
+  ) {
     throw new Error(
-      `Cannot complete model cache with missing ${descriptions[missingIndex].transport.path}`,
+      "Cannot complete model cache with missing model transports",
     );
   }
   const marker = new TextEncoder().encode(

@@ -16,6 +16,11 @@ import {
   type ModelManifestSource,
 } from "./runtime/model-assets";
 import {
+  modelVariantBaseUrl,
+  preferredModelVariant,
+  type BrowserModelVariant,
+} from "./runtime/model-variant";
+import {
   type GenerationCompleteEvent,
   type GenerationMode,
   type LoadModelCommand,
@@ -67,7 +72,7 @@ import {
 } from "./ui-control-store";
 
 const UINT32_MAX = 0xffff_ffff;
-const DEVELOPMENT_MODEL_BASE_URL =
+const DEVELOPMENT_MODEL_FAMILY_BASE_URL =
   "/models/ardy-minilm-core40-browser-v1/";
 const DEFAULT_TEXT_CFG_WEIGHT = 3.5;
 const DEFAULT_HISTORY_FRAMES = 40;
@@ -91,27 +96,42 @@ interface WebGpuApi {
   requestAdapter(): Promise<GPUAdapter | null>;
 }
 
-async function webGpuUnavailableReason(): Promise<string | null> {
+interface WebGpuPreflight {
+  unavailableReason: string | null;
+}
+
+async function inspectWebGpuSupport(): Promise<WebGpuPreflight> {
   if (globalThis.isSecureContext === false) {
-    return "Open this demo over HTTPS or localhost, then reload the page.";
+    return {
+      unavailableReason:
+        "Open this demo over HTTPS or localhost, then reload the page.",
+    };
   }
   const gpu = (navigator as Navigator & { gpu?: WebGpuApi }).gpu;
   if (!gpu) {
-    return "Use a browser and device that support WebGPU, then reload the page.";
+    return {
+      unavailableReason:
+        "Use a browser and device that support WebGPU, then reload the page.",
+    };
   }
   let adapter: GPUAdapter | null;
   try {
     adapter = await gpu.requestAdapter();
   } catch {
-    return "The browser could not initialize a WebGPU adapter. Check GPU acceleration, then reload the page.";
+    return {
+      unavailableReason:
+        "The browser could not initialize a WebGPU adapter. Check GPU acceleration, then reload the page.",
+    };
   }
   if (!adapter) {
-    return "No compatible WebGPU adapter is available on this device.";
+    return {
+      unavailableReason:
+        "No compatible WebGPU adapter is available on this device.",
+    };
   }
-  if (!adapter.features.has("shader-f16")) {
-    return "This model requires native WebGPU FP16 shader support, which is unavailable on this device.";
-  }
-  return null;
+  return {
+    unavailableReason: null,
+  };
 }
 
 export function cameraMoveForCode(
@@ -230,9 +250,12 @@ export function formatBytes(bytes: number): string {
   return `${value >= 10 || exponent === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[exponent]}`;
 }
 
-function configuredModelBaseUrl(): string | null {
+function configuredModelFamilyBaseUrl(): string | null {
   if (import.meta.env.DEV) {
-    return new URL(DEVELOPMENT_MODEL_BASE_URL, globalThis.location.href).href;
+    return new URL(
+      DEVELOPMENT_MODEL_FAMILY_BASE_URL,
+      globalThis.location.href,
+    ).href;
   }
   const configured = import.meta.env.VITE_MODEL_BASE_URL?.trim();
   return configured
@@ -630,6 +653,7 @@ export function bootstrap(): () => void {
   });
 
   let workerReady = false;
+  let workerFailure: Error | null = null;
   let modelReady = false;
   let modelLoading = false;
   let activeLoadRequest: string | null = null;
@@ -638,6 +662,12 @@ export function bootstrap(): () => void {
   let announceContinuationRestore = true;
   let modelInfo: ModelLoadedEvent["model"] | null = null;
   let webGpuState: WebGpuState = "checking";
+  let modelVariant: BrowserModelVariant | null = null;
+  let pendingCapabilitiesRequest: {
+    requestId: string;
+    resolve: (variant: BrowserModelVariant) => void;
+    reject: (error: Error) => void;
+  } | null = null;
   let modelSource: ModelManifestSource | null = null;
   let activeManifest: BrowserModelManifest | null = null;
   let modelProgressFiles = new Set<string>();
@@ -656,6 +686,36 @@ export function bootstrap(): () => void {
 
   const postCommand = (command: WorkerCommand): void =>
     worker.postMessage(command);
+
+  function requestWorkerModelVariant(): Promise<BrowserModelVariant> {
+    if (workerFailure !== null) {
+      return Promise.reject(workerFailure);
+    }
+    if (pendingCapabilitiesRequest !== null) {
+      throw new Error("WebGPU capability detection is already in progress.");
+    }
+    const capabilityRequestId = requestId("webgpu-capabilities");
+    return new Promise((resolve, reject) => {
+      pendingCapabilitiesRequest = {
+        requestId: capabilityRequestId,
+        resolve,
+        reject,
+      };
+      try {
+        postCommand({
+          type: "getWebGpuCapabilities",
+          requestId: capabilityRequestId,
+        });
+      } catch (error) {
+        pendingCapabilitiesRequest = null;
+        reject(
+          error instanceof Error
+            ? error
+            : new Error(String(error)),
+        );
+      }
+    });
+  }
 
   function announce(message: string): void {
     appStatus.textContent = "";
@@ -1497,6 +1557,17 @@ export function bootstrap(): () => void {
           updateGenerateAvailability();
           postCommand({ type: "getStatus", requestId: requestId("status") });
           break;
+        case "webGpuCapabilities": {
+          if (
+            event.requestId !== pendingCapabilitiesRequest?.requestId
+          ) {
+            break;
+          }
+          const request = pendingCapabilitiesRequest;
+          pendingCapabilitiesRequest = null;
+          request.resolve(preferredModelVariant(event.shaderF16));
+          break;
+        }
         case "progress":
           handleProgress(event);
           break;
@@ -1579,6 +1650,14 @@ export function bootstrap(): () => void {
           const wasLoading = event.requestId === activeLoadRequest;
           const wasGenerating = event.requestId === activeGeneration?.id;
           const wasRestoring = event.requestId === activeRestoreRequest;
+          if (
+            event.requestId === pendingCapabilitiesRequest?.requestId
+          ) {
+            const request = pendingCapabilitiesRequest;
+            pendingCapabilitiesRequest = null;
+            request.reject(new Error(event.error.message));
+            break;
+          }
           if (wasLoading) {
             const loadErrorOperation =
               modelUiControl.getSnapshot().cache === "downloading"
@@ -1636,6 +1715,14 @@ export function bootstrap(): () => void {
   worker.addEventListener(
     "error",
     (event) => {
+      workerFailure = new Error(
+        event.message || "The inference worker stopped unexpectedly.",
+      );
+      if (pendingCapabilitiesRequest !== null) {
+        const request = pendingCapabilitiesRequest;
+        pendingCapabilitiesRequest = null;
+        request.reject(workerFailure);
+      }
       const wasLoading = activeLoadRequest !== null;
       activeLoadRequest = null;
       modelLoading = false;
@@ -2020,6 +2107,11 @@ export function bootstrap(): () => void {
   const cleanup = (): void => {
     if (disposed) return;
     disposed = true;
+    if (pendingCapabilitiesRequest !== null) {
+      const request = pendingCapabilitiesRequest;
+      pendingCapabilitiesRequest = null;
+      request.reject(new DOMException("Application disposed", "AbortError"));
+    }
     activeVrmLoad += 1;
     resetVrmDropTarget();
     clearCameraMovement();
@@ -2038,16 +2130,16 @@ export function bootstrap(): () => void {
   });
 
   async function initializeModel(): Promise<void> {
-    const unavailableReason = await webGpuUnavailableReason();
+    const preflight = await inspectWebGpuSupport();
     if (disposed) return;
-    if (unavailableReason) {
+    if (preflight.unavailableReason !== null) {
       webGpuState = "unavailable";
       modelUiControl.dispatch({ type: "runtime-error" });
       updateGenerateAvailability();
       unsupportedDeviceControl.commit({
         open: true,
         title: "WebGPU is required",
-        description: unavailableReason,
+        description: preflight.unavailableReason,
       });
       return;
     }
@@ -2063,6 +2155,22 @@ export function bootstrap(): () => void {
       unsupportedDeviceControl.commit({
         open: true,
         title: "WebGPU preview unavailable",
+        description: message,
+      });
+      return;
+    }
+
+    try {
+      modelVariant = await requestWorkerModelVariant();
+    } catch (error) {
+      if (disposed) return;
+      const message = error instanceof Error ? error.message : String(error);
+      webGpuState = "unavailable";
+      modelUiControl.dispatch({ type: "runtime-error" });
+      updateGenerateAvailability();
+      unsupportedDeviceControl.commit({
+        open: true,
+        title: "WebGPU inference unavailable",
         description: message,
       });
       return;
@@ -2091,12 +2199,16 @@ export function bootstrap(): () => void {
   }
 
   async function discoverModelSource(): Promise<ModelCacheStatus> {
-    const baseUrl = configuredModelBaseUrl();
-    if (!baseUrl) {
+    const familyBaseUrl = configuredModelFamilyBaseUrl();
+    if (!familyBaseUrl) {
       throw new Error(
-        "Set VITE_MODEL_BASE_URL to an immutable hosted model directory for production.",
+        "Set VITE_MODEL_BASE_URL to an immutable hosted model-family directory for production.",
       );
     }
+    if (!modelVariant) {
+      throw new Error("WebGPU model selection has not completed.");
+    }
+    const baseUrl = modelVariantBaseUrl(familyBaseUrl, modelVariant);
     modelSource = await fetchModelManifest(baseUrl, {
       signal: lifecycle.signal,
     });

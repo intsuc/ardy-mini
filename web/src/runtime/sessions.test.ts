@@ -117,7 +117,7 @@ afterEach(() => {
   restoreProperty(globalThis.navigator, "gpu", gpuDescriptor);
 });
 
-describe("WebGPU FP16 capability checks", () => {
+describe("WebGPU model capability checks", () => {
   it("rejects an insecure context before requesting an adapter", async () => {
     const requestAdapter = vi.fn(async () => createAdapter(true));
     setSecureContext(false);
@@ -161,12 +161,42 @@ describe("WebGPU FP16 capability checks", () => {
     );
   });
 
-  it("rejects adapters without native FP16 shaders", async () => {
+  it("accepts an FP32 model on adapters without native FP16 shaders", async () => {
     const adapter = createAdapter(false);
     setGpu({ requestAdapter: vi.fn(async () => adapter) });
     const { assertWebGpuAvailable } = await loadSessions();
 
-    await expect(assertWebGpuAvailable()).rejects.toThrow(/shader-f16/);
+    await expect(assertWebGpuAvailable([])).resolves.toBeUndefined();
+    expect(ortEnvironment.webgpu.adapter).toBe(adapter);
+  });
+
+  it("reports capabilities from the same adapter later used by inference", async () => {
+    const adapter = createAdapter(false);
+    const requestAdapter = vi.fn(async () => adapter);
+    setGpu({ requestAdapter });
+    const {
+      assertWebGpuAvailable,
+      getWebGpuCapabilities,
+    } = await loadSessions();
+
+    await expect(getWebGpuCapabilities()).resolves.toEqual({
+      shaderF16: false,
+    });
+    expect(ortEnvironment.webgpu.adapter).toBeUndefined();
+
+    await assertWebGpuAvailable([]);
+    expect(requestAdapter).toHaveBeenCalledTimes(1);
+    expect(ortEnvironment.webgpu.adapter).toBe(adapter);
+  });
+
+  it("rejects a mixed-FP16 model when its required feature is unavailable", async () => {
+    const adapter = createAdapter(false);
+    setGpu({ requestAdapter: vi.fn(async () => adapter) });
+    const { assertWebGpuAvailable } = await loadSessions();
+
+    await expect(
+      assertWebGpuAvailable([REQUIRED_WEBGPU_FEATURE]),
+    ).rejects.toThrow(/shader-f16/);
     expect(adapter.features.has).toHaveBeenCalledWith(
       REQUIRED_WEBGPU_FEATURE,
     );
@@ -179,14 +209,14 @@ describe("WebGPU FP16 capability checks", () => {
     setGpu({ requestAdapter });
     const { assertWebGpuAvailable } = await loadSessions();
 
-    await assertWebGpuAvailable();
+    await assertWebGpuAvailable([REQUIRED_WEBGPU_FEATURE]);
     expect(adapter.features.has).toHaveBeenCalledWith(
       REQUIRED_WEBGPU_FEATURE,
     );
     expect(ortEnvironment.webgpu.adapter).toBe(adapter);
 
     ortEnvironment.webgpu.adapter = undefined;
-    await assertWebGpuAvailable();
+    await assertWebGpuAvailable([REQUIRED_WEBGPU_FEATURE]);
     expect(requestAdapter).toHaveBeenCalledTimes(1);
     expect(ortEnvironment.webgpu.adapter).toBe(adapter);
   });
@@ -205,7 +235,12 @@ describe("WebGPU FP16 capability checks", () => {
       decoder: { model: "decoder.onnx" },
     };
     const assets = {
-      manifest: { graphs },
+      manifest: {
+        graphs,
+        runtime: {
+          required_webgpu_features: [REQUIRED_WEBGPU_FEATURE],
+        },
+      },
       read: vi.fn(async () => new Uint8Array([0])),
       release: vi.fn(),
     } as unknown as Parameters<typeof createRuntimeSessions>[0];
@@ -243,7 +278,12 @@ describe("runtime session asset lifetime", () => {
       "denoiser.onnx": 3,
     };
     const assets = {
-      manifest: { graphs },
+      manifest: {
+        graphs,
+        runtime: {
+          required_webgpu_features: [REQUIRED_WEBGPU_FEATURE],
+        },
+      },
       read: vi.fn(async (path: string) => {
         events.push(`read:${path}`);
         return new Uint8Array([modelIds[path]]);
@@ -309,7 +349,12 @@ describe("runtime session asset lifetime", () => {
     };
     const releaseAsset = vi.fn();
     const assets = {
-      manifest: { graphs },
+      manifest: {
+        graphs,
+        runtime: {
+          required_webgpu_features: [REQUIRED_WEBGPU_FEATURE],
+        },
+      },
       read: vi.fn(async () => new Uint8Array([0])),
       release: releaseAsset,
     } as unknown as Parameters<typeof createRuntimeSessions>[0];

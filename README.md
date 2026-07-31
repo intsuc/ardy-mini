@@ -151,8 +151,11 @@ measurements from the completed run are in
 The Core40 MiniLM path runs end to end in the browser. A dedicated Web Worker
 uses ONNX Runtime Web's WebGPU execution provider exclusively; there is no CPU
 or WebAssembly execution-provider fallback. The app checks for a secure
-context and a WebGPU adapter exposing native `shader-f16` before opening the
-model download dialog.
+context and a WebGPU adapter before opening the model download dialog. It
+asks the inference worker to inspect the adapter it will actually use, silently
+selects the smaller mixed-FP16 model when that adapter exposes `shader-f16`,
+and otherwise selects the full-FP32 model. There is no precision setting for
+the user; only the download size changes.
 WordPiece tokenization, text conditioning, DDIM diffusion, autoregressive
 recentering/requantization, structured motion decoding, and three.js playback
 all remain on the user's device. The app is deliberately presented as a simple
@@ -217,23 +220,26 @@ machine's network address changes; see the
 [browser demo guide](docs/browser_demo.md#trusted-https-for-physical-devices)
 for platform notes and overrides.
 
-During development, Vite exposes that ignored directory one file at a time.
-After WebGPU validation, the app asks before downloading the files and stores
-the verified compressed responses in Cache Storage. The verified mixed-FP16
-files contain 740,125,267 raw bytes and total 684,220,414 bytes (652.52 MiB)
-over the network. Brotli and Zstandard reduced the gzip result by only a
+The exporter writes one model family with complete `fp16/` and `fp32/`
+subdirectories. During development, Vite exposes that ignored family directory
+one file at a time. After WebGPU validation and automatic variant selection,
+the app asks before downloading the selected files and stores the verified
+compressed responses in Cache Storage. The evaluated mixed-FP16 transport
+totals 684,221,164 bytes (652.52 MiB); the FP32 transport totals 717,533,539
+bytes (684.29 MiB). Brotli and Zstandard reduced the gzip result by only a
 further 0.10–0.15%, while lacking interoperable browser stream decompression,
-so the distribution uses deterministic per-file gzip. The static production
-build contains no model weights. Its model-source boundary is ready to be
-pointed at an immutable Model Hub revision; that production route is not
+so both variants use deterministic per-file gzip. The static production build
+contains no model weights. Its model-source boundary is ready to be pointed at
+an immutable Model Hub model-family revision; that production route is not
 configured yet. Inference does not upload prompts, model files, VRM files,
 generation state, or motion.
 
 VRM animation requires the current structured-output model files. The
-decompressed `model.json.gz` uses the `ardy-browser-model-files` contract,
-reports `runtime.contract_revision: 3`, and includes decoder outputs for
-`localRotations` and `globalRotations`. Older directory and positions-only
-exports are rejected; regenerate them with the command above.
+decompressed manifest in each variant uses the `ardy-browser-model-files`
+contract, reports `runtime.contract_revision: 3`, and includes decoder outputs
+for `localRotations` and `globalRotations`. Older single-variant directories
+and positions-only exports are rejected; regenerate them with the command
+above.
 
 This MiniLM artifact is specific to
 `ARDY-Core-RP-20FPS-Horizon40` and typo-free English motion prompts. Branch

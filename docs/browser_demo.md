@@ -12,7 +12,7 @@ The supported model configuration is intentionally narrow:
 - the MiniLM student trained specifically for that checkpoint;
 - well-formed, typo-free English motion prompts;
 - 20 FPS and a 40-frame generation horizon;
-- WebGPU with native `shader-f16`;
+- WebGPU, with native `shader-f16` used when available;
 - the current structured-output contract with local and global rotation tracks.
 
 The form accepts any non-empty prompt of at most 280 characters. Text outside
@@ -20,22 +20,29 @@ well-formed English is accepted without a quality guarantee.
 
 ## Model files and browser cache
 
-The model is distributed as a small `model.json.gz` manifest and five
+The model family contains complete `fp16/` and `fp32/` directories. Each
+variant is distributed as a small `model.json.gz` manifest and five
 individually gzip-compressed files: three ONNX graphs and two tokenizer files.
-The decompressed manifest
-records the immutable model revision, graph contracts, tensor dimensions,
-diffusion and quantization constants, normalization statistics, skeleton
-metadata, and both compressed and uncompressed sizes and SHA-256 digests.
+The decompressed manifest records the immutable model revision, graph
+contracts, tensor dimensions, diffusion and quantization constants,
+normalization statistics, skeleton metadata, required WebGPU features, and
+both compressed and uncompressed sizes and SHA-256 digests.
 
 The app follows this startup sequence:
 
-1. Check the secure context, obtain a WebGPU adapter, and require `shader-f16`.
-2. If the device is unsupported, show a non-dismissible explanation and make no
-   model request.
-3. Inspect the revision-specific Cache Storage entries.
-4. Load a complete verified cache automatically, or ask before downloading the
-   missing model files.
-5. Download, decompress, and verify each file separately. Create each ONNX
+1. Check the secure context and confirm that the main page can obtain a WebGPU
+   adapter.
+2. Ask the inference worker to inspect its own WebGPU adapter, then select
+   `fp16/` when that adapter exposes `shader-f16`; otherwise select `fp32/`.
+   This happens before requesting a model manifest and is not presented as a
+   user setting.
+3. If WebGPU itself is unsupported, show a non-dismissible explanation and
+   make no model request.
+4. Inspect the selected variant's revision-specific Cache Storage entries.
+5. Load a complete verified cache automatically, or ask before downloading the
+   missing model files. The dialog shows the selected variant's size without
+   exposing its precision.
+6. Download, decompress, and verify each file separately. Create each ONNX
    session and release its source bytes before reading the next large graph.
 
 The download dialog is a storage and network confirmation, not a model-license
@@ -44,10 +51,14 @@ The **Model** section reports cache status and lets the user retry a download or
 remove cached files. Removing the cache does not interrupt a model that is
 already loaded in the current tab; the files are needed again after reload.
 
-Compressed `Response` objects are stored in Cache Storage. A completion marker
-is written only after every declared file passes compressed and uncompressed
-size and SHA-256 verification. An interrupted or corrupt entry is not treated
-as a complete cache and can be fetched again independently.
+Compressed data is stored in Cache Storage. Large transports are retained as
+verified 8 MiB block responses so browsers do not have to accept a single
+hundreds-of-megabytes cache entry; this is an internal cache representation and
+does not change the individually gzip-compressed files served by the model
+host. A completion marker is written only after every declared file passes
+compressed and uncompressed size and SHA-256 verification. An interrupted or
+corrupt entry is not treated as a complete cache and can be resumed or fetched
+again independently.
 
 ## Export development model files
 
@@ -66,10 +77,6 @@ uv run --extra browser python scripts/export_browser_models.py \
   --output-directory artifacts/browser/ardy-minilm-core40-browser-v1
 ```
 
-Add
-`--fp32-reference-output-directory artifacts/browser/ardy-minilm-core40-browser-v1-fp32-reference`
-when producing a paired FP32 directory for the mixed-precision evaluator.
-
 The exporter checks the three FP32 ONNX graphs and, unless `--skip-verify` is
 passed, compares them with the PyTorch sources through ONNX Runtime CPU. It then
 applies the graph-specific mixed-FP16 policy, validates the converted graphs,
@@ -78,23 +85,28 @@ export it specializes the denoiser position tables to the ten reachable
 diffusion timesteps and fixed 20-token browser window.
 
 Only deterministic `.gz` files, including `model.json.gz`, are published. The
-output directory contains no uncompressed duplicate models. Publication is
-staged so an ordinary failure does not leave a partially replaced destination.
+output is one model-family directory containing required `fp16/` and `fp32/`
+subdirectories, with no uncompressed duplicate models. The complete family is
+staged and published together so an ordinary failure does not leave mismatched
+variants.
 
-Inspect the contract with:
+Inspect both contracts with:
 
 ```bash
-gzip -dc artifacts/browser/ardy-minilm-core40-browser-v1/model.json.gz |
-  jq '{
-  format,
-  schema_version,
-  model: {id: .model.id, revision: .model.revision},
-  contract_revision: .runtime.contract_revision,
-  precision_policy: .precision.policy_version,
-  required_webgpu_features: .runtime.required_webgpu_features,
-  local_rotations: .graphs.decoder.outputs.localRotations,
-  global_rotations: .graphs.decoder.outputs.globalRotations
-  }'
+for variant in fp16 fp32; do
+  gzip -dc \
+    "artifacts/browser/ardy-minilm-core40-browser-v1/$variant/model.json.gz" |
+    jq '{
+      format,
+      schema_version,
+      model: {id: .model.id, revision: .model.revision},
+      contract_revision: .runtime.contract_revision,
+      precision: .precision.format,
+      required_webgpu_features: .runtime.required_webgpu_features,
+      local_rotations: .graphs.decoder.outputs.localRotations,
+      global_rotations: .graphs.decoder.outputs.globalRotations
+    }'
+done
 ```
 
 ## Run the development app
@@ -112,13 +124,13 @@ local `mkcert` CA and again whenever the network names or addresses used by
 test devices change. Unit tests, Playwright, production builds, and
 `npm run preview` do not require the development certificate.
 
-The development server exposes
+The development server exposes the model-family root
 `artifacts/browser/ardy-minilm-core40-browser-v1/` at the app's fixed model URL
-without copying the files into `web/public` or the production build. Override
-the source directory when needed:
+without copying either variant into `web/public` or the production build.
+Override the family root when needed:
 
 ```bash
-ARDY_BROWSER_MODEL_DIR=/absolute/path/to/model-files npm run dev
+ARDY_BROWSER_MODEL_DIR=/absolute/path/to/model-family npm run dev
 ```
 
 Open a printed HTTPS URL. On an empty cache, choose **Download model** in the
@@ -161,7 +173,7 @@ ARDY_DEV_HTTPS_HOSTS=192.168.1.20,ardy-dev.local \
 An extra certificate name does not configure VM, WSL2, container, firewall, or
 Wi-Fi client-isolation forwarding; the device must still be able to reach that
 host and port. HTTPS establishes a secure context but does not add browser
-WebGPU or `shader-f16` support.
+WebGPU support. An adapter without `shader-f16` uses the FP32 variant.
 
 Vite reads `web/.cert/` by default. Existing certificates can instead be
 provided without copying them into the repository:
@@ -177,15 +189,17 @@ key as sensitive: possession of `rootCA-key.pem` allows certificates trusted
 by every device on which that CA was installed to be created. Remove the local
 CA from a test device when it is no longer needed. HTTP and HTTPS are different
 browser origins, and different IP addresses are different origins, so either
-change requires the approximately 652 MiB model to be cached again. A stable
-mDNS hostname or DHCP reservation avoids unnecessary origin changes.
+change requires the selected model variant—652.52 MiB for mixed FP16 or
+684.29 MiB for FP32—to be cached again. A stable mDNS hostname or DHCP
+reservation avoids unnecessary origin changes.
 
 The eventual hosted build is expected to set its production model base URL to
-an immutable Hugging Face Model Hub revision. Development and production share
-the same `model.json.gz`, per-file gzip, verification, and cache path; only the
-base URL changes. Set `VITE_MODEL_BASE_URL` at build time; production has no
-fallback to the development route. The repository does not yet configure or
-publish a Hub repository.
+an immutable Hugging Face Model Hub model-family revision. Development and
+production share the `fp16/` and `fp32/` layout, per-file gzip, verification,
+and cache path; only the family base URL changes. Set `VITE_MODEL_BASE_URL` to
+that family root at build time, not to either precision subdirectory.
+Production has no fallback to the development route. The repository does not
+yet configure or publish a Hub repository.
 
 ## Generation and playback
 
@@ -260,19 +274,19 @@ tokenizer payloads with a preliminary manifest (740,127,749 raw bytes):
 | Brotli quality 6 | 683,147,982 | 7.70% |
 | Zstandard level 9 | 683,453,162 | 7.66% |
 
-The final deterministic export contains 740,125,267 raw bytes and produces
-684,220,414 bytes including `model.json.gz`; its small difference from the
-command-line gzip benchmark is compressor- and manifest-specific. Recompressing
-the final files with GNU `gzip -9 -n` saved just 8,143 bytes (0.0012%), which
-does not justify adding an external exporter dependency. Lowering zlib's
-`memLevel` from 9 to 8 added 555,059 bytes, so the exporter retains
-`memLevel=9`. In the paired benchmark, Brotli saved only 1,064,653 bytes
-(0.16%) over gzip and Zstandard saved 759,473 bytes (0.11%). Native
+The final deterministic mixed-FP16 export contains 740,128,936 raw bytes and
+produces 684,221,164 bytes including `model.json.gz`; its small difference from
+the command-line gzip benchmark is compressor- and manifest-specific.
+Recompressing the final files with GNU `gzip -9 -n` saved just 8,143 bytes
+(0.0012%), which does not justify adding an external exporter dependency.
+Lowering zlib's `memLevel` from 9 to 8 added 555,059 bytes, so the exporter
+retains `memLevel=9`. In the paired benchmark, Brotli saved only 1,064,653
+bytes (0.16%) over gzip and Zstandard saved 759,473 bytes (0.11%). Native
 `DecompressionStream("gzip")` is interoperable across the supported browser
 families, while explicit Brotli and Zstandard stream decompression is not.
 HTTP content encoding is also unsuitable for direct hosted model files whose
 response headers the app does not control. The exporter therefore uses
-deterministic per-file gzip and stores those compressed responses directly.
+deterministic per-file gzip.
 
 ## Validation
 
@@ -287,13 +301,18 @@ npx react-doctor@latest --no-telemetry
 ```
 
 For the opt-in real-model browser test, point the development server at the
-exported directory:
+exported model-family root:
 
 ```bash
 cd web
 ARDY_BROWSER_MODEL_DIR=../artifacts/browser/ardy-minilm-core40-browser-v1 \
   npm run test:e2e -- e2e/real-model.spec.ts
 ```
+
+In the recorded environment the inference adapter did not expose
+`shader-f16`. The test selected only `fp32/`, prepared all three WebGPU
+sessions, and generated 40 frames from the real graphs. The complete
+Playwright test took about 15 seconds across repeated runs.
 
 ## Privacy, distribution, and trust
 

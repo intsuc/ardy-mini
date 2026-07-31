@@ -21,7 +21,7 @@ from ardy.browser.export import (
     BROWSER_MODEL_FILES_FORMAT,
     BROWSER_MODEL_FILES_SCHEMA_VERSION,
     BrowserExportConfig,
-    _build_fp32_reference_payload,
+    _build_fp32_payload,
     _graph_contracts,
     _local_checkpoint_identity,
     _model_revision,
@@ -385,40 +385,27 @@ def test_browser_model_files_are_reproducible_and_only_keep_compressed_assets(
         assert not (first / relative_path).exists()
 
 
-def test_browser_export_validates_optional_fp32_reference_output(tmp_path: Path):
+def test_browser_export_validates_model_family_output(tmp_path: Path):
     artifact = tmp_path / "artifact"
     artifact.mkdir()
     checkpoints = tmp_path / "checkpoints"
     checkpoints.mkdir()
-    output = tmp_path / "mixed"
+    output_file = tmp_path / "model-family"
+    output_file.write_text("not a directory", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="different directories"):
+    with pytest.raises(NotADirectoryError, match="model output"):
         _validate_config(
             BrowserExportConfig(
-                output_directory=output,
-                fp32_reference_output_directory=tmp_path / "." / output.name,
+                output_directory=output_file,
                 minilm_artifact=artifact,
                 checkpoints_dir=checkpoints,
             )
         )
 
-    reference_file = tmp_path / "reference"
-    reference_file.write_text("not a directory", encoding="utf-8")
-    with pytest.raises(NotADirectoryError, match="FP32 reference output"):
+    with pytest.raises(ValueError, match="must not overlap"):
         _validate_config(
             BrowserExportConfig(
-                output_directory=output,
-                fp32_reference_output_directory=reference_file,
-                minilm_artifact=artifact,
-                checkpoints_dir=checkpoints,
-            )
-        )
-
-    with pytest.raises(ValueError, match="must not contain"):
-        _validate_config(
-            BrowserExportConfig(
-                output_directory=output,
-                fp32_reference_output_directory=output / "reference",
+                output_directory=artifact / "browser",
                 minilm_artifact=artifact,
                 checkpoints_dir=checkpoints,
             )
@@ -486,7 +473,7 @@ def test_fp32_reference_payload_matches_candidate_contract_and_is_reproducible(
     }
     fp32_verification = {"backend": "onnxruntime-cpu", "status": "passed"}
 
-    reference_manifest, reference_payloads = _build_fp32_reference_payload(
+    reference_manifest, reference_payloads = _build_fp32_payload(
         candidate_manifest=candidate_manifest,
         output_dir=reference_dir,
         graph_paths=graph_paths,
@@ -494,9 +481,9 @@ def test_fp32_reference_payload_matches_candidate_contract_and_is_reproducible(
         verification=fp32_verification,
     )
 
-    assert _without_file_specific_metadata(reference_manifest) == (
-        _without_file_specific_metadata(candidate_manifest)
-    )
+    candidate_contract = _without_file_specific_metadata(candidate_manifest)
+    candidate_contract["runtime"]["required_webgpu_features"] = []
+    assert _without_file_specific_metadata(reference_manifest) == candidate_contract
     assert reference_manifest["precision"] == {
         "format": "fp32",
         "public_io_dtype": "float32",
@@ -513,6 +500,7 @@ def test_fp32_reference_payload_matches_candidate_contract_and_is_reproducible(
         },
     }
     assert reference_manifest["verification"] == {"fp32_export": fp32_verification}
+    assert reference_manifest["runtime"]["required_webgpu_features"] == []
     for source in tokenizer_paths:
         copied = reference_dir / "tokenizer" / source.name
         assert copied.read_bytes() == source.read_bytes()
@@ -632,19 +620,18 @@ def test_model_revision_is_canonical_and_changes_with_either_weight_identity():
     )
 
 
-def test_export_browser_model_files_publishes_candidate_and_reference_directories(
+def test_export_browser_model_files_publishes_fp16_and_fp32_model_family(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    output = tmp_path / "mixed"
-    reference_output = tmp_path / "fp32"
+    output = tmp_path / "model-family"
     output.mkdir()
     (output / "stale").write_text("old", encoding="utf-8")
 
     def fake_working_export(_config, working_directory):
         candidate = working_directory / "denoiser.onnx"
         candidate.write_bytes(b"mixed")
-        reference_directory = working_directory / ".fp32-reference"
+        reference_directory = working_directory / ".fp32"
         reference_directory.mkdir()
         reference = reference_directory / "denoiser.onnx"
         reference.write_bytes(b"fp32")
@@ -678,21 +665,22 @@ def test_export_browser_model_files_publishes_candidate_and_reference_directorie
     result = export_browser_model_files(
         BrowserExportConfig(
             output_directory=output,
-            fp32_reference_output_directory=reference_output,
             minilm_artifact=tmp_path / "unused",
         )
     )
 
     assert result == output
     assert not (output / "stale").exists()
-    assert gzip.decompress((output / "denoiser.onnx.gz").read_bytes()) == b"mixed"
     assert gzip.decompress(
-        (reference_output / "denoiser.onnx.gz").read_bytes()
+        (output / "fp16" / "denoiser.onnx.gz").read_bytes()
+    ) == b"mixed"
+    assert gzip.decompress(
+        (output / "fp32" / "denoiser.onnx.gz").read_bytes()
     ) == b"fp32"
-    assert (output / "model.json.gz").is_file()
-    assert (reference_output / "model.json.gz").is_file()
-    assert not (output / "model.json").exists()
-    assert not (reference_output / "model.json").exists()
+    assert (output / "fp16" / "model.json.gz").is_file()
+    assert (output / "fp32" / "model.json.gz").is_file()
+    assert not (output / "fp16" / "model.json").exists()
+    assert not (output / "fp32" / "model.json").exists()
 
 
 def test_directory_publication_rolls_back_both_destinations_on_failure(

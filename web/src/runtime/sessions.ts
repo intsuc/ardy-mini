@@ -6,6 +6,7 @@ import * as ort from "onnxruntime-web/webgpu";
 import {
   REQUIRED_WEBGPU_FEATURE,
   type BrowserGraphSpecs,
+  type BrowserRequiredWebGpuFeatures,
   type GraphSpec,
 } from "./manifest";
 import type { ModelAssets } from "./model-assets";
@@ -36,10 +37,10 @@ function configureOrtAdapter(adapter: GPUAdapter): void {
   }
 }
 
-export async function assertWebGpuAvailable(): Promise<void> {
-  if (webGpuAdapter !== undefined) {
-    configureOrtAdapter(webGpuAdapter);
-    return;
+async function resolveWebGpuAdapter(): Promise<GPUAdapter> {
+  let adapter = webGpuAdapter;
+  if (adapter !== undefined) {
+    return adapter;
   }
   if (globalThis.isSecureContext === false) {
     throw new Error(
@@ -54,23 +55,44 @@ export async function assertWebGpuAvailable(): Promise<void> {
       "WebGPU is required. Use a WebGPU-capable browser and device.",
     );
   }
-  let adapter: GPUAdapter | null;
+  let requestedAdapter: GPUAdapter | null;
   try {
-    adapter = await navigatorWithGpu.gpu.requestAdapter();
+    requestedAdapter = await navigatorWithGpu.gpu.requestAdapter();
   } catch (error) {
     throw new Error("WebGPU adapter initialization failed.", { cause: error });
   }
-  if (adapter === null) {
+  if (requestedAdapter === null) {
     throw new Error(
       "WebGPU is required, but no compatible GPU adapter is available.",
     );
   }
-  if (!adapter.features.has(REQUIRED_WEBGPU_FEATURE)) {
-    throw new Error(
-      `This model requires native WebGPU FP16 shader support (${REQUIRED_WEBGPU_FEATURE}), but the selected GPU adapter does not provide it.`,
-    );
-  }
+  adapter = requestedAdapter;
   webGpuAdapter = adapter;
+  return adapter;
+}
+
+export interface WebGpuCapabilities {
+  shaderF16: boolean;
+}
+
+export async function getWebGpuCapabilities(): Promise<WebGpuCapabilities> {
+  const adapter = await resolveWebGpuAdapter();
+  return {
+    shaderF16: adapter.features.has(REQUIRED_WEBGPU_FEATURE),
+  };
+}
+
+export async function assertWebGpuAvailable(
+  requiredFeatures: BrowserRequiredWebGpuFeatures = [],
+): Promise<void> {
+  const adapter = await resolveWebGpuAdapter();
+  for (const feature of requiredFeatures) {
+    if (!adapter.features.has(feature)) {
+      throw new Error(
+        `The selected model requires the WebGPU feature ${feature}, but the selected GPU adapter does not provide it.`,
+      );
+    }
+  }
   configureOrtAdapter(adapter);
 }
 
@@ -158,7 +180,9 @@ export async function createRuntimeSessions(
   assets: ModelAssets,
   onProgress?: SessionProgressCallback,
 ): Promise<RuntimeSessions> {
-  await assertWebGpuAvailable();
+  await assertWebGpuAvailable(
+    assets.manifest.runtime.required_webgpu_features,
+  );
   configureOrt();
   return createAll(assets, assets.manifest.graphs, onProgress);
 }

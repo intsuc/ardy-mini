@@ -43,6 +43,8 @@ from .wrappers import (
 BROWSER_MODEL_FILES_FORMAT = "ardy-browser-model-files"
 BROWSER_MODEL_FILES_SCHEMA_VERSION = 1
 DEFAULT_MODEL_ID = "ardy-minilm-core40-browser-v1"
+FP16_VARIANT_DIRECTORY = "fp16"
+FP32_VARIANT_DIRECTORY = "fp32"
 DEFAULT_MAX_TOKENS = 20
 DEFAULT_MAX_PROMPT_TOKENS = 128
 DEFAULT_MAX_OUTPUT_FRAMES = 200
@@ -117,11 +119,10 @@ def _onnx_export_mode():
 
 @dataclass(frozen=True)
 class BrowserExportConfig:
-    """Inputs and fixed dimensions for one browser model-file export."""
+    """Inputs and fixed dimensions for one browser model-family export."""
 
     output_directory: Path
     minilm_artifact: Path
-    fp32_reference_output_directory: Path | None = None
     checkpoints_dir: Path | None = None
     model: str = "core"
     model_id: str = DEFAULT_MODEL_ID
@@ -272,48 +273,23 @@ def _validate_config(config: BrowserExportConfig) -> None:
             f"Browser model output must be a directory: {output_directory}"
         )
 
-    reference_directory = config.fp32_reference_output_directory
-    destination_directories = [output_directory]
-    if reference_directory is not None:
-        destination_directories.append(reference_directory)
-        if reference_directory.is_symlink() or (
-            reference_directory.exists() and not reference_directory.is_dir()
-        ):
-            raise NotADirectoryError(
-                f"FP32 reference output must be a directory: {reference_directory}"
-            )
-        resolved_output = output_directory.resolve()
-        resolved_reference = reference_directory.resolve()
-        if resolved_reference == resolved_output:
-            raise ValueError(
-                "Mixed-FP16 and FP32 reference outputs must use different directories."
-            )
-        if (
-            resolved_output in resolved_reference.parents
-            or resolved_reference in resolved_output.parents
-        ):
-            raise ValueError(
-                "Mixed-FP16 and FP32 reference outputs must not contain one another."
-            )
-
     protected_directories = [
         config.minilm_artifact.resolve(),
         config.checkpoints_dir.resolve(),
     ]
-    for destination in destination_directories:
-        resolved_destination = destination.resolve()
-        if resolved_destination.parent == resolved_destination:
-            raise ValueError("Browser model output cannot replace a filesystem root.")
-        for protected in protected_directories:
-            if (
-                resolved_destination == protected
-                or resolved_destination in protected.parents
-                or protected in resolved_destination.parents
-            ):
-                raise ValueError(
-                    "Browser model outputs must not overlap model input "
-                    f"directories: {destination}"
-                )
+    resolved_destination = output_directory.resolve()
+    if resolved_destination.parent == resolved_destination:
+        raise ValueError("Browser model output cannot replace a filesystem root.")
+    for protected in protected_directories:
+        if (
+            resolved_destination == protected
+            or resolved_destination in protected.parents
+            or protected in resolved_destination.parents
+        ):
+            raise ValueError(
+                "Browser model output must not overlap model input "
+                f"directories: {output_directory}"
+            )
 
 
 def _specialize_denoiser_position_tables(
@@ -1283,7 +1259,7 @@ def _build_manifest(
     return manifest
 
 
-def _build_fp32_reference_payload(
+def _build_fp32_payload(
     *,
     candidate_manifest: dict[str, Any],
     output_dir: Path,
@@ -1291,7 +1267,7 @@ def _build_fp32_reference_payload(
     tokenizer_paths: list[Path],
     verification: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], list[Path]]:
-    """Build matching FP32 metadata and assets from the exported graphs."""
+    """Build the browser-loadable FP32 variant from the exported graphs."""
     expected_graphs = set(candidate_manifest["graphs"])
     if set(graph_paths) != expected_graphs:
         raise ValueError(
@@ -1299,15 +1275,15 @@ def _build_fp32_reference_payload(
             f"expected {sorted(expected_graphs)}, got {sorted(graph_paths)}."
         )
 
-    reference_tokenizer_dir = output_dir / "tokenizer"
-    reference_tokenizer_dir.mkdir(parents=True, exist_ok=True)
-    reference_tokenizer_paths: list[Path] = []
+    fp32_tokenizer_dir = output_dir / "tokenizer"
+    fp32_tokenizer_dir.mkdir(parents=True, exist_ok=True)
+    fp32_tokenizer_paths: list[Path] = []
     for source in tokenizer_paths:
-        destination = reference_tokenizer_dir / source.name
+        destination = fp32_tokenizer_dir / source.name
         shutil.copy2(source, destination)
-        reference_tokenizer_paths.append(destination)
+        fp32_tokenizer_paths.append(destination)
 
-    payload_paths = list(graph_paths.values()) + reference_tokenizer_paths
+    payload_paths = list(graph_paths.values()) + fp32_tokenizer_paths
     manifest = copy.deepcopy(candidate_manifest)
     manifest["files"] = {path.relative_to(output_dir).as_posix(): _file_record(path) for path in sorted(payload_paths)}
 
@@ -1335,8 +1311,7 @@ def _build_fp32_reference_payload(
         "graphs": graph_precision,
     }
 
-    # Keep the runtime contract identical to the candidate. The FP32 files are
-    # an evaluator reference; only files, precision, and verification differ.
+    manifest["runtime"]["required_webgpu_features"] = []
     if verification is None:
         manifest.pop("verification", None)
     else:
@@ -1351,8 +1326,8 @@ def _export_browser_model_files_working_directory(
 ) -> tuple[
     dict[str, Any],
     list[Path],
-    dict[str, Any] | None,
-    list[Path] | None,
+    dict[str, Any],
+    list[Path],
 ]:
     """Export and validate the three browser graphs in a temporary directory."""
     device = _resolve_device(config.device)
@@ -1451,7 +1426,7 @@ def _export_browser_model_files_working_directory(
         "denoiser": output_dir / "denoiser.onnx",
         "decoder": output_dir / "decoder.onnx",
     }
-    fp32_dir = output_dir / ".fp32-reference"
+    fp32_dir = output_dir / ".fp32"
     fp32_dir.mkdir()
     fp32_graph_paths = {graph_name: fp32_dir / graph_path.name for graph_name, graph_path in graph_paths.items()}
     _export_graph(
@@ -1565,21 +1540,18 @@ def _export_browser_model_files_working_directory(
         precision_reports=precision_reports,
         checkpoint_identity=checkpoint_identity,
     )
-    reference_manifest = None
-    reference_payload_paths = None
-    if config.fp32_reference_output_directory is not None:
-        reference_manifest, reference_payload_paths = _build_fp32_reference_payload(
-            candidate_manifest=manifest,
-            output_dir=fp32_dir,
-            graph_paths=fp32_graph_paths,
-            tokenizer_paths=tokenizer_paths,
-            verification=fp32_verification,
-        )
+    fp32_manifest, fp32_payload_paths = _build_fp32_payload(
+        candidate_manifest=manifest,
+        output_dir=fp32_dir,
+        graph_paths=fp32_graph_paths,
+        tokenizer_paths=tokenizer_paths,
+        verification=fp32_verification,
+    )
     return (
         manifest,
         payload_paths,
-        reference_manifest,
-        reference_payload_paths,
+        fp32_manifest,
+        fp32_payload_paths,
     )
 
 
@@ -1595,7 +1567,7 @@ def _stage_directory(destination: Path, label: str) -> Path:
 
 
 def export_browser_model_files(config: BrowserExportConfig) -> Path:
-    """Export reproducible, individually compressed Core40 browser files."""
+    """Export reproducible FP16 and FP32 Core40 browser model variants."""
 
     _validate_config(config)
     with tempfile.TemporaryDirectory(prefix="ardy-browser-export-") as temporary_directory:
@@ -1603,57 +1575,45 @@ def export_browser_model_files(config: BrowserExportConfig) -> Path:
         (
             manifest,
             payload_paths,
-            reference_manifest,
-            reference_payload_paths,
+            fp32_manifest,
+            fp32_payload_paths,
         ) = _export_browser_model_files_working_directory(
             config,
             working_directory,
         )
-        candidate_stage = _stage_directory(
+        family_stage = _stage_directory(
             config.output_directory,
-            "candidate",
+            "family",
         )
-        stages = [candidate_stage]
-        publications = [(candidate_stage, config.output_directory)]
         try:
+            fp16_stage = family_stage / FP16_VARIANT_DIRECTORY
             _write_model_files_directory(
                 source_directory=working_directory,
                 payload_paths=payload_paths,
                 manifest=manifest,
-                output_directory=candidate_stage,
+                output_directory=fp16_stage,
             )
-            reference_destination = config.fp32_reference_output_directory
-            if reference_destination is not None:
-                if (
-                    reference_manifest is None
-                    or reference_payload_paths is None
-                ):
-                    raise RuntimeError("FP32 reference files were not produced.")
-                reference_stage = _stage_directory(
-                    reference_destination,
-                    "reference",
-                )
-                stages.append(reference_stage)
-                _write_model_files_directory(
-                    source_directory=working_directory / ".fp32-reference",
-                    payload_paths=reference_payload_paths,
-                    manifest=reference_manifest,
-                    output_directory=reference_stage,
-                )
-                publications.append(
-                    (reference_stage, reference_destination)
-                )
-            _publish_directory_set(publications)
+            fp32_stage = family_stage / FP32_VARIANT_DIRECTORY
+            _write_model_files_directory(
+                source_directory=working_directory / ".fp32",
+                payload_paths=fp32_payload_paths,
+                manifest=fp32_manifest,
+                output_directory=fp32_stage,
+            )
+            _publish_directory_set(
+                [(family_stage, config.output_directory)]
+            )
         finally:
-            for stage in stages:
-                if stage.exists():
-                    shutil.rmtree(stage)
+            if family_stage.exists():
+                shutil.rmtree(family_stage)
     return config.output_directory
 
 
 __all__ = [
     "BROWSER_MODEL_FILES_FORMAT",
     "BROWSER_MODEL_FILES_SCHEMA_VERSION",
+    "FP16_VARIANT_DIRECTORY",
+    "FP32_VARIANT_DIRECTORY",
     "BrowserExportConfig",
     "export_browser_model_files",
 ]

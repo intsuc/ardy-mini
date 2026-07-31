@@ -7,6 +7,7 @@ import { gzipSync } from "node:zlib";
 import type { Page, Route } from "@playwright/test";
 
 import {
+  FP32_PRECISION_FORMAT,
   GRAPH_PRECISION_CONTRACT,
   MIXED_PRECISION_FORMAT,
   MIXED_PRECISION_POLICY_VERSION,
@@ -17,9 +18,17 @@ import {
   type BrowserGraphPrecisionSummary,
   type BrowserModelManifest,
 } from "../src/runtime/manifest";
+import type { BrowserModelVariant } from "../src/runtime/model-variant";
 import { WORKER_PROTOCOL_VERSION } from "../src/runtime/protocol";
 
-const developmentModelPath = "/models/ardy-minilm-core40-browser-v1/";
+const developmentModelFamilyPath =
+  "/models/ardy-minilm-core40-browser-v1/";
+
+export function developmentModelPath(
+  variant: BrowserModelVariant,
+): string {
+  return `${developmentModelFamilyPath}${variant}/`;
+}
 
 function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -30,9 +39,33 @@ function compressed(bytes: Uint8Array): Uint8Array {
 }
 
 export interface MockModelFiles {
+  variant: BrowserModelVariant;
+  basePath: string;
   manifest: BrowserModelManifest;
   manifestTransport: Uint8Array;
   transports: Readonly<Record<string, Uint8Array>>;
+  transportSizeBytes: number;
+}
+
+export interface MockModelFilesOptions {
+  variant?: BrowserModelVariant;
+}
+
+function fixturePayload(
+  label: string,
+  paddingBytes: number,
+): Uint8Array {
+  const prefix = new TextEncoder().encode(label);
+  const bytes = new Uint8Array(prefix.byteLength + paddingBytes);
+  bytes.set(prefix);
+  let state = 0x9e37_79b9;
+  for (let index = prefix.byteLength; index < bytes.byteLength; index += 1) {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    bytes[index] = state & 0xff;
+  }
+  return bytes;
 }
 
 function openEndedRangeStart(
@@ -94,7 +127,10 @@ async function fulfillModelFile(
   });
 }
 
-export function createMockModelFiles(): MockModelFiles {
+export function createMockModelFiles(
+  options: MockModelFilesOptions = {},
+): MockModelFiles {
+  const variant = options.variant ?? "fp16";
   const encoder = new TextEncoder();
   const rawFiles = new Map<string, Uint8Array>([
     ["tokenizer/tokenizer.json", encoder.encode('{"fixture":"tokenizer"}')],
@@ -104,7 +140,13 @@ export function createMockModelFiles(): MockModelFiles {
     ],
     ["text_encoder.onnx", encoder.encode("fixture text encoder")],
     ["denoiser.onnx", encoder.encode("fixture denoiser")],
-    ["decoder.onnx", encoder.encode("fixture decoder")],
+    [
+      "decoder.onnx",
+      fixturePayload(
+        "fixture decoder",
+        variant === "fp32" ? 4 * 1024 : 0,
+      ),
+    ],
   ]);
   const files: BrowserModelManifest["files"] = {};
   const transports: Record<string, Uint8Array> = {};
@@ -181,6 +223,27 @@ export function createMockModelFiles(): MockModelFiles {
     (total, graph) => total + graph.output_size_bytes,
     0,
   );
+  const fp32Graphs = {
+    text_encoder: {
+      model: "text_encoder.onnx",
+      sha256: files["text_encoder.onnx"].sha256,
+      size_bytes: files["text_encoder.onnx"].size_bytes,
+    },
+    denoiser: {
+      model: "denoiser.onnx",
+      sha256: files["denoiser.onnx"].sha256,
+      size_bytes: files["denoiser.onnx"].size_bytes,
+    },
+    decoder: {
+      model: "decoder.onnx",
+      sha256: files["decoder.onnx"].sha256,
+      size_bytes: files["decoder.onnx"].size_bytes,
+    },
+  };
+  const fp32Bytes = Object.values(fp32Graphs).reduce(
+    (total, graph) => total + graph.size_bytes,
+    0,
+  );
   const alphas = [
     0.99, 0.95, 0.88, 0.78, 0.66, 0.53, 0.4, 0.28, 0.17, 0.08,
   ];
@@ -240,22 +303,37 @@ export function createMockModelFiles(): MockModelFiles {
         },
       },
     },
-    precision: {
-      format: MIXED_PRECISION_FORMAT,
-      policy_version: MIXED_PRECISION_POLICY_VERSION,
-      public_io_dtype: MIXED_PRECISION_PUBLIC_IO_DTYPE,
-      required_webgpu_features: [REQUIRED_WEBGPU_FEATURE],
-      source_onnx_bytes: sourceBytes,
-      mixed_onnx_bytes: mixedBytes,
-      saved_onnx_bytes: sourceBytes - mixedBytes,
-      saved_onnx_fraction: (sourceBytes - mixedBytes) / sourceBytes,
-      toolchain: {
-        torch: "fixture",
-        onnx: "fixture",
-        onnxruntime: "fixture",
-      },
-      graphs: precisionGraphs,
-    },
+    precision:
+      variant === "fp16"
+        ? {
+            format: MIXED_PRECISION_FORMAT,
+            policy_version: MIXED_PRECISION_POLICY_VERSION,
+            public_io_dtype: MIXED_PRECISION_PUBLIC_IO_DTYPE,
+            required_webgpu_features: [REQUIRED_WEBGPU_FEATURE],
+            source_onnx_bytes: sourceBytes,
+            mixed_onnx_bytes: mixedBytes,
+            saved_onnx_bytes: sourceBytes - mixedBytes,
+            saved_onnx_fraction:
+              (sourceBytes - mixedBytes) / sourceBytes,
+            toolchain: {
+              torch: "fixture",
+              onnx: "fixture",
+              onnxruntime: "fixture",
+            },
+            graphs: precisionGraphs,
+          }
+        : {
+            format: FP32_PRECISION_FORMAT,
+            public_io_dtype: MIXED_PRECISION_PUBLIC_IO_DTYPE,
+            required_webgpu_features: [],
+            onnx_bytes: fp32Bytes,
+            toolchain: {
+              torch: "fixture",
+              onnx: "fixture",
+              onnxruntime: "fixture",
+            },
+            graphs: fp32Graphs,
+          },
     dimensions: {
       fps: 20,
       num_frames_per_token: 4,
@@ -299,7 +377,8 @@ export function createMockModelFiles(): MockModelFiles {
     runtime: {
       contract_revision: 3,
       text_only: true,
-      required_webgpu_features: [REQUIRED_WEBGPU_FEATURE],
+      required_webgpu_features:
+        variant === "fp16" ? [REQUIRED_WEBGPU_FEATURE] : [],
     },
     notices: ["fixture only"],
     license_notices: [
@@ -313,10 +392,17 @@ export function createMockModelFiles(): MockModelFiles {
   const manifestBytes = encoder.encode(
     `${JSON.stringify(manifest)}\n`,
   );
+  const basePath = developmentModelPath(variant);
   return {
+    variant,
+    basePath,
     manifest,
     manifestTransport: compressed(manifestBytes),
     transports,
+    transportSizeBytes: Object.values(files).reduce(
+      (total, file) => total + file.transport.size_bytes,
+      0,
+    ),
   };
 }
 
@@ -324,19 +410,20 @@ export async function routeMockModelFiles(
   page: Page,
   files: MockModelFiles,
 ): Promise<void> {
+  const modelPath = files.basePath;
   await page.route(
-    `**${developmentModelPath}**`,
+    `**${modelPath}**`,
     async (route) => {
       const requestPath = new URL(route.request().url()).pathname;
       if (
         requestPath ===
-        `${developmentModelPath}model.json.gz`
+        `${modelPath}model.json.gz`
       ) {
         await fulfillModelFile(route, files.manifestTransport);
         return;
       }
       const relativePath = requestPath.slice(
-        developmentModelPath.length,
+        modelPath.length,
       );
       const transport = files.transports[relativePath];
       if (transport !== undefined) {
@@ -381,7 +468,21 @@ export async function installMockModelWorker(
           const command = value as {
             type: string;
             requestId: string;
+            baseUrl?: unknown;
           };
+          if (command.type === "getWebGpuCapabilities") {
+            queueMicrotask(() => {
+              this.emit({
+                type: "webGpuCapabilities",
+                requestId: command.requestId,
+                shaderF16:
+                  model.runtime.required_webgpu_features.includes(
+                    "shader-f16",
+                  ),
+              });
+            });
+            return;
+          }
           if (command.type === "getStatus") {
             queueMicrotask(() => {
               this.emit({
@@ -393,6 +494,10 @@ export async function installMockModelWorker(
             return;
           }
           if (command.type === "loadModel") {
+            if (typeof command.baseUrl !== "string") {
+              throw new TypeError("loadModel.baseUrl must be a string");
+            }
+            const baseUrl = command.baseUrl;
             setTimeout(() => {
               void (async () => {
                 const {
@@ -400,7 +505,7 @@ export async function installMockModelWorker(
                   markModelCacheComplete,
                 } = await import("/src/runtime/model-assets.ts");
                 const assets = await loadModelAssets(
-                  "/models/ardy-minilm-core40-browser-v1/",
+                  baseUrl,
                   (progress) => {
                     this.emit({
                       type: "progress",
@@ -518,4 +623,4 @@ export async function installMockModelWorker(
 }
 
 export const missingDevelopmentModelRoute =
-  `**${developmentModelPath}**`;
+  `**${developmentModelFamilyPath}**`;

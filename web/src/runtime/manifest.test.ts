@@ -30,6 +30,14 @@ describe("browser model-files manifest", () => {
     });
   });
 
+  it("accepts a complete FP32 variant without optional WebGPU features", async () => {
+    const { manifest } = await createModelTestFixture("fp32");
+    const validated = validateModelManifest(manifest);
+
+    expect(validated.precision.format).toBe("fp32");
+    expect(validated.runtime.required_webgpu_features).toEqual([]);
+  });
+
   it("requires an immutable revision and the current files format", async () => {
     const { manifest } = await createModelTestFixture();
     expect(() =>
@@ -81,10 +89,35 @@ describe("browser model-files manifest", () => {
     ).toThrow(/output_size_bytes/);
 
     const precision = structuredClone(manifest.precision);
+    if (precision.format !== "mixed-fp16") {
+      throw new Error("Expected the default mixed-precision fixture.");
+    }
     precision.graphs.decoder.output_sha256 = "0".repeat(64);
     expect(() =>
       validateModelManifest({ ...manifest, precision }),
     ).toThrow(/output_sha256/);
+  });
+
+  it("binds FP32 graph metadata and runtime requirements to the variant", async () => {
+    const { manifest } = await createModelTestFixture("fp32");
+    const precision = structuredClone(manifest.precision);
+    if (precision.format !== "fp32") {
+      throw new Error("Expected an FP32 fixture.");
+    }
+    precision.graphs.decoder.size_bytes += 1;
+    expect(() =>
+      validateModelManifest({ ...manifest, precision }),
+    ).toThrow(/size_bytes/);
+
+    expect(() =>
+      validateModelManifest({
+        ...manifest,
+        runtime: {
+          ...manifest.runtime,
+          required_webgpu_features: ["shader-f16"],
+        },
+      }),
+    ).toThrow(/must equal \[\]/);
   });
 
   it("rejects non-Core40 dimensions, sampler order, and old fields", async () => {

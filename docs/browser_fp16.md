@@ -6,8 +6,13 @@ Public graph inputs and outputs remain FP32, so diffusion state and the
 JavaScript runtime contract do not change.
 The text encoder and autoregressive denoiser remain byte-identical to their
 FP32 exports after continuation-rollout ablation. Only the structured decoder
-contains FP16 compute. The browser requires WebGPU's native `shader-f16`
-feature and does not fall back to another backend.
+contains FP16 compute. This mixed-FP16 variant requires WebGPU's native
+`shader-f16` feature. It is shipped beside a complete FP32 variant; the
+inference worker reports the feature set of the adapter it will use before any
+model manifest is requested, and the browser selects mixed FP16 or FP32 from
+that result without exposing a precision setting. Both variants use
+WebGPU—FP32 is a model fallback, not a CPU or WebAssembly
+execution-provider fallback.
 
 ## Selected precision policy
 
@@ -30,8 +35,9 @@ FP16 primitives.
 
 The implementation follows ONNX Runtime's
 [float16 conversion guidance](https://onnxruntime.ai/docs/performance/model-optimizations/float16.html).
-The deployment requirement comes from WebGPU/WGSL's optional
-[`shader-f16` feature](https://gpuweb.github.io/gpuweb/wgsl/).
+The mixed variant's deployment requirement comes from WebGPU/WGSL's optional
+[`shader-f16` feature](https://gpuweb.github.io/gpuweb/wgsl/); the FP32 variant
+declares no optional WebGPU feature.
 
 ## Ablation
 
@@ -155,14 +161,12 @@ Reproduce the paired evaluation with:
 uv run --extra browser python scripts/export_browser_models.py \
   --checkpoints-dir checkpoints \
   --minilm-artifact artifacts/minilm-ardy-core40 \
-  --output-directory artifacts/browser/ardy-minilm-core40-browser-v1 \
-  --fp32-reference-output-directory \
-    artifacts/browser/ardy-minilm-core40-browser-v1-fp32-reference
+  --output-directory artifacts/browser/ardy-minilm-core40-browser-v1
 
 uv run --extra browser python scripts/evaluate_browser_fp16.py \
   --reference-dir \
-    artifacts/browser/ardy-minilm-core40-browser-v1-fp32-reference \
-  --candidate-dir artifacts/browser/ardy-minilm-core40-browser-v1 \
+    artifacts/browser/ardy-minilm-core40-browser-v1/fp32 \
+  --candidate-dir artifacts/browser/ardy-minilm-core40-browser-v1/fp16 \
   --prompts artifacts/data/prompts-core40-timeline.jsonl \
   --prompt-metadata artifacts/data/prompts-core40-timeline.metadata.json \
   --split test \
@@ -193,16 +197,19 @@ aborts report creation.
 
 | Distribution total | FP32 bytes | Mixed-FP16 bytes | Saved |
 |---|---:|---:|---:|
-| Raw manifest and model files | 775,578,788 | 740,125,267 | 35,453,521 |
-| `model.json.gz` and per-file gzip transports | 717,533,184 | 684,220,414 | 33,312,770 |
+| Raw manifest and model files | 775,579,900 | 740,128,936 | 35,450,964 |
+| `model.json.gz` and per-file gzip transports | 717,533,539 | 684,221,164 | 33,312,375 |
 
 The mixed-FP16 distribution is 4.6427% smaller after per-file gzip, saving
 31.77 MiB (0.0310 GiB) on transfer. The production policy keeps the text
 encoder and denoiser byte-identical to FP32 and applies mixed FP16 only to the
-decoder. The decompressed candidate manifest SHA-256 is
-`1a6434946d8db8a6e18d9be53995e376e4ee1b4b2a650e90ab79f3c30ad48bf1`;
+decoder. The browser presents neither precision label; the automatically
+selected variant changes the download from 717,533,539 bytes (684.29 MiB) to
+684,221,164 bytes (652.52 MiB) on adapters with `shader-f16`. In the recorded
+ablation, the decompressed candidate manifest SHA-256 is
+`07a0cb3984cc324e9318549d03494d3fa7193727367ae45b2087ca8a978b6d0b`;
 the matching FP32 reference manifest SHA-256 is
-`1c073d6ddfc5f5258c35eb0987bc674c9fa62c10bf6bf0e2ecb00f638defc7d0`.
+`982095622886845ed985f353ab5e3806db5da74f3aa0b85acb0415e81e48e5a1`.
 The report records these portable manifest identities together with the model
 ID, immutable revision, and measured raw/transport totals; it records no local
 directory path. These are verified file/transfer reductions, not a claim that
@@ -210,25 +217,27 @@ peak GPU memory drops by the same amount. Runtime allocations also include
 FP32 regions, activations, staging buffers, and browser/driver overhead.
 
 CPU FP16 inference is intentionally not used by the application and was slower
-than FP32 in the evaluation environment: the candidate took `1.31786`
-seconds per five-window case versus `1.28885` seconds for the FP32 reference.
+than FP32 in the evaluation environment: the candidate took `1.30087`
+seconds per five-window case versus `1.23139` seconds for the FP32 reference.
 This is diagnostic only. Actual deployment timing must use the opt-in WebGPU
 Playwright test documented in [`browser_demo.md`](browser_demo.md).
 
 ## WebGPU validation in this environment
 
-The runtime feature gate and model-load order were exercised with Chromium
+The automatic selection and real-model path were exercised with Chromium
 `151.0.7922.34` (Dawn
 `583f3600453cc982a3dac39308cac8939875d7af`) on an NVIDIA GB10, Vulkan
-`1.4.312`, driver `580.159.3.0`. The adapter did not expose optional
-`shader-f16`, so the application correctly rejected the model before reading
-or decompressing its graph transports. NVIDIA and SwiftShader adapters, the default and Vulkan
-ANGLE paths, three power preferences, core/compatibility requests, and unsafe
-WebGPU developer flags were checked; all reported `shader-f16=false`. The
-preflight produced no console error or page error, and its seven focused
-runtime tests passed.
+`1.4.312`, driver `580.159.3.0`. The inference adapter did not expose optional
+`shader-f16`, so the app selected only the FP32 model-family directory. It
+downloaded and verified the real transports, initialized the decoder, text
+encoder, and denoiser with ONNX Runtime WebGPU, and generated 40 frames without
+a page error or console error. The complete Playwright test took about 15
+seconds across repeated runs against the local development model server.
 
-Consequently, this environment can validate the converted graphs through CPU
-ONNX Runtime and validate the browser feature gate, but it cannot report
-mixed-FP16 WebGPU inference time or GPU memory. Those measurements require a
-browser/driver combination that actually exposes `shader-f16`.
+The same non-persistent Chromium configuration also retained all 717,512,045
+declared FP32 file-transport bytes as 93 Cache Storage entries with no entry
+larger than 8 MiB, reconstructed the 547,498,825-byte compressed denoiser, and
+reloaded its 590,701,706 raw bytes while offline. This verifies the bounded
+cache representation used for large graphs. Mixed-FP16 WebGPU timing and GPU
+memory still require a browser/driver combination that exposes `shader-f16`;
+the CPU ablation above remains the fidelity basis for that variant.
