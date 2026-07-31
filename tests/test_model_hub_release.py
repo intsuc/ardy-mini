@@ -74,6 +74,16 @@ def write_variant(root: Path, variant: str, *, model_id: str = MODEL_ID) -> None
 
 
 class ModelHubReleaseTests(unittest.TestCase):
+    def test_model_card_links_the_public_space_page(self) -> None:
+        template = (REPOSITORY_ROOT / "model_hub/README.md.template").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "https://huggingface.co/spaces/intsuc/ardy-mini",
+            template,
+        )
+        self.assertNotIn("https://intsuc-ardy-mini.hf.space", template)
+
     def make_fixture(self, root: Path) -> ReleaseConfig:
         models = root / "models"
         write_variant(models, "fp16")

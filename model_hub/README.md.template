@@ -30,7 +30,7 @@ path is distilled into an all-MiniLM-L6-v2-based encoder that emits the same
 generator is converted, not distilled, and runs locally with ONNX Runtime
 Web's WebGPU execution provider.
 
-- Interactive app: [ARDY Mini](https://intsuc-ardy-mini.hf.space)
+- Interactive app: [ARDY Mini](https://huggingface.co/spaces/intsuc/ardy-mini)
 - Source and reproducibility code: [intsuc/ardy-mini](https://github.com/intsuc/ardy-mini)
 - Publisher/contact: intsuc, [i@intsuc.dev](mailto:i@intsuc.dev)
 

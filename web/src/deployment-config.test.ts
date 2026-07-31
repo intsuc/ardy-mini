@@ -9,7 +9,7 @@ import {
   resolveModelTermsUrl,
 } from "./deployment-config";
 
-const PAGE_URL = "https://intsuc-ardy-mini.hf.space/";
+const PAGE_URL = "https://intsuc-ardy-mini.static.hf.space/";
 const REVISION = "0123456789abcdef0123456789abcdef01234567";
 const FAMILY_URL =
   `https://huggingface.co/intsuc/Llama-3-ARDY-Mini-Core40-Browser/resolve/${REVISION}/`;
