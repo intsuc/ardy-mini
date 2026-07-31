@@ -8,7 +8,7 @@ base_model:
   - sentence-transformers/all-MiniLM-L6-v2
 license: other
 license_name: ardy-mini-composite-model-terms
-license_link: ./MODEL_TERMS.md
+license_link: https://huggingface.co/intsuc/Llama-3-ARDY-Mini-Core40-Browser/blob/main/MODEL_TERMS.md
 tags:
   - motion-generation
   - text-to-motion
