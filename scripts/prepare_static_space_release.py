@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 intsuc
 # SPDX-License-Identifier: Apache-2.0
-"""Prepare the allowlisted source tree for the ARDY Mini Static Space."""
+"""Build and stage the allowlisted ARDY Mini Static Space deployment."""
 
 from __future__ import annotations
 
@@ -68,6 +68,26 @@ def _copy_required_file(source: Path, destination: Path) -> None:
     shutil.copy2(source, destination)
 
 
+def _copy_required_directory(source: Path, destination: Path) -> None:
+    if not source.is_dir() or source.is_symlink():
+        raise FileNotFoundError(f"Required Static Space source is missing: {source}")
+    shutil.copytree(source, destination)
+
+
+def _build_web_distribution(build_root: Path) -> Path:
+    for command in (("npm", "ci"), ("npm", "run", "build")):
+        try:
+            subprocess.run(command, cwd=build_root, check=True)
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise RuntimeError(
+                f"Static Space web build failed: {' '.join(command)}"
+            ) from error
+    distribution = build_root / "dist"
+    if not (distribution / "index.html").is_file():
+        raise RuntimeError("Static Space build did not produce dist/index.html")
+    return distribution
+
+
 def _safe_existing_release(output: Path) -> bool:
     return output.is_dir() and (output / RELEASE_MARKER).is_file()
 
@@ -96,34 +116,61 @@ def prepare_release(output: Path, *, allow_dirty: bool = False) -> Path:
         dir=output.parent,
         prefix=f".{output.name}-",
     ) as temporary_directory:
-        stage = Path(temporary_directory)
-        _copy_required_file(WEB_ROOT / "space" / "README.md", stage / "README.md")
+        temporary_root = Path(temporary_directory)
+        build_root = temporary_root / "build"
+        release_root = temporary_root / "release"
+        build_root.mkdir()
+        release_root.mkdir()
+
         for relative_path in WEB_FILES:
-            _copy_required_file(WEB_ROOT / relative_path, stage / relative_path)
+            _copy_required_file(WEB_ROOT / relative_path, build_root / relative_path)
         for relative_path in WEB_DIRECTORIES:
-            source = WEB_ROOT / relative_path
-            if not source.is_dir():
-                raise FileNotFoundError(
-                    f"Required Static Space source is missing: {source}"
-                )
-            shutil.copytree(source, stage / relative_path)
+            _copy_required_directory(
+                WEB_ROOT / relative_path,
+                build_root / relative_path,
+            )
         for relative_path in ROOT_NOTICES:
-            _copy_required_file(REPOSITORY_ROOT / relative_path, stage / relative_path)
+            _copy_required_file(
+                REPOSITORY_ROOT / relative_path,
+                build_root / relative_path,
+            )
+
+        distribution = _build_web_distribution(build_root)
+        for source in distribution.iterdir():
+            destination = release_root / source.name
+            if source.is_symlink():
+                raise RuntimeError(f"Static build output contains a symlink: {source}")
+            if source.is_dir():
+                shutil.copytree(source, destination)
+            elif source.is_file():
+                shutil.copy2(source, destination)
+            else:
+                raise RuntimeError(f"Unsupported static build output: {source}")
+
+        _copy_required_file(
+            WEB_ROOT / "space" / "README.md",
+            release_root / "README.md",
+        )
+        for relative_path in ROOT_NOTICES:
+            _copy_required_file(
+                REPOSITORY_ROOT / relative_path,
+                release_root / relative_path,
+            )
 
         marker = {
-            "format": "ardy-static-space-release-v1",
+            "format": "ardy-static-space-release-v2",
             "source_commit": _source_commit(),
             "source_dirty": source_dirty,
             "space": "intsuc/ardy-mini",
         }
-        (stage / RELEASE_MARKER).write_text(
+        (release_root / RELEASE_MARKER).write_text(
             json.dumps(marker, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
 
         if output.exists():
             shutil.rmtree(output)
-        shutil.copytree(stage, output)
+        shutil.copytree(release_root, output)
     return output
 
 
@@ -146,8 +193,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     output = prepare_release(args.output, allow_dirty=args.allow_dirty)
-    print(f"Prepared Static Space source: {output}")
-    print(f"Validate with: cd {output} && npm ci && npm run build")
+    print(f"Prepared prebuilt Static Space deployment: {output}")
+    print("The staged index.html is served directly; no hosted build command is used.")
 
 
 if __name__ == "__main__":

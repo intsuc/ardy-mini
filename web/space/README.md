@@ -4,8 +4,7 @@ emoji: 🕺
 colorFrom: gray
 colorTo: gray
 sdk: static
-app_build_command: npm run build
-app_file: dist/index.html
+app_file: index.html
 pinned: false
 license: apache-2.0
 fullWidth: true
@@ -54,6 +53,10 @@ embedded in or required by this client. VRM files stay local to the browser.
 Set `ARDY_MODEL_BASE_URL` as a public Space Variable to the model repository's
 immutable `resolve/<commit-sha>/` URL. Do not configure a Hugging Face token or
 other secret: Static Space variables are available to client-side JavaScript.
+
+The source release script builds the pinned web dependencies locally and
+stages only the resulting static files and notices. The Space therefore serves
+the committed `index.html` directly and does not require a hosted build job.
 
 `VITE_MODEL_BASE_URL` provides the equivalent build-time configuration for
 non-Space deployments. `ARDY_MODEL_TERMS_URL` or `VITE_MODEL_TERMS_URL` may be
