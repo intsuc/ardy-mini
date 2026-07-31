@@ -706,6 +706,18 @@ test("gates startup through model download and manages the browser cache", async
   await expect(startupDialog).toContainText(
     `ARDY Mini needs a ${formatModelBytes(modelFiles.transportSizeBytes)} model download.`,
   );
+  await expect(startupDialog).toContainText("Built with Meta Llama 3");
+  await expect(
+    startupDialog.getByRole("link", {
+      name: "model terms and intended-use limits",
+    }),
+  ).toHaveAttribute(
+    "href",
+    "https://huggingface.co/intsuc/Llama-3-ARDY-Mini-Core40-Browser/blob/main/MODEL_TERMS.md",
+  );
+  await expect(
+    startupDialog.getByRole("link", { name: "i@intsuc.dev" }),
+  ).toHaveAttribute("href", "mailto:i@intsuc.dev");
   expect(modelRequests).toContain(
     `${developmentModelPath("fp16")}model.json.gz`,
   );
@@ -1775,14 +1787,14 @@ test("keeps labels, keyboard focus, and canvas controls accessible", async ({
   ).toHaveCount(0);
   const motionTab = page.getByRole("tab", { name: "Motion" });
   const viewTab = page.getByRole("tab", { name: "View" });
-  await expect(motionTab).toHaveAttribute("aria-selected", "true");
-  await motionTab.focus();
-  await page.keyboard.press("ArrowRight");
-  await expect(viewTab).toBeFocused();
-  await page.keyboard.press("ArrowLeft");
-  await expect(motionTab).toBeFocused();
-  await viewTab.click();
   await expect(viewTab).toHaveAttribute("aria-selected", "true");
+  await viewTab.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(motionTab).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(viewTab).toBeFocused();
+  await motionTab.click();
+  await expect(motionTab).toHaveAttribute("aria-selected", "true");
   expect(await page.locator("#viewport").boundingBox()).toEqual(viewportBefore);
   const previewSettingsOverflow = await settingsContent.evaluate((element) => {
     const style = getComputedStyle(element);

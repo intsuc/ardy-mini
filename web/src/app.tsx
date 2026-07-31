@@ -128,6 +128,10 @@ import {
   PROMPT_EXAMPLES,
   PROMPT_EXAMPLE_EVENT,
 } from "@/prompt-examples"
+import {
+  resolveModelTermsUrl,
+  staticSpaceVariable,
+} from "@/deployment-config"
 import { bootstrap } from "@/main"
 import {
   clearModelCacheAction,
@@ -390,6 +394,16 @@ function ModelStartupDialog({
   const clearError =
     state.cache === "error" && state.errorOperation === "clear"
   const startupError = downloadError || initializationError
+  const showModelNotice = awaitingConsent && !clearError
+  const modelTermsUrl = resolveModelTermsUrl({
+    buildTermsValue: import.meta.env.VITE_MODEL_TERMS_URL,
+    buildValue: import.meta.env.VITE_MODEL_BASE_URL,
+    pageUrl: globalThis.location.href,
+    spaceTermsValue:
+      staticSpaceVariable("ARDY_MODEL_TERMS_URL") ?? undefined,
+    spaceValue:
+      staticSpaceVariable("ARDY_MODEL_BASE_URL") ?? undefined,
+  })
 
   let title = "Starting ARDY Mini"
   let description =
@@ -470,6 +484,20 @@ function ModelStartupDialog({
           <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription>
             {description}
+            {showModelNotice ? (
+              <>
+                {" Built with Meta Llama 3. By continuing, you acknowledge the "}
+                <a
+                  href={modelTermsUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  model terms and intended-use limits
+                </a>{" "}
+                that apply. © 2026 intsuc ·{" "}
+                <a href="mailto:i@intsuc.dev">i@intsuc.dev</a>
+              </>
+            ) : null}
           </AlertDialogDescription>
         </AlertDialogHeader>
         {downloading ? (

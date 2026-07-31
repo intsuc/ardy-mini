@@ -51,6 +51,10 @@ import {
 import { PROMPT_EXAMPLE_EVENT } from "./prompt-examples";
 import { yieldToMainThread } from "./yield-to-main";
 import {
+  resolveHostedModelFamilyBaseUrl,
+  staticSpaceVariable,
+} from "./deployment-config";
+import {
   clearModelCacheAction,
   generationActionsControl,
   modelDownloadAction,
@@ -258,13 +262,11 @@ function configuredModelFamilyBaseUrl(): string | null {
       globalThis.location.href,
     ).href;
   }
-  const configured = import.meta.env.VITE_MODEL_BASE_URL?.trim();
-  return configured
-    ? new URL(
-        configured.endsWith("/") ? configured : `${configured}/`,
-        globalThis.location.href,
-      ).href
-    : null;
+  return resolveHostedModelFamilyBaseUrl({
+    buildValue: import.meta.env.VITE_MODEL_BASE_URL,
+    pageUrl: globalThis.location.href,
+    spaceValue: staticSpaceVariable("ARDY_MODEL_BASE_URL") ?? undefined,
+  });
 }
 
 export function isVrmFile(file: File): boolean {
@@ -2219,7 +2221,7 @@ export function bootstrap(): () => void {
     const familyBaseUrl = configuredModelFamilyBaseUrl();
     if (!familyBaseUrl) {
       throw new Error(
-        "Set VITE_MODEL_BASE_URL to an immutable hosted model-family directory for production.",
+        "Set ARDY_MODEL_BASE_URL as a Static Space variable or VITE_MODEL_BASE_URL at build time to an immutable hosted model-family directory.",
       );
     }
     if (!modelVariant) {

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const expectedVersion = "1.27.0";
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
-const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
+const monorepoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const ortRoot = fileURLToPath(new URL("../node_modules/onnxruntime-web/", import.meta.url));
 const ortDist = fileURLToPath(new URL("../node_modules/onnxruntime-web/dist/", import.meta.url));
 const tokenizerRoot = fileURLToPath(
@@ -19,6 +19,25 @@ const threeRoot = fileURLToPath(new URL("../node_modules/three/", import.meta.ur
 const destination = fileURLToPath(new URL("../public/ort/", import.meta.url));
 const noticeDestination = fileURLToPath(new URL("../public/notices/", import.meta.url));
 const packageMetadata = JSON.parse(await readFile(`${ortRoot}package.json`, "utf8"));
+
+async function sourceDistributionRoot() {
+  for (const candidate of [packageRoot, monorepoRoot]) {
+    try {
+      await access(`${candidate}LICENSE`);
+      await access(`${candidate}NOTICE`);
+      await access(`${candidate}ATTRIBUTIONS.MD`);
+      await access(`${candidate}THIRD_PARTY_MODELS_AND_DATA.md`);
+      return candidate;
+    } catch {
+      // Try the monorepo layout after the standalone Static Space layout.
+    }
+  }
+  throw new Error(
+    "Source distribution notices are missing. Expected them beside package.json or in the repository root.",
+  );
+}
+
+const repositoryRoot = await sourceDistributionRoot();
 
 if (packageMetadata.version !== expectedVersion) {
   throw new Error(
