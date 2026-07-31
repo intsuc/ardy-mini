@@ -9,7 +9,7 @@ directory.
 The `v1.0.0` production deployment is pinned to:
 
 - model commit
-  [`2a169e1af6c089354315406f7a0dbd8fcb0d62ee`](https://huggingface.co/intsuc/Llama-3-ARDY-Mini-Core40-Browser/tree/2a169e1af6c089354315406f7a0dbd8fcb0d62ee);
+  [`1c21362effeecec0454bfc0d818661525ae6b387`](https://huggingface.co/intsuc/Llama-3-ARDY-Mini-Core40-Browser/tree/1c21362effeecec0454bfc0d818661525ae6b387);
 - Static Space commit
   [`92ede2abd2de5b1bdb7a4961f4de4914ece683cb`](https://huggingface.co/spaces/intsuc/ardy-mini/tree/92ede2abd2de5b1bdb7a4961f4de4914ece683cb); and
 - the public [ARDY Mini app](https://huggingface.co/spaces/intsuc/ardy-mini).
