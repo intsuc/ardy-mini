@@ -79,10 +79,6 @@ body {
   min-height: 0;
 }
 
-.workspace[data-ready="false"] {
-  visibility: hidden;
-}
-
 .viewport-panel {
   display: grid;
   min-width: 0;

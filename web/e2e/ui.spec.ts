@@ -417,11 +417,14 @@ test("blocks model loading with a non-dismissible dialog when WebGPU is unavaila
     }),
   ).toHaveCount(0);
   await expect(page.locator("#confirm-model-download")).toHaveCount(0);
-  await expect(page.locator("main.workspace")).toHaveAttribute(
+  const workspace = page.locator("main.workspace");
+  await expect(workspace).toHaveAttribute(
     "data-ready",
     "false",
   );
-  await expect(page.locator("main.workspace")).toHaveAttribute("inert", "");
+  await expect(workspace).toBeVisible();
+  await expect(workspace).toHaveAttribute("inert", "");
+  await expect(workspace).toHaveAttribute("aria-hidden", "true");
 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeVisible();
@@ -459,11 +462,26 @@ test("gates startup through model download and manages the browser cache", async
       exact: true,
     }),
   ).toHaveCount(0);
-  await expect(page.locator("main.workspace")).toHaveAttribute(
+  const workspace = page.locator("main.workspace");
+  await expect(workspace).toHaveAttribute(
     "data-ready",
     "false",
   );
-  await expect(page.locator("main.workspace")).toHaveAttribute("inert", "");
+  await expect(workspace).toBeVisible();
+  await expect(workspace).toHaveAttribute("inert", "");
+  await expect(workspace).toHaveAttribute("aria-hidden", "true");
+  const startupOverlay = page.locator(
+    '[data-slot="alert-dialog-overlay"]',
+  );
+  await expect(startupOverlay).toBeVisible();
+  await expect(startupOverlay).toHaveClass(/bg-black\/10/);
+  await expect
+    .poll(() =>
+      startupOverlay.evaluate(
+        (element) => getComputedStyle(element).backdropFilter,
+      ),
+    )
+    .toContain("blur(");
   expect(
     modelRequests.filter((path) => !path.endsWith("model.json.gz")),
   ).toEqual([]);
