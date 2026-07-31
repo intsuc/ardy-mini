@@ -1,6 +1,6 @@
 <!-- Modified by intsuc in 2026: added distilled MiniLM text-encoder support. -->
 
-# ARDY Mini: Distilled text conditioning for ARDY
+# ARDY Mini: Interactive text-to-motion in your browser
 
 > [!IMPORTANT]
 > This is an unofficial derivative of

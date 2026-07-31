@@ -1,15 +1,15 @@
 ---
 title: ARDY Mini
-emoji: 🕺
+emoji: 🚶
 colorFrom: gray
 colorTo: gray
 sdk: static
 app_file: index.html
-pinned: false
+pinned: true
 license: apache-2.0
 fullWidth: true
 header: mini
-short_description: Browser-native text-to-motion generation with WebGPU
+short_description: Turn text into motion interactively in your browser
 models:
   - intsuc/Llama-3-ARDY-Mini-Core40-Browser
 datasets:
